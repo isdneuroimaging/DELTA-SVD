@@ -1,183 +1,162 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob
+import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing
 from os.path import join, exists, dirname, basename
+from shutil import copy2, rmtree
+from pathlib import Path
+
+
+def detect_physical_cores():
+    """Number of *physical* CPU cores this process may use, honouring CPU affinity
+    (an HPC scheduler's cpuset). Hyperthreads are deliberately not counted: ANTs
+    registration gains little from SMT. Falls back to the affinity size."""
+    try:
+        allowed = os.sched_getaffinity(0)          # logical CPUs this process may use
+    except AttributeError:                         # non-Linux platforms
+        allowed = set(range(os.cpu_count() or 1))
+    try:
+        cores = set()
+        cur = {}
+        with open('/proc/cpuinfo') as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:                       # blank line ends one processor block
+                    if cur.get('processor') in allowed and 'physical id' in cur and 'core id' in cur:
+                        cores.add((cur['physical id'], cur['core id']))
+                    cur = {}
+                    continue
+                key, _, val = line.partition(':')
+                key, val = key.strip(), val.strip()
+                if key == 'processor':
+                    cur['processor'] = int(val)
+                elif key in ('physical id', 'core id'):
+                    cur[key] = int(val)
+        if cores:
+            return len(cores)
+    except (OSError, ValueError):
+        pass
+    return max(1, len(allowed))                     # fallback: assume no SMT
+
+
+def resolve_thread_budget(argv):
+    """Core budget from --threads, auto-detected when absent or 'auto'. Kept
+    dependency-free so it can run *before* numpy/OpenBLAS are imported."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--threads', default=None)
+    ns, _ = pre.parse_known_args(argv)
+    val = ns.threads
+    if val is None or str(val).strip().lower() == 'auto':
+        return detect_physical_cores()
+    try:
+        return max(1, int(val))
+    except ValueError:
+        return detect_physical_cores()              # the full parser reports the error later
+
+
+# ITK threads per registration job. This is the one threading quantity that
+# reaches the metric values: ITK sums the registration metric and its gradient
+# per thread, so a different count sums them in a different order and the last
+# bits move. The skeleton amplifies that from there -- 1 thread instead of 12
+# shifts delta-PSMD by ~23% on the reference subject. 12 is the value the method
+# was validated at; see CONTRIBUTING.md before changing it.
+ITK_THREADS_DEFAULT = 12
+
+# How far the template step may oversubscribe the core budget, as a fraction:
+# 3/2 = 1.5 threads per core. Measured faster than an exactly-fitting plan, and
+# without numerical consequence, so this is purely a throughput choice.
+OVERSUBSCRIBE_NUM, OVERSUBSCRIBE_DEN = 3, 2
+
+
+def resolve_itk_threads(argv):
+    """ITK threads per registration job from --itkThreads. Resolved alongside the
+    core budget because it is exported into the environment below."""
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--itkThreads', default=None)
+    ns, _ = pre.parse_known_args(argv)
+    if ns.itkThreads is None:
+        return ITK_THREADS_DEFAULT
+    try:
+        return max(1, int(ns.itkThreads))
+    except ValueError:
+        return ITK_THREADS_DEFAULT                  # the full parser reports the error later
+
+
+BLAS_THREADS = 1
+
+# Pin the BLAS/OpenMP thread pools *before* importing numpy/dipy: OpenBLAS reads
+# these when first loaded, and setting them later is ignored. Fixed at 1 rather
+# than at the core budget, so no thread count anywhere in the numerics can vary
+# with the machine: the per-voxel fits are parallelised by process instead (see
+# fit_voxelwise) and their matrices are far too small to thread anyway, so
+# nothing is given up. Assigned rather than setdefault(), for the reason given
+# for the ITK count below.
+CORE_BUDGET = resolve_thread_budget(sys.argv[1:])
+for _var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
+             'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
+    os.environ[_var] = str(BLAS_THREADS)
+
+# Every ANTs call inherits this, not only the template step: antsApplyTransforms
+# would otherwise fall back to the hardware concurrency -- or, on a Grid Engine
+# cluster, to NSLOTS, which ITK also consults -- putting a metric-affecting
+# thread count outside this pipeline's control. Assigned rather than
+# setdefault(): a value forwarded in from the host (Apptainer passes the whole
+# environment through by default) must not be able to change the results.
+ITK_THREADS = resolve_itk_threads(sys.argv[1:])
+os.environ['ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS'] = str(ITK_THREADS)
+
+
+#--- CPU features each pinned OpenBLAS kernel family needs to execute at all
+CORETYPE_REQUIRED_FLAGS = {'haswell': ('avx2', 'fma'), 'zen': ('avx2', 'fma'),
+                           'skylakex': ('avx512f',), 'sandybridge': ('avx',)}
+
+
+def check_cpu_supports_coretype(coretype=None, cpuinfo='/proc/cpuinfo'):
+    """Fail early, and legibly, if the CPU cannot run the pinned BLAS kernel.
+
+    The image pins OPENBLAS_CORETYPE so the numerics cannot vary with the CPU
+    (see the Dockerfile). Asking OpenBLAS for a kernel the hardware lacks does
+    not fall back -- it dies with SIGILL and no message -- so the requirement is
+    checked here instead. Returns the missing flags, empty when all is well."""
+    coretype = os.environ.get('OPENBLAS_CORETYPE') if coretype is None else coretype
+    required = CORETYPE_REQUIRED_FLAGS.get(str(coretype).strip().lower(), ())
+    if not required:
+        return ()                                  # unpinned, or a family we make no claim about
+    try:
+        with open(cpuinfo) as fh:
+            flags = set(fh.read().split())
+    except OSError:
+        return ()                                  # not Linux: leave it to OpenBLAS
+    return tuple(f for f in required if f not in flags)
+
+
+_missing = check_cpu_supports_coretype()
+if _missing:
+    sys.exit(f"ERROR: this CPU does not support the instructions DELTA-SVD needs.\n"
+             f"  Missing: {', '.join(_missing)}\n"
+             f"  DELTA-SVD requires an x86-64-v3 CPU (AVX2 and FMA): Intel Haswell (2013) or\n"
+             f"  newer, AMD Zen (2017) or newer. Note that Atom, Celeron and Pentium parts\n"
+             f"  often lack these regardless of age.\n"
+             f"  The BLAS kernel is pinned so results cannot vary between machines; running\n"
+             f"  without it would silently produce different metrics.")
+
 import nibabel as nib
 import numpy as np
 import pandas as pd
-# import string
-from shutil import copy2, rmtree
-from pathlib import Path
 
 from dipy.io import read_bvals_bvecs
 from dipy.core.gradients import gradient_table
 import dipy.reconst.dti as dti
 from dipy.reconst.dti import (design_matrix, decompose_tensor,
                            from_lower_triangular)
-from dipy.core.ndindex import ndindex
 
 from scipy.ndimage import gaussian_filter
 
+from markvcid_fw_mrn import wls_fit_tensor_fw, wls_fit_dti
+from delta_svd_version import __version__
+
 ###########################################################################
-# Functions for tensor fitting and free water correction
-
-# Constant declarations
-def wls_fit_tensor_fw(W, data, md_data,S0, Diso=3e-3, mask=None, 
-                min_signal=1.0e-6, piterations=2, mdreg=2.0e-3, MDm = 0.0006):
-
-    fw_params = np.zeros(data.shape[:-1] + (9,))
-
-
-    # Prepare mask
-    if mask is None:
-        mask = np.ones(data.shape[:-1], dtype=bool)
-    else:
-        if mask.shape != data.shape[:-1]:
-            raise ValueError("Mask is not the same shape as data.")
-        mask = np.array(mask, dtype=bool, copy=False)
-
-
-    index = ndindex(mask.shape)
-    for v in index:
-        if mask[v]:
-            params = wls_iter_fw(W, data, md_data, S0, v, min_signal=min_signal,
-                        Diso=3e-3, piterations=piterations, mdreg=mdreg, MDm = MDm)
-            fw_params[v] = params
-               
-    return fw_params
-    
-    
-def wls_iter_fw(W, data, md_data, S0 , v, Diso=3e-3, mdreg=2.0e-3,
-             min_signal=1.0e-6, piterations=2, MDm = 0.0006):
-
-    MDm1 = MDm
-
-    sig = data[v]
-    MD = md_data[v]
-    dmatrix = W
-
-    if (MD < mdreg):
-        
-        SS = S0[v]
-        
-        W = dmatrix
-    
-        # Define weights
-        S2 = np.diag(sig**2)
-    
-        # Defining matrix to solve fwDTI wls solution
-        WTS2 = np.dot(W.T, S2)
-        inv_WT_S2_W = np.linalg.pinv(np.dot(WTS2, W))
-        invWTS2W_WTS2 = np.dot(inv_WT_S2_W, WTS2)
-    
-        # Process voxel if it has significant signal from tissue
-        if np.mean(sig) > min_signal and SS > min_signal:
- 
-            fwsig = np.exp(np.dot(dmatrix,
-                                  np.array([Diso, 0, Diso, 0, 0, Diso, 0])))
-    
-            df = 1  # initialize precision
-            flow = 0  # lower f evaluated
-            fhig = 1  # higher f evaluated
-            ns = 21  # initial number of samples per iteration
-            for p in range(piterations):
-                df = df * 0.1
-                fs = np.linspace(flow, fhig, num=ns)  # sampling f
-                fs[ns-1] = 0.98
-    
-                SFW = np.array([fwsig, ]*ns)  # repeat contributions for all values
-                FS, SI = np.meshgrid(fs, sig)
-                SA = SI - FS*SS*SFW.T
-
-                SA[SA <= 0] = min_signal
-                y = np.log(SA / (1-FS))
-                all_new_params = np.dot(invWTS2W_WTS2, y)
-                # Select params for lower F2
-                SIpred = (1-FS)*np.exp(np.dot(W, all_new_params)) + FS*SS*SFW.T
-                F2 = np.sum(np.square(SI - SIpred), axis=0)
-                evals, evecs =decompose_tensor(from_lower_triangular(all_new_params.T))
- 
-                MD2 = dti.mean_diffusivity(evals)
-                FA2 = dti.fractional_anisotropy(evals)
-                if ( p == 0):
-                    MDa = MD2[0]
-
-                if (MD > MDm1):
-                    Mind1 = np.argmin(np.abs(MD2 - MDm1))
-                    Mind2 = np.argmin(np.abs(FA2 - 3.0*FA2[0]))              
-                    Mind1 = np.min([Mind1,Mind2])
-                else:
-                    MDm2 = 0.00042*MDa/MDm1
-                    Mind1 = np.argmin(np.abs(MD2 - MDm2))
-                    Mind2 = np.argmin(np.abs(FA2 - 3.0*FA2[0]))              
-                    Mind1 = np.min([Mind1,Mind2])                    
-                    
-                    
-                F2S1 =  F2[0] - F2[Mind1] 
-
-                params1 = all_new_params[:, Mind1]                    
-                f = fs[Mind1]  # Updated f
-                flow = max([f - df,0])  # refining precision
-                fhig = min([f + df, 0.98])
-
-            fw_params = np.concatenate((params1,np.array([f]), np.array([F2S1])), axis=0)
-
-        else:
-            fw_params = np.zeros(9)
-    else:
-        fw_params = np.zeros(9)
-        fw_params[7] = 1.0
-        
-    return fw_params
-
-
-def wls_fit_dti(W, data, mask=None, min_signal=1.0e-6):
-
-    fw_params = np.zeros(data.shape[:-1] + (9,))
-
-
-    # Prepare mask
-    if mask is None:
-        mask = np.ones(data.shape[:-1], dtype=bool)
-    else:
-        if mask.shape != data.shape[:-1]:
-            raise ValueError("Mask is not the same shape as data.")
-        mask = np.array(mask, dtype=bool, copy=False)
-
-
-    index = ndindex(mask.shape)
-    for v in index:
-        if mask[v]:
-            params = wls_iter_dti(W, data, v, min_signal=min_signal)
-            fw_params[v] = params
-                
-    return fw_params
-
-
-def wls_iter_dti(W, data , v, min_signal=1.0e-6):
-    
-    sig = data[v]
-    
-    # Define weights
-    S2 = np.diag(sig**2)
-    SI = sig.copy()
- 
-    # solve fwDTI wls solution
-    WTS2 = np.dot(W.T, S2)
-    inv_WT_S2_W = np.linalg.pinv(np.dot(WTS2, W))
-    invWTS2W_WTS2 = np.dot(inv_WT_S2_W, WTS2)
-    
-    SI[SI <= 0] = min_signal
-    y = np.log(SI)
-    params = np.dot(invWTS2W_WTS2, y)
-    SIpred = np.exp(np.dot(W, params))
-    
-    F2 = np.sum(np.square(SI - SIpred), axis=0)  
-    dti_params = np.concatenate((params,np.array([0]), np.array([F2])), axis=0)
-    
-    return dti_params
-    
+# Functions for reading/writing bval/bvec files
 
 def read_bval_or_bvec(fname):
 
@@ -224,7 +203,6 @@ def filter_b_values(fn_data = 'data.nii.gz',
                 out_dir = None,
                 bRange = [800,1200]):
     
-    # Load the dti data
     print("Filtering DWI data according to b-values:")
     print(f"Accepted are b-values close to Zero (b-value <= 5) and in the range: {bRange}")
     
@@ -271,7 +249,10 @@ def filter_b_values(fn_data = 'data.nii.gz',
         fn_data = join(out_dir, basename(fn_data))
         write_bval_or_bvec(bvals, fn_bval)
         write_bval_or_bvec(bvecs, fn_bvec)
-        save_nifti(fn_data, img, nii.affine, nii.header)
+        # dtype='float32' explicit: a lossless round-trip for the float32 input the
+        # pipeline expects (do not change -- float64 would alter results for
+        # int16-with-scaling input)
+        save_nifti(fn_data, img, nii.affine, nii.header, dtype='float32')
 
         print('New data saved to:')
         print(fn_bval)
@@ -282,17 +263,72 @@ def filter_b_values(fn_data = 'data.nii.gz',
     return fn_data, fn_bval, fn_bvec
 
 
-def free_water_correction(fn_data = 'data.nii.gz', 
-                fn_mask = 'brain_mask.nii.gz', 
-                fn_bval = 'file.bval', 
+###########################################################################
+# Parallel driver for the vendored per-voxel fits
+
+# markvcid_fw_mrn.py is vendored verbatim and stays that way. Both fits there
+# loop over independent voxels, so fitting slabs of the volume in worker
+# processes leaves every voxel's arithmetic untouched and the result is
+# bit-identical to the serial loop - required, because a 1-ULP difference in the
+# fitted FA can move delta-PSMD by percent (see conda-explicit-linux-64.txt).
+
+# Capped independently of the core budget: 16 workers already take the fit from
+# ~2 min per timepoint to ~10-15 s, and slabbing along axis 0 cannot beat the
+# single most expensive slice anyway (~52x).
+FW_MAX_WORKERS = 16
+
+_FW_SHARED = {}
+
+
+def _fw_pool_init(payload):
+    _FW_SHARED.update(payload)
+
+
+def _fw_fit_slab(bounds):
+    lo, hi = bounds
+    kwargs = dict(_FW_SHARED['kwargs'])
+    for name in _FW_SHARED['slabbed']:
+        kwargs[name] = _FW_SHARED[name][lo:hi]
+    return lo, hi, _FW_SHARED['fn'](**kwargs)
+
+
+def fit_voxelwise(fn, data, volumes, kwargs, nproc):
+    """Run one of the vendored per-voxel fits, spreading slabs of the volume
+    along axis 0 over 'nproc' worker processes. 'volumes' maps a keyword name to
+    a volume that has to be sliced alongside 'data'; 'kwargs' is passed through
+    unsliced. Returns what the serial call returns, bit for bit."""
+
+    volumes = {'data': data, **volumes}
+    if nproc <= 1:
+        return fn(**volumes, **kwargs)
+
+    # Four slabs per worker, so dynamic scheduling can absorb the uneven masked-
+    # voxel count per slice. Slabs are contiguous, hence no more than axis 0 is long.
+    n0 = data.shape[0]
+    edges = np.linspace(0, n0, min(n0, nproc * 4) + 1).round().astype(int)
+    jobs = [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:]) if b > a]
+
+    out = np.zeros(data.shape[:-1] + (9,))
+    payload = {'fn': fn, 'kwargs': kwargs, 'slabbed': tuple(volumes), **volumes}
+    # 'fork' explicitly: workers inherit the volumes copy-on-write instead of
+    # pickling them, and it stops being the Linux default in Python 3.14.
+    ctx = multiprocessing.get_context('fork')
+    with ctx.Pool(nproc, initializer=_fw_pool_init, initargs=(payload,)) as pool:
+        for lo, hi, params in pool.imap_unordered(_fw_fit_slab, jobs, chunksize=1):
+            out[lo:hi] = params        # indexed, so completion order is irrelevant
+    return out
+
+
+def free_water_correction(fn_data = 'data.nii.gz',
+                fn_mask = 'brain_mask.nii.gz',
+                fn_bval = 'file.bval',
                 fn_bvec = 'file.bvec',
                 out_dir = None,
-                smooth=True):
-    
-    # Define some parameters
+                smooth=True,
+                nproc=1):
+
     mdreg=2.0e-3
  
-    # Load the dti data
     print('Reading data from:')
     print(fn_bval)
     print(fn_bvec)
@@ -300,16 +336,17 @@ def free_water_correction(fn_data = 'data.nii.gz',
     nii = nib.load(fn_data)
     niim = nib.load(fn_mask)
     data = nii.get_fdata()
-    mask = niim.get_fdata()
+    # Same conversion the vendored fits do internally, just done before the call:
+    # from numpy 2.0 their np.array(mask, dtype=bool, copy=False) raises on a
+    # float mask, because copy=False came to mean "never copy".
+    mask = niim.get_fdata().astype(bool)
     bvals, bvecs = read_bvals_bvecs(fn_bval, fn_bvec)
     print(f'bvals = \n{bvals}\n')
 
-    # Construct the gradient table
     gtab = gradient_table(bvals, bvecs)
     
     W = design_matrix(gtab)
     
-    # smooth the data
     if smooth:
         print('Smoothing DWI data')
         fwhm = 1.25
@@ -318,16 +355,15 @@ def free_water_correction(fn_data = 'data.nii.gz',
             data[..., v] = gaussian_filter(data[..., v], sigma=gauss_std)
     
     
-    # weighted least squares fit, not accounting for free water
-    print('Fitting single tensor model, not accounting for free water')
-    dti_params = wls_fit_dti(W, data, mask=mask, min_signal=1.0e-6)
-    evals, evecs = decompose_tensor(from_lower_triangular(dti_params))
-    FA0 = dti.fractional_anisotropy(evals)   
+    print(f'Fitting single tensor model, not accounting for free water ({nproc} worker(s))')
+    dti_params = fit_voxelwise(wls_fit_dti, data, {'mask': mask},
+                               {'W': W, 'min_signal': 1.0e-6}, nproc)
+    evals, _ = decompose_tensor(from_lower_triangular(dti_params))
+    FA0 = dti.fractional_anisotropy(evals)
     MD0 = dti.mean_diffusivity(evals)
     save_nifti(join(out_dir, 'wls_dti_FA.nii.gz'), FA0, nii.affine, nii.header)
     save_nifti(join(out_dir, 'wls_dti_MD.nii.gz'), MD0, nii.affine, nii.header)
     
-    # two-tensor model fitting
     print('Fitting two-tensor model, for tissue and free water')
     S0 = np.mean(data[..., gtab.b0s_mask], axis=-1)
     pCSF = (MD0 > 0.002)
@@ -336,10 +372,12 @@ def free_water_correction(fn_data = 'data.nii.gz',
     mdreg = np.min([mdreg,mdreg1])
     MDm = 0.0006
     
-    dti_params1 = wls_fit_tensor_fw(W, data, MD0, S0, Diso=3e-3, mask=mask, 
-                            min_signal=1.0e-6, piterations=2, mdreg=mdreg, MDm = MDm)
-    evals, evecs = decompose_tensor(from_lower_triangular(dti_params1))
-    FA1 = dti.fractional_anisotropy(evals)   
+    dti_params1 = fit_voxelwise(wls_fit_tensor_fw, data,
+                                {'md_data': MD0, 'S0': S0, 'mask': mask},
+                                {'W': W, 'Diso': 3e-3, 'min_signal': 1.0e-6,
+                                 'piterations': 2, 'mdreg': mdreg, 'MDm': MDm}, nproc)
+    evals, _ = decompose_tensor(from_lower_triangular(dti_params1))
+    FA1 = dti.fractional_anisotropy(evals)
     FW1 = dti_params1[..., 7]
     save_nifti(join(out_dir, 'fwc_wls_dti_FA.nii.gz'), FA1, nii.affine, nii.header)
     save_nifti(join(out_dir, 'wls_dti_FW.nii.gz'), FW1, nii.affine, nii.header)
@@ -349,29 +387,73 @@ def free_water_correction(fn_data = 'data.nii.gz',
     save_nifti(join(out_dir, 'fwc_wls_dti_FA_05.nii.gz'), FA1, nii.affine, nii.header)
 
 
-def create_template(timepoints = [], fnCoreg = [], dirOut = None, nCPU = 2, nThreads = 12, iterations="30x30x8", numRegistrations=3):
+def plan_ants_parallelism(nTP, coreBudget, paraOverride=None, itkThreads=ITK_THREADS_DEFAULT):
+    """Returns (para, itkThreads, control) for the ANTs template step, 'control'
+    being its '-c' argument.
 
-    # copy fwc-FA images for all time-points to the folder for template creation
+    'itkThreads' is handed straight back. It must not depend on the machine or on
+    the timepoint count, because it is the one quantity here that moves the metric
+    values; deriving it from the core budget is what made results differ between
+    machines and between subjects with different numbers of visits.
+
+    Only 'para' is derived, and it is numerically inert -- serial and pexec runs
+    are byte-identical across all 82 intermediates -- so it is free to fill
+    whatever cores happen to be available. A para of 1 must take the serial path:
+    ANTs' pexec aborts on '-j 1' without running anything at all."""
+    coreBudget = max(1, int(coreBudget))
+    nTP = max(1, int(nTP))
+    itkThreads = max(1, int(itkThreads))
+
+    if paraOverride is None:
+        # 'fill' spends the whole budget rather than idling the remainder; 'cap'
+        # holds it back where doing so would oversubscribe beyond the limit above.
+        fill = -(-coreBudget // itkThreads)
+        cap = (OVERSUBSCRIBE_NUM * coreBudget) // (OVERSUBSCRIBE_DEN * itkThreads)
+        para = max(1, min(fill, cap))
+    else:
+        # An explicit override is a deliberate choice and is not clamped to the
+        # budget -- only to the timepoint count, beyond which there is no work
+        # left to run in parallel.
+        para = max(1, int(paraOverride))
+    para = min(para, nTP)
+
+    return para, itkThreads, ("-c 0" if para == 1 else f"-c 2 -j {para}")
+
+
+def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1, paraOverride = None, iterations="30x30x8", numRegistrations=3, itkThreads=ITK_THREADS_DEFAULT):
+
     fnFA = []
     for i,tp in enumerate(timepoints):
         fnFA.append(join(dirOut, basename(tp)+'_fwc_wls_dti_FA_05.nii.gz'))
         copy2(join(tp, 'fwc_wls_dti_FA_05.nii.gz'), fnFA[i])
-    
-    # construct command for template creation
-    cmd = (f"export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS={nThreads}; "
+
+    para, itkThreads, control = plan_ants_parallelism(len(timepoints), coreBudget, paraOverride, itkThreads)
+    mode = 'serial' if para == 1 else 'pexec'
+    perCore = para * itkThreads / coreBudget
+    print(f"Template construction: {len(timepoints)} timepoint(s), core budget {coreBudget} "
+          f"-> {para} parallel registration job(s) x {itkThreads} ITK thread(s) per job ({mode} mode)")
+    print(f"  {para * itkThreads} thread(s) over {coreBudget} core(s) = {perCore:.2f} per core")
+    if perCore > 2:
+        print("  NOTE: the threads outnumber the cores several times over. This affects only the "
+              "runtime, never the results; allocate more cores to bring it down.")
+
+    cmd = (f"export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS={itkThreads}; "
            "export ANTS_RANDOM_SEED=1; "
-           f"antsMultivariateTemplateConstruction2.sh -d 3 -i {numRegistrations} -f 4x2x1 -s 2x1x0vox -q {iterations} -t SyN -m CC "
-           f" -r 1 -z /opt/scripts/FMRIB58_FA_2mm_crop.nii.gz -y 0 -c 2 -j {nCPU} -o {dirOut}/ {' '.join(fnFA)}")
+           f"antsMultivariateTemplateConstruction2.sh -d 3 -i {int(numRegistrations)} -f 4x2x1 -s 2x1x0vox -q {shlex.quote(iterations)} -t SyN -m CC "
+           f" -r 1 -z /opt/scripts/FMRIB58_FA_2mm_crop.nii.gz -y 0 {control} -o {shlex.quote(dirOut + '/')} {' '.join(shlex.quote(f) for f in fnFA)}")
     run_subprocess(cmd, False, 'antsMultivariateTemplateConstruction2.sh')
 
-    # co-register several images for each timepoint to the template
     fnAverage = []
     for iTP, tp in enumerate(timepoints):
         tpB = basename(tp)
         for iFn, fn in enumerate(fnCoreg):
-            fnIn = join(tp, fn) 
+            fnIn = join(tp, fn)
             fnOut = re.sub(r'\.nii(\.gz)?$','_to_template.nii.gz', fnIn)
-            cmd = f"antsApplyTransforms -d 3 --float 1 -i {fnIn}  -o {fnOut} -r {dirOut}/template0.nii.gz -t {dirOut}/{tpB}_fwc_wls_dti_FA_05{iTP}1Warp.nii.gz -t {dirOut}/{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat"
+            ref = join(dirOut, 'template0.nii.gz')
+            warp = join(dirOut, f'{tpB}_fwc_wls_dti_FA_05{iTP}1Warp.nii.gz')
+            affine = join(dirOut, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
+            cmd = (f"antsApplyTransforms -d 3 --float 1 -i {shlex.quote(fnIn)}  -o {shlex.quote(fnOut)} "
+                   f"-r {shlex.quote(ref)} -t {shlex.quote(warp)} -t {shlex.quote(affine)}")
             run_subprocess(cmd, True, 'antsApplyTransforms')
 
             if iFn==0: # iFn==0 corresponds to the FA (by default the fwc-FA), which shall be averaged across timepoints right after this loop
@@ -384,30 +466,36 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, nCPU = 2, nThr
         nii = nib.load(fn)
         img.append(nii.get_fdata())
     img = np.mean(np.stack(img,-1), -1)
+    # 'nii' here is deliberately the loop variable leaked from above: all timepoints
+    # share one affine/header, so any of them will do.
     save_nifti(join(dirOut, 'FA-for-tbss-long.nii.gz'), img, nii.affine, nii.header, 'float32')
     print('Saved mean image to:', join(dirOut, 'FA-for-tbss-long.nii.gz'))
 
 def coreg_merge_masks(timepoints = [], masks = [], label=None, dirTemplate = None, binarise = False):
 
-    # co-register masks
     if any(masks):
         fnMerge = []
         for iTP, tp in enumerate(timepoints):
             tpB = basename(tp)
             if masks[iTP] is not None:
                 fnIn = masks[iTP]
-                ext = '.nii.gz' if fnIn.endswith('.nii.gz') else '.nii'
-                fnOut = join(tp,label+ext)
+                # always '.nii.gz' here: an uncompressed input mask must not be
+                # carried into the temp tree, where every consumer assumes gzip
+                fnOut = join(tp,label+'.nii.gz')
                 if binarise:
                     nii = nib.load(fnIn)
                     img = nii.get_fdata()
                     save_nifti(fnOut, img>0, nii.affine, nii.header, 'uint8')
                 else:
-                    copy2(fnIn, fnOut)
+                    copy_as_nii_gz(fnIn, fnOut)
                 if len(timepoints)>1:
                     fnIn = fnOut
                     fnOut = join(tp, label+'_to_template.nii.gz')
-                    cmd = f"antsApplyTransforms -d 3 --float 1 -i {fnIn}  -o {fnOut} -r {dirTemplate}/template0.nii.gz -t {dirTemplate}/{tpB}_fwc_wls_dti_FA_05{iTP}1Warp.nii.gz -t {dirTemplate}/{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat  -n NearestNeighbor"
+                    ref = join(dirTemplate, 'template0.nii.gz')
+                    warp = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}1Warp.nii.gz')
+                    affine = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
+                    cmd = (f"antsApplyTransforms -d 3 --float 1 -i {shlex.quote(fnIn)}  -o {shlex.quote(fnOut)} "
+                           f"-r {shlex.quote(ref)} -t {shlex.quote(warp)} -t {shlex.quote(affine)}  -n NearestNeighbor")
                     run_subprocess(cmd, True, 'antsApplyTransforms')
                 fnMerge.append(fnOut)
         if len(fnMerge)>1:
@@ -427,20 +515,17 @@ def merge_masks(fnMerge, fnOut):
         img.append(nii.get_fdata())
     img = np.amax(np.stack(img,-1), -1)
     save_nifti(fnOut, img, nii.affine, nii.header, 'uint8')
-    # print('Saved mean image to:', fnOut)
     
     return fnOut
 
 
 def run_tbss(fnameFAt = None, dirTBSS = None):
     
-    #--- Copy the FAt file to TBSS folder
     copy2(fnameFAt, join(dirTBSS, basename(fnameFAt)))
 
-    #--- TBSS on FA
     dirBase = os.getcwd()
     os.chdir(dirTBSS)
-    cmd = f'tbss_1_preproc {basename(fnameFAt)}'
+    cmd = f'tbss_1_preproc {shlex.quote(basename(fnameFAt))}'
     run_subprocess(cmd, True, 'tbss_1_preproc')
     cmd = 'tbss_2_reg -T'
     run_subprocess(cmd, True, 'tbss_2_reg')
@@ -453,35 +538,30 @@ def run_tbss(fnameFAt = None, dirTBSS = None):
     
 def batch_tbss_non_fa(dirTP = None, dirTBSS = None, fnNonFA = []):
     
-    # get name of FA used for projection on skeletion
     fnameFAt = glob.glob(join(dirTBSS, 'FA', '*_FA.nii.gz'))
     fnameFAt = re.sub(r'_FA\.nii\.gz','.nii.gz',basename(fnameFAt[0]))
-    # print(fnameFAt)
 
     tpB = basename(dirTP)
 
-    for modality, fn in fnNonFA.items():        
-        run_tbss_non_fa(join(dirTP,fn), tpB+'_'+modality, dirTBSS, fnameFAt)
+    for mapName, fn in fnNonFA.items():
+        run_tbss_non_fa(join(dirTP,fn), tpB+'_'+mapName, dirTBSS, fnameFAt)
 
 
-def run_tbss_non_fa(fn = None, modality=None, dirTBSS = None, fnameFAt = None):
+def run_tbss_non_fa(fn = None, label=None, dirTBSS = None, fnameFAt = None):
     
     # get name of FA used for projection onto skeleton
     if fnameFAt is None:
         fnameFAt = glob.glob(join(dirTBSS, 'FA', '*_FA.nii.gz'))
         fnameFAt = re.sub(r'_FA\.nii\.gz','.nii.gz',basename(fnameFAt[0]))
-        # print(fnameFAt)
     
     dirBase = os.getcwd()
 
-    # copy the modality in template space to a dedicated non-FA folder
-    dirTBSS_nonFA = join(dirTBSS, modality)
+    dirTBSS_nonFA = join(dirTBSS, label)
     Path(dirTBSS_nonFA).mkdir(exist_ok=True)
-    copy2(fn, join(dirTBSS_nonFA, fnameFAt))
+    copy_as_nii_gz(fn, join(dirTBSS_nonFA, fnameFAt))
 
-    # run non-FA
     os.chdir(dirTBSS)
-    cmd = f"tbss_non_FA {modality}"
+    cmd = f"tbss_non_FA {shlex.quote(label)}"
     run_subprocess(cmd, True, 'tbss_non_FA')
     os.chdir(dirBase)
 
@@ -490,43 +570,39 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
     
     tpAll = [basename(tp) for tp in dirTP]
     
-    # load the generic skeleton mask (standardised PSMD-mask)
     skelBase = re.sub(r'\.nii(\.gz)?$','',basename(skelMask))
     niiMask = nib.load(skelMask)
-    mask = niiMask.get_fdata()
+    mask = binarise_mask(niiMask.get_fdata(), 'skeleton mask', skelMask)
 
-    # count voxels
     voxels = [np.count_nonzero(mask)]
     timept = ['all'] if len(dirTP)>1 else [tpAll[0]]
     region = ['total']
 
 
-    # find for each timepoint the skeleton voxels being in the generic skeleton-mask and in the skeletonized brain mask.
-    # voxels in the skeletonized brain mask with 0<value<1 have to be removed as well, because these values result from interpolation of foreground with background during transformations.
+    # Intersect the skeleton mask with each timepoint's skeletonised brain mask.
+    # Values 0<v<1 there are foreground blended with background by the transforms
+    # and have to go too, hence the threshold at 1 (see binarise_mask).
     allMasksAdjusted = []
     for tp in tpAll:
-        # load skeleton for brainmask at that timepoint
         nii = nib.load(join(dirTBSS, 'stats', 'all_'+tp+'_bmask_skeletonised.nii.gz'))
         bmask = nii.get_fdata()
-        # find intersection of skeleton voxels present in this timepoint's skeletonized brain mask and present in the generic skeleton-mask
         tpMaskAdjusted = mask.copy()
         tpMaskAdjusted[bmask<1] = 0
         allMasksAdjusted.append(tpMaskAdjusted)
         
 
-    # find intersection of adjusted masks across time-points
     if len(dirTP)>1:
         maskIntersection = np.all(np.stack(allMasksAdjusted, -1), -1)
         timeptT = 'all'
     else:
+        # 'tpMaskAdjusted' is the loop variable leaked from above; safe because
+        # this branch implies the loop ran exactly once.
         maskIntersection = tpMaskAdjusted
         timeptT = tpAll[0]
 
-    # save intersection mask (i.e. intersection (across timepoints) of the interesection masks resulting for each timepoint's brain mask with the generic skeleton mask)
     skelSuffix = 'intersection'
     save_nifti(join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'.nii.gz'), maskIntersection, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
 
-    # count voxels
     voxelsIntersection = np.count_nonzero(maskIntersection)
     voxels.append(voxelsIntersection)
     timept.append(timeptT)
@@ -539,7 +615,6 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
             timept.append(tp)
             region.append('set_difference')
     
-    # load exclusion mask
     fnEmask = join(dirTBSS, 'stats', 'all_E-MASK_skeletonised.nii.gz')
     if exists(fnEmask):
         niiEmask = nib.load(fnEmask)
@@ -549,12 +624,11 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         maskIntersection[imgEmask>0] = 0
         imgEmask[maskIntersection>0] = 1 #--- only needed for QC: combine intersection mask (label=1) and exclusion mask (label=2)
 
-        # save skeleton with excluded area inserted as label-2 (only needed as QC image later)
+        # label-2 version is only used for the QC image
         skelSuffixL2 = skelSuffix + '_Emask-as-label2'
         pnameSkelIntersExcLabeled = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixL2+'.nii.gz')
         save_nifti(pnameSkelIntersExcLabeled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
 
-        # save skeleton without the excluded area
         skelSuffix = skelSuffix + '_Emask'
         pnameSkelIntersExc = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'.nii.gz')
         save_nifti(pnameSkelIntersExc, maskIntersection, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
@@ -563,7 +637,6 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timept.append(timeptT)
         region.append(skelSuffix)
 
-    # load ROI masks provided for patient time-points and merged
     fnROI = sorted(glob.glob(join(dirTBSS, 'stats', 'all_ROI-*_skeletonised.nii.gz')))
     for iFn,fn in enumerate(fnROI):
         roi = re.sub(r'.*all_ROI-([0-9]*)_skeletonised.nii.gz','\\1',fn)
@@ -574,12 +647,10 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         imgROI[imgROI>0.05] = 1
         imgROI[imgROI<1] = 0
 
-        #- save
         skelSuffixT = skelSuffix + f'_Rmask-{roi}'
         pnameROI = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixT+'.nii.gz')
         save_nifti(pnameROI, imgROI, niiMask.affine, niiMask.header, dtype='uint8')
 
-        #- count voxels
         voxels.append(np.count_nonzero(imgROI))
         timept.append(timeptT)
         region.append(skelSuffixT)
@@ -589,15 +660,15 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         if iFn==len(fnROI)-1 and np.count_nonzero(imgROImerged)>0: 
             pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_Rmask.nii.gz')
             save_nifti(pnameROImerged, imgROImerged, niiROI.affine, niiROI.header, dtype='uint8')
-    # create an additional, complementary ROI for the background
+    # complementary ROI for the background
     if len(fnROI)>0:
         imgROI = maskIntersection.copy()
         imgROI[imgROImerged>0] = 0
-        #- save
-        skelSuffixT = skelSuffix + f'_Rmask-00'
+        skelSuffixT = skelSuffix + '_Rmask-00'
         pnameROI = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixT+'.nii.gz')
         save_nifti(pnameROI, imgROI, niiMask.affine, niiMask.header, dtype='uint8')
-        #- count voxels
+        # Inserts the background row just before the per-ROI rows appended above,
+        # keeping these three parallel lists in sync by index arithmetic.
         voxels.insert(len(voxels)-len(fnROI), np.count_nonzero(imgROI))
         timept.insert(len(timept)-len(fnROI), timeptT)
         region.insert(len(region)-len(fnROI), skelSuffixT)
@@ -605,58 +676,52 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
     
 
 
-    # load ROI mask in FMRIB FA (MNI) space
     if fnROI_MNI is not None:
         niiROI_MNI = nib.load(fnROI_MNI)
         imgROI_MNI = niiROI_MNI.get_fdata()
-        #- extract unique ROI labels (multiple ROI can be provided in the same file)
+        #- one file may carry several ROI labels
         uROI = np.unique(imgROI_MNI.astype('uint8'))
-        # uROI = uROI[uROI>0] #--- commented out, to include also the background (on the skeleton) as a ROI
+        # label 0 is deliberately kept, so the background is analysed as a ROI too
         for iRoi,roi in enumerate(uROI):
             imgROI_MNI_roi = maskIntersection.copy()
             imgROI_MNI_roi[imgROI_MNI!=roi] = 0
             
-            #- save
-            # skelSuffixT = skelSuffix + f'_mni-roi-{roi:02d}'
             skelSuffixT = skelSuffix + f'_RmaskMNI-{roi:02d}'
             pnameROI = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixT+'.nii.gz')
             save_nifti(pnameROI, imgROI_MNI_roi, niiMask.affine, niiMask.header, dtype='uint8')
 
-            #- count voxels
             voxels.append(np.count_nonzero(imgROI_MNI_roi))
             timept.append(timeptT)
             region.append(skelSuffixT)            
 
-            #- merge ROIs after intersecting them with the final skeleton; hence, this is differnt from the input "fnROI_MNI" file
+            #- merged after intersecting with the skeleton, so this differs from the input
             if iRoi==0: imgROImerged = np.zeros(imgROI_MNI.shape, 'uint8')
             if roi>0:
                 imgROImerged[imgROI_MNI_roi>0] = roi
-            #- save merged ROI only if at least one ROI is present, after intersecting with the final skeleton
             if iRoi==len(uROI)-1 and np.count_nonzero(imgROImerged)>0: 
                 pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_RmaskMNI.nii.gz')
                 save_nifti(pnameROImerged, imgROImerged, niiROI_MNI.affine, niiROI_MNI.header, dtype='uint8')
 
     
-    # analyse hemispheres separately
     if analyseHemispheres:
         sh = maskIntersection.shape
-        for hemi,range in zip(['LH', 'RH'],[[0,sh[0]//2],[sh[0]//2,sh[0]+1]]):
+        for hemi,bounds in zip(['LH', 'RH'],[[0,sh[0]//2],[sh[0]//2,sh[0]+1]]):
             maskHemi = maskIntersection.copy()
-            maskHemi[range[0]:range[1],:,:] = 0
+            maskHemi[bounds[0]:bounds[1],:,:] = 0
 
-            #- save
             skelSuffixT = skelSuffix + f'_{hemi}'
             pnameROI = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixT+'.nii.gz')
             save_nifti(pnameROI, maskHemi, niiMask.affine, niiMask.header, dtype='uint8')
 
-            #- count voxels
             voxels.append(np.count_nonzero(maskHemi))
             timept.append(timeptT)
             region.append(skelSuffixT)
         
 
-    # construct and return dataframe with voxel counts per timpoint, skeleton and region
     skeleton = [basename(skelMask)] * len(voxels)
+    # 'NA'/'NaN' are load-bearing sentinels, not placeholders: delta-svd_aggregate_results.py
+    # relies on them (via pandas' read_csv coercing 'NA' to NaN) to split these bookkeeping
+    # rows from real metric rows. Keep them literal strings; do not switch to np.nan.
     df = pd.DataFrame(
         {'timepoint': timept,
          'skeleton': skeleton,
@@ -669,13 +734,11 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
 
 def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
     
-    # find the adjusted skeleton mask
     skelBase = re.sub(r'\.nii(\.gz)?$','', basename(skelMask))
     skelMaskInters = join(dirTBSS, 'stats', skelBase+'_intersection_Emask.nii.gz')
     if not exists(skelMaskInters):
         skelMaskInters = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
 
-    # find ROI masks
     fnROI = [skelMaskInters]
     fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask-*.nii.gz')))
     fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI-*.nii.gz')))
@@ -693,48 +756,45 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
         roiBase = re.sub(r'\.nii(\.gz)?$','', basename(fnR))
         roiSuffix = re.sub(skelBase+'_','', roiBase)
 
-        for modality, _ in fnNonFA.items():
+        for mapName, _ in fnNonFA.items():
 
             print('\nExtracting histogram parameters for:')
             print(f' region    : {roiSuffix}')
-            print(f' modality: {modality}')            
-            
-            # extract histogram statistics
-            nii = nib.load(join(dirTBSS, 'stats', 'all_'+tpB+'_'+modality+'_skeletonised.nii.gz'))
+            print(f' map       : {mapName}')
+
+            nii = nib.load(join(dirTBSS, 'stats', 'all_'+tpB+'_'+mapName+'_skeletonised.nii.gz'))
             img = nii.get_fdata()
             skel = img[roi>0]
             print( ' voxels  :',len(skel))
-            if len(skel)>0:
-                prcts = np.percentile(skel,[5,95])
-                mean = np.mean(skel)
-            else:
-                prcts = [np.nan]*2
-                mean = np.nan
-            pw = prcts[1] - prcts[0]
+            mean = np.mean(skel) if len(skel)>0 else np.nan
 
-            # create dataframe
-            mT = re.sub(r'^nc','',modality)
+            mT = re.sub(r'^nc','',mapName)
+            if mT == 'MD':
+                prcts = np.percentile(skel,[5,95]) if len(skel)>0 else [np.nan]*2
+                pw = prcts[1] - prcts[0]
+                metrics = ['PSMD', 'MS'+mT]
+                values = [pw, mean]
+            else:
+                metrics = ['MS'+mT]
+                values = [mean]
             dd.append(pd.DataFrame(
-                {'timepoint': [tpB]*2,
-                'skeleton': [basename(skelMask)]*2,
-                'region': [roiSuffix]*2,
-                'voxels': [len(skel)]*2,
-                'metric': ['PWS'+mT, 'MS'+mT],
-                'value': [pw, mean]}
+                {'timepoint': [tpB]*len(metrics),
+                'skeleton': [basename(skelMask)]*len(metrics),
+                'region': [roiSuffix]*len(metrics),
+                'voxels': [len(skel)]*len(metrics),
+                'metric': metrics,
+                'value': values}
             ))
 
     df = pd.concat(dd)
-    # remove unwanted metric 'PWSFW'
-    df = df[df['metric']!='PWSFW']
 
     return df
 
-def prepare_qc(dirQC, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
+def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
         
     from create_qc_image import create_qc_image
     from create_html_with_png import create_html_with_png
     
-    # find the adjusted skeleton mask
     skelBase = re.sub(r'\.nii(\.gz)?$','', basename(skelMask))
     skelMask = join(dirTBSS, 'stats', skelBase+'_intersection_Emask-as-label2.nii.gz')
     emaskExists = 1
@@ -742,10 +802,9 @@ def prepare_qc(dirQC, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
         skelMask = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
         emaskExists = 0
     
-    # find additional ROI
     fnROI = [skelMask]
-    fnROI = fnROI + glob.glob(join(dirTBSS, 'stats', '*_Rmask.nii.gz'))
-    fnROI = fnROI + glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz'))
+    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask.nii.gz')))
+    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz')))
 
     if len(dirTP)>1:
         fnameFAt = "FA-for-tbss-long"
@@ -755,7 +814,7 @@ def prepare_qc(dirQC, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
 
     for fn in fnROI:
         os.chdir(join(dirTBSS,'stats'))
-        cmd = f'tbss_deproject {basename(fn)} 2 -n'
+        cmd = f'tbss_deproject {shlex.quote(basename(fn))} 2 -n'
         run_subprocess(cmd, True, 'tbss_deproject')
         os.chdir(dirBase)
         fnBase = basename(fn)
@@ -765,12 +824,16 @@ def prepare_qc(dirQC, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
             tpB = basename(dirTP[iTP])
             if len(dirTP)>1:
                 fnOut = join(dirQC, tpB+'_'+fnBase)
-                cmd = f"antsApplyTransforms -d 3 --float 1 -i {fnDeprojectedTemplateSpace}  -o {fnOut} -r {dirTP[iTP]}/fwc_wls_dti_FA.nii.gz -t [{dirTemplate}/{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat,1] -t {dirTemplate}/{tpB}_fwc_wls_dti_FA_05{iTP}1InverseWarp.nii.gz -n NearestNeighbor"
+                ref = join(dirTP[iTP], 'fwc_wls_dti_FA.nii.gz')
+                affine = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
+                invwarp = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}1InverseWarp.nii.gz')
+                cmd = (f"antsApplyTransforms -d 3 --float 1 -i {shlex.quote(fnDeprojectedTemplateSpace)}  -o {shlex.quote(fnOut)} "
+                       f"-r {shlex.quote(ref)} -t [{shlex.quote(affine)},1] -t {shlex.quote(invwarp)} -n NearestNeighbor")
                 run_subprocess(cmd, True, 'antsApplyTransforms')
             else:
                 copy2(fnDeprojectedTemplateSpace, join(dirQC, tpB+'_'+fnBase))    
     
-    # Create PNGs for HTML, in space of input and per timepoint
+    #--- in space of the input, per timepoint
     vlim = [
         [0.05, 0.7],
         [0.00035, 0.0026]
@@ -831,12 +894,10 @@ def prepare_qc(dirQC, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
     fnPNG = fnPNG + [create_qc_image(fnames, vlim, labels, fnSkeleton, fnamesBmask, fnameCmask)]
     captions = captions + ['MNI space']
 
-    fnHTML = dirQC + '.html'
-    print(f'\nSaving QC to:\n ', fnHTML)
-    
+    print('\nSaving QC to:\n ', fnHTML)
+
     create_html_with_png(fnHTML, fnPNG, captions, None, fnCSV, args)
 
-    # delete psmd2_QC folder, if only HTML was requested
     if args.qc < 2:
         rmtree(dirQC)
 
@@ -852,12 +913,35 @@ def save_nifti(fname, arr, affine, header, dtype='float32', scale=False):
     nib.save(niiNew, fname)
 
 
+def binarise_mask(img, label, fname):
+    """Return 'img' as a strict {0,1} mask, reporting anything it had to change.
+    Masks are thresholded strictly above 0 after resampling and written as uint8, neither of
+    which behaves on a 0/255 or probabilistic mask. No-op on a binary one."""
+    binary = img > 0
+    if not np.array_equal(img, binary):
+        print(f"NOTE: the provided {label} holds values other than 0 and 1:\n"
+              f"  {fname}\n"
+              f"  Binarising it (values greater than zero become 1; zero and negative values become 0) for processing.")
+    return binary
+
+
+def copy_as_nii_gz(fnIn, fnOut, dtype=None):
+    """Place 'fnIn' at 'fnOut', whose name always ends in '.nii.gz'. A gzipped
+    input is copied verbatim; an uncompressed one is re-encoded, because nibabel,
+    FSL and ANTs pick the codec from the file *name*. 'dtype' defaults to the
+    input's own, keeping the re-encode faithful."""
+    if fnIn.endswith('.nii.gz'):
+        copy2(fnIn, fnOut)
+    else:
+        nii = nib.load(fnIn)
+        save_nifti(fnOut, nii.get_fdata(), nii.affine, nii.header,
+                   nii.get_data_dtype() if dtype is None else dtype)
+
+
 def run_subprocess(cmd, displayStdout, label):
-    verbose = True
-    if verbose: print(f"Calling {label} command with:")
-    if verbose: print(cmd, '\n')
+    print(f"Calling {label} command with:")
+    print(cmd, '\n')
     output = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
-    # display output
     if output.returncode != 0:
         print("STDOUT/STDERR:")
         print(output.stdout.decode("utf-8"))
@@ -899,81 +983,124 @@ def isCSV(s):
     else:
         raise argparse.ArgumentTypeError("The provided filename does not have the required '.csv' extension. Please check: %s"%(s))
     
-def assertMinimumCPU(s):
-    if int(s) < 2:
-        raise argparse.ArgumentError(f'Number of cpu cores to use for ANTs registration has to be at least 2; You selected only {s}')
-    else:
-        return int(s)
+def assertPositiveJobs(s):
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--para (number of parallel ANTs registration jobs) must be a positive integer; you provided '{s}'")
+    if v < 1:
+        raise argparse.ArgumentTypeError(f'--para (number of parallel ANTs registration jobs) must be at least 1; you provided {s}')
+    return v
+
+
+def assertPositiveRegistrations(s):
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--numRegistrations (iterations of the template construction) must be a positive integer; you provided '{s}'")
+    if v < 1:
+        raise argparse.ArgumentTypeError(f'--numRegistrations (iterations of the template construction) must be at least 1; you provided {s}')
+    return v
+
+
+def assertPositiveItkThreads(s):
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--itkThreads (ITK threads per ANTs registration job) must be a positive integer; you provided '{s}'")
+    if v < 1:
+        raise argparse.ArgumentTypeError(f'--itkThreads (ITK threads per ANTs registration job) must be at least 1; you provided {s}')
+    return v
+
+
+def threadBudget(s):
+    """A positive integer, or 'auto' to auto-detect the physical cores."""
+    if str(s).strip().lower() == 'auto':
+        return 'auto'
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--threads must be a positive integer or 'auto'; you provided '{s}'")
+    if v < 1:
+        raise argparse.ArgumentTypeError(f"--threads must be at least 1 (or 'auto'); you provided {s}")
+    return v
 
 class CustomArgumentParser(argparse.ArgumentParser):
-    # This subclass ensures that single dash options have to be one character long (after the dash) and separated from their arguments by a space
-    def parse_args(self, args=None, namespace=None):
+    # Single-dash options must be one character and separated from their argument
+    def parse_known_args(self, args=None, namespace=None):
+        if args is None:                       # the argparse default: read the command line
+            args = sys.argv[1:]
         for arg_string in args:
             if arg_string.startswith('-') and not arg_string.startswith('--'):
                 if len(arg_string) > 2 and not arg_string[2].isspace():
-                    raise ValueError(f'Single dash options have to be one character long (after the dash) and separated from their arguments by a space. Argument "{arg_string}" violates this requirement.')
-        args = super().parse_args(args, namespace)
-        return args
+                    self.error(f'single-dash options must be one character and separated from their argument by a space: "{arg_string}"')
+        return super().parse_known_args(args, namespace)
     
 stepsImplemented = ['fwc','template','tbss','tbss_non_fa','extract','qc']
-argparseDescription = "The 'Pipeline for Skeletonized Metrics from Diffusion MRI' (PSMD) processes multi-directional diffusion MRI data to fully automatically extract clinically and technically validated white matter diffusion metrics. Key steps include diffusion tensor fitting (with and without free water imaging), skeletonization based on the free water-corrected FA (fwc-FA) via FSL's TBSS, and enhanced CSF partial volume masking. The final metrics MSMD, PWSMD, and MSFW are computed over the skeleton. For longitudinal data, a within-subject template is created using ANTs."
+argparseDescription = f"DELTA-SVD {__version__} ('Diffusion Endpoints for Longitudinal Tracking of white matter Alterations in cerebral Small Vessel Disease') processes multi-directional diffusion MRI data to fully automatically extract clinically and technically validated white matter diffusion metrics. Key steps include diffusion tensor fitting (with and without free water imaging), skeletonization based on the free water-corrected FA (fwc-FA) via FSL's TBSS, and enhanced CSF partial volume masking. The final metrics MSMD, PSMD, and MSFW are computed over the skeleton. For longitudinal data, a within-subject template is created using ANTs."
 
 def iniParser():
-    parser = CustomArgumentParser(description=argparseDescription, epilog='Notice: By using PSMD, you agree to the software license terms described at "http://psmd-marker.com"')
+    parser = CustomArgumentParser(description=argparseDescription, epilog='Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"')
+    parser.add_argument("--version", action='version', version=f'DELTA-SVD {__version__}', help="show the DELTA-SVD version and exit")
     group0 = parser.add_argument_group('input/output data specification')
     group0.add_argument("--dwi", required=True, metavar='NIfTI', type=isNIfTI, nargs="+", action='extend', help="input path(s) to 4D DWI image(s) in NIfTI format. Number of arguments should correspond to number of time-points.")
     group0.add_argument("--bval", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-values in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bval'")
     group0.add_argument("--bvec", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-vectors in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient.  If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bvec'")
-    group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '_brainmask.nii.gz'")
-    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all time-points. Number of arguments should correspond to number of DWI image(s). If argument not provided, time-points are labeled consecutively as TP01, TP02, and so on.")
-    group0.add_argument("--id", metavar='label', type=str, help="optional patient/subject identifier. If provided, an additional column with this identifier will be added to the results table 'psmd2_results.csv', meant to facilitate aggregation of results tables for multiple patients/subjects.")
-    group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('psmd2_results.csv') and a subfolder and HTML for quality checking ('psmd2_QC' and 'psmd2_QC.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'psmd2_temp'.")
+    group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
+    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all time-points. Number of arguments should correspond to number of DWI image(s). Labels have to be unique, and 'all' is reserved for the rows summarising all time-points. If argument not provided, time-points are labeled consecutively as TP01, TP02, and so on.")
+    group0.add_argument("--id", metavar='label', type=str, help="optional patient/subject identifier. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple patients/subjects.")
+    group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
     group1 = parser.add_argument_group('additional masking')
-    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used for 'exclusive' masking. One per timepoint can be provided, which will be merged in template space. Time-points will be matched by position of provided paths. Skip time-points by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks will be binarised, i.e. all non-zero values will be set to 1.")
-    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Each mask can contain more than one integer label corresponding to differnt ROI, which will be analysed separately. However, masks will be merged in template space and if labels in masks from different time-points disagree, the respectively highest interger label will overwrite the other labels.")
+    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used for 'exclusive' masking. One per timepoint can be provided, which will be merged in template space. Time-points will be matched by position of provided paths. Skip time-points by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
+    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Each mask can contain more than one integer label corresponding to different ROI, which will be analysed separately. However, masks will be merged in template space and if labels in masks from different time-points disagree, the respectively highest integer label will overwrite the other labels.")
     group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. Can contain integer labels for multiple ROI, which will be analysed separately.")
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
     group2 = parser.add_argument_group('advanced options')
-    group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/psmd2-skeletonmask-v1.nii.gz", help="input path to an alternative skeleton mask. Defaults to the mask validated with PSMD2 ('psmd2-skeletonmask-v1') and designed to exclude regions with frequent CSF partial volume effects.")
+    group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/delta-svd_skeletonmask_v1.nii.gz", help="input path to an alternative skeleton mask. It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
     group2.add_argument("--bRange", metavar='Integer', type=int, default = [800, 1200], nargs=2, help="range of b-values to consider for diffusion tensor fitting. Defaults to range [800,1200].")
     group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
     group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."
-    group2.add_argument("--para", metavar='max-ANTs-jobs', type=assertMinimumCPU, default=2, help=argparse.SUPPRESS) #--- "Limit number of parallel jobs used during ANTs template creation. Requires minimum and defaults to 2. Maximally, ANTs can use as many jobs as time-points."
-    group2.add_argument("--threads", metavar='ITK-threads', type=int, default=12, help="number of threads used by ITK during ANTs registrations (i.e. environmental variable ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS). Defaults to 12 threads.")
+    group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of time-points either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
+    group2.add_argument("--threads", metavar='cores', type=threadBudget, default='auto', help="number of physical CPU cores DELTA-SVD may use. Two steps are multi-core: the diffusion tensor / free-water fit, and (for longitudinal input only) the within-subject template construction; TBSS and the remaining steps are single-threaded. Defaults to 'auto', which detects the cores available to the process, honouring an HPC scheduler's allocation. It has no effect on the results, only on runtime, so it can be tuned freely.")
+    group2.add_argument("--itkThreads", metavar='threads', type=assertPositiveItkThreads, default=ITK_THREADS_DEFAULT, help=argparse.SUPPRESS) #--- "Expert override for the ITK threads used per ANTs registration job. WARNING: this changes the computed metrics -- ITK sums the registration metric per thread, so a different count sums in a different order. Defaults to 12, the value DELTA-SVD was validated at. Results produced with different values must not be compared or pooled."
     group2.add_argument("--iterations", type=str, default='30x30x8', help=argparse.SUPPRESS) #--- "Iterations at each resolution level of the pairwise ANTs registrations during template creation. Must be three levels and specified in the format: 'L1xL2xL3'. Defaults to '30x30x8'."
-    group2.add_argument("--numRegistrations", type=int, default=3, help=argparse.SUPPRESS) #--- "Iterations of the template construction. Each iteration comprises averaging of images and pairwise registrations of each timepoint to the template. Defaults to 3 iterations."
-    group2.add_argument("--qc", type=int, choices=[0,1,2], default=1, help="create (with argument 1; the default) a HTML file (psmd2_QC.html) for quality checking and create (with argument 2) additionally a subfolder 'psmd2_QC' with a series of NIfTI images showing skeleton and masks in native space, or (with argument 0) skip creation of both.")
-    group2.add_argument("--debug", action='store_true', help="don't delete temporary folder 'psmd2_temp', containing intermediate files created during processing.")
-    group2.add_argument("--steps", choices = stepsImplemented, nargs="+", action='extend', help=argparse.SUPPRESS) #--- "choose step(s) to be conducted. By default all steps will be conducted. If the output for preceeding steps is missing, an error will be raised. If different masks are provided, step 'tbss_non_fa' and following have to be repeated."
-    group2.add_argument("--reprocess", metavar='csv-file',  type=isCSV, nargs="?", const='overwrite', help='allow reprocessing and overwriting of previously created output. You can, however, keep a previously created results files (default name: psmd2_results.csv) by specifying here an alternative name (provide only the base name, output folder can not be changed here.') #--- "allow reprocessing of previously conducted steps. Warning: this will delete the previous results for all processing steps or, if '--steps' is used, for the selected (and all following/depending) steps. Deleting the final output table 'psmd2_results.csv' can however be avoided, by providing here an alternative CSV filename (provide basename only; will be saved into the output folder, see '--dirOutput')"
+    group2.add_argument("--numRegistrations", type=assertPositiveRegistrations, default=3, help=argparse.SUPPRESS) #--- "Iterations of the template construction. Each iteration comprises averaging of images and pairwise registrations of each timepoint to the template. Defaults to 3 iterations."
+    group2.add_argument("--qc", type=int, choices=[0,1,2], default=1, help="create (with argument 1; the default) a HTML file (delta-svd_qc.html) for quality checking and create (with argument 2) additionally a subfolder 'delta-svd_qc' with a series of NIfTI images showing skeleton and masks in native space, or (with argument 0) skip creation of both.")
+    group2.add_argument("--debug", action='store_true', help="don't delete temporary folder 'delta-svd_temp', containing intermediate files created during processing.")
+    group2.add_argument("--steps", choices = stepsImplemented, nargs="+", action='extend', help=argparse.SUPPRESS) #--- "choose step(s) to be conducted. By default all steps will be conducted. If the output for preceding steps is missing, an error will be raised. If different masks are provided, step 'tbss_non_fa' and following have to be repeated."
+    group2.add_argument("--reprocess", metavar='csv-file',  type=isCSV, nargs="?", const='overwrite', help='allow reprocessing and overwriting of previously created output. You can, however, keep a previously created results file (default name: delta-svd_results.csv) by specifying here an alternative name for the new one (provide only the base name; the output folder cannot be changed here).') #--- "allow reprocessing of previously conducted steps. Warning: this will delete the previous results for all processing steps or, if '--steps' is used, for the selected (and all following/depending) steps. Deleting the final output table 'delta-svd_results.csv' can however be avoided, by providing here an alternative CSV filename (provide basename only; will be saved into the output folder, see '--dirOutput')"
     return parser
 
 
 ###########################################################################
 # Pipeline
 
-def pipeline_psmd2():
+def pipeline_delta_svd():
 
     start_script = time.time()
     parser = iniParser()
     if len(sys.argv)<2:
         parser.print_usage()
-        print('\nRun "psmd2.py -h" for detailed help\n'
-              'Notice: By using PSMD, you agree to the software license terms described at "http://psmd-marker.com"\n')
+        print(f'\nDELTA-SVD {__version__}\n'
+              'Run "delta-svd.py -h" for detailed help\n'
+              'Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"\n')
         parser.exit()
     else:
         args = parser.parse_args(sys.argv[1::])
-    
+
+    # On its own line, so it survives a log truncated on the long call below.
+    # Carried on 'args' too, for the QC report to record.
+    args.version = __version__
+    print(f"DELTA-SVD {__version__}")
     args.function_call = " ".join([basename(sys.argv[0])]+sys.argv[1::])
     print("Running: " + args.function_call,'\n')
 
-    # Check DWI files (already done by argparse)
-    for i, fn in enumerate(args.dwi):
-        if not exists(fn):
-            raise ValueError(f"The {i+1}. of the files provided with option '--dwi' does not exist")
-        
-    # Check bval, bvec and bmask files
-    for attr, ext in zip(['bval','bvec','bmask'], ['.bval','.bvec','_brainmask.nii.gz']):
+    # Check bval, bvec and bmask files. The brain mask may be '.nii.gz' or '.nii',
+    # so it is resolved through isNIfTI(), which probes both (gzip first) and also
+    # completes a path with no extension; bval/bvec are matched verbatim.
+    for attr, ext in zip(['bval','bvec','bmask'], ['.bval','.bvec','_brainmask']):
+        anyExtension = (attr == 'bmask')
+        resolve = (lambda fn: isNIfTI(fn, abort=False)) if anyExtension else (lambda fn: fn if exists(fn) else None)
         flist = getattr(args,attr)
         if flist is None:
             flist = [re.sub(r'\.nii(\.gz)?$', ext, fn) for fn in args.dwi]
@@ -981,26 +1108,33 @@ def pipeline_psmd2():
             if len(flist) == 1:
                 flist = flist * len(args.dwi)
             else:
-                raise ValueError("Number of files provided with option '--bval' has to be zero or correspond to number of DWI files. Please refer to '--help'")
+                raise ValueError(f"Number of files provided with option '--{attr}' has to be zero or correspond to number of DWI files. Please refer to '--help'")
         for i, fn in enumerate(flist):
-            if not exists(fn):
-                fn = join(dirname(args.dwi[i]), fn)
-                if exists(fn):
-                    flist[i] = fn
-                else:
-                    raise ValueError(f"The {i+1}. of the expected '{attr}' files does not exist")
+            fnResolved = resolve(fn)
+            if fnResolved is None:
+                fnResolved = resolve(join(dirname(args.dwi[i]), fn))
+            if fnResolved is None:
+                raise ValueError(f"The {i+1}. of the expected '{attr}' files does not exist")
+            flist[i] = fnResolved
         setattr(args,attr,flist)
     
     # Check timepoint labels
     if args.tp is None:
         args.tp = ['TP{:02d}'.format(i+1) for i in range(len(args.dwi))] #-- folders for all time-points
-    assert len(args.tp) == len(args.dwi), f'If timepoint labels are provided, their number has to correspond to the number of provided DWI files! You passed {len(args.tp)} labels for {len(args.dwi)} DWI files.'    
+    if len(args.tp) != len(args.dwi):
+        raise ValueError(f'If timepoint labels are provided, their number has to correspond to the number of provided DWI files! You passed {len(args.tp)} labels for {len(args.dwi)} DWI files.')
+    duplicates = sorted({tp for tp in args.tp if args.tp.count(tp) > 1})
+    if duplicates:
+        raise ValueError(f'Timepoint labels have to be unique! You passed {", ".join(duplicates)} more than once.')
+    if len(args.dwi) > 1 and 'all' in args.tp:
+        raise ValueError("'all' is reserved as the label for the rows summarising all time-points and cannot be used as a timepoint label!")
 
-    # Check exclusion and ROI masks 
-    assert len(args.Emask) <= len(args.dwi), f'Number of provided exclusion masks (n={len(args.Emask)}) exceeds number of time-points (n={len(args.dwi)})! Allowed is max. one mask per timepoint!'       
-    assert len(args.Rmask) <= len(args.dwi), f'Number of provided ROI masks in DWI space (n={len(args.Rmask)}) exceeds number of time-points (n={len(args.dwi)})! Allowed is max. one mask per timepoint!'       
+    # Check exclusion and ROI masks
+    if len(args.Emask) > len(args.dwi):
+        raise ValueError(f'Number of provided exclusion masks (n={len(args.Emask)}) exceeds number of time-points (n={len(args.dwi)})! Allowed is max. one mask per timepoint!')
+    if len(args.Rmask) > len(args.dwi):
+        raise ValueError(f'Number of provided ROI masks in DWI space (n={len(args.Rmask)}) exceeds number of time-points (n={len(args.dwi)})! Allowed is max. one mask per timepoint!')
     for i,_ in enumerate(args.dwi):
-            # Check exclusion masks
             if len(args.Emask)>i :
                 if args.Emask[i]!='NA':
                     if isNIfTI(args.Emask[i], abort=False) is None:
@@ -1009,7 +1143,6 @@ def pipeline_psmd2():
                     args.Emask[i] = None
             else:
                 args.Emask.append(None)
-            # Check ROI mask
             if len(args.Rmask)>i:
                 if args.Rmask[i]!='NA':
                     if isNIfTI(args.Rmask[i], abort=False) is None:
@@ -1019,7 +1152,6 @@ def pipeline_psmd2():
             else:
                 args.Rmask.append(None)
 
-    # Display files per timepoint
     print(f"\nInput contains N={len(args.dwi)} time-points")
     for i in range(len(args.dwi)):
         print(f'Timepoint {args.tp[i]}:')
@@ -1032,43 +1164,46 @@ def pipeline_psmd2():
         if args.Rmask[i]:
             print(f' Rmask :{args.Rmask[i]}')
 
-    # Display MNI ROI mask
     if args.RmaskMNI is not None:
         print(f'\nAn additional ROI mask in MNI space (RmaskMNI) was provided:\n {args.RmaskMNI}')
 
-    # Display whether hemisphere masking was selected
-    if args.hemispheres is not None:
-        print(f'\nHemispheric ROI analysis will be done as well')
+    if args.hemispheres:
+        print('\nHemispheric ROI analysis will be done as well')
 
-    # Display skeleton mask
-    if args.skeletonMask == "/opt/scripts/psmd2-skeletonmask-v1.nii.gz":
+    if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
         print(f'\nUsing the default skeleton mask:\n {args.skeletonMask}')
     else:
         print(f'\nUsing a non-default skeleton mask provided as input:\n {args.skeletonMask}')
 
-    # Output folder
+    if args.itkThreads != ITK_THREADS_DEFAULT and len(args.dwi) > 1:
+        print(f'\nWARNING: --itkThreads is set to {args.itkThreads} instead of the validated '
+              f'{ITK_THREADS_DEFAULT}.\n This changes the computed metrics. The results of this run '
+              f'must not be compared\n or pooled with results produced at the default.')
+
     if args.dirOutput is None:
         args.dirOutput = os.path.dirname(args.dwi[0])
     
-    # Check requested processing steps
+    # Copy: 'stepsImplemented' is module-level and backs the '--steps' choices, so
+    # dropping 'qc' from it would erode that list for a later run in the process.
+    stepsAvailable = list(stepsImplemented)
     if args.qc==0:
-        assert args.steps is None or 'qc' not in args.steps, "You asked to do '--step qc' and to skip it '--qc 0' at the same time! Your choice is contradictory!"
-        stepsImplemented.remove('qc')
+        if args.steps is not None and 'qc' in args.steps:
+            raise ValueError("You asked to do '--step qc' and to skip it '--qc 0' at the same time! Your choice is contradictory!")
+        stepsAvailable.remove('qc')
     if args.steps is None:
-        args.steps = stepsImplemented
+        args.steps = stepsAvailable
     else:
-        stepsIdx = [i for i,x in enumerate(stepsImplemented) if x in args.steps]
-        args.steps = [stepsImplemented[i] for i in stepsIdx]
-        print(f'\nOn request, only the following processing steps will be conducted:')
+        stepsIdx = [i for i,x in enumerate(stepsAvailable) if x in args.steps]
+        args.steps = [stepsAvailable[i] for i in stepsIdx]
+        print('\nOn request, only the following processing steps will be conducted:')
         for i,step in enumerate(args.steps): print(f' {i+1}. {step}')
         if len(stepsIdx)>1 and any(np.diff(stepsIdx)>1):
-            print(' '); raise ValueError(f"Requested processing steps have to be contiguous. This is not the case.\nThe available steps in order are: {stepsImplemented}")       
+            print(' '); raise ValueError(f"Requested processing steps have to be contiguous. This is not the case.\nThe available steps in order are: {stepsAvailable}")
         if 'extract' not in args.steps and not args.debug:
             print("NOTE: Given that the final 'extract' step is not selected, we assume that you want to keep intermediate/temporary output and switch on the option '--debug' for you!")
             args.debug = True
     
-    # Create file paths used for various processing steps and output files
-    dirTemp = join(args.dirOutput, 'psmd2_temp')
+    dirTemp = join(args.dirOutput, 'delta-svd_temp')
     dirTP = [join(dirTemp, tp) for tp in args.tp] #-- folders for all time-points
     dirTemplate = join(dirTemp,'template')
     dirTemplateInter = join(dirTemp, 'intermediateTemplates')
@@ -1076,28 +1211,29 @@ def pipeline_psmd2():
     fnNonTBSS = glob.glob(join(dirTBSS,'*')) + glob.glob(join(dirTBSS, 'stats','*'))
     fnNonTBSS = [x for x in fnNonTBSS if not re.match('FA$|origdata$|stats$|all_FA|mean_FA|thresh',basename(x))]
     if args.reprocess is None or args.reprocess == 'overwrite':
-        fnCSV = join(args.dirOutput, 'psmd2_results.csv')
+        fnCSV = join(args.dirOutput, 'delta-svd_results.csv')
     else:
         fnCSV = join(args.dirOutput, args.reprocess)
     fnSkelRegions = glob.glob(join(dirTBSS, 'stats','*_intersection*'))
-    dirQC = join(args.dirOutput, 'psmd2_QC')
-    fnHTML = join(args.dirOutput, 'psmd2_QC.html')
+    dirQC = join(args.dirOutput, 'delta-svd_qc')
+    fnHTML = join(args.dirOutput, 'delta-svd_qc.html')
     
     # Check if output exists already
     if os.path.exists(dirTemp) or os.path.exists(fnCSV) or os.path.exists(dirQC) or os.path.exists(fnHTML):
 
-        # if all steps (with or without QC step) are requested, then simply delete everything
-        if set(args.steps+['qc']) == set(stepsImplemented+['qc']):
-            print(f'\nChecking existence of output')
-            assert args.reprocess is not None, "Output exists already.\n Tip: Use option '--reprocess' if you want to reprocess and overwrite"
+        # all steps requested: simply delete everything
+        if set(args.steps+['qc']) == set(stepsAvailable+['qc']):
+            print('\nChecking existence of output')
+            if args.reprocess is None:
+                raise ValueError("Output exists already.\n Tip: Use option '--reprocess' if you want to reprocess and overwrite")
             if os.path.exists(dirTemp): print(f'Deleting: {dirTemp}'); rmtree(dirTemp)
             if os.path.exists(fnCSV): print(f'Deleting: {fnCSV}'); os.remove(fnCSV)
             if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); rmtree(dirQC)
             if os.path.exists(fnHTML): print(f'Deleting: {fnHTML}'); os.remove(fnHTML)
 
-        # else, check output for each step separately
+        # otherwise check the output of each step separately
         else:
-            print(f'\nChecking existence of output per processing step:')
+            print('\nChecking existence of output per processing step:')
             stepsOutput = {
                 'fwc':dirTP,
                 'template':[dirTemplate, dirTemplateInter],
@@ -1121,12 +1257,16 @@ def pipeline_psmd2():
             for k in shouldExist:
                 fn = stepsOutput[k]
                 if not isinstance(fn, list): fn = [fn]
-                for fnT in fn: assert exists(fnT), f"Output from skipped processing steps '{k}' is missing: {fnT}"
+                for fnT in fn:
+                    if not exists(fnT):
+                        raise ValueError(f"Output from skipped processing steps '{k}' is missing: {fnT}")
             if args.reprocess is None:
                 for k in shouldNotExist:
                     fn = stepsOutput[k]
                     if not isinstance(fn, list): fn = [fn]
-                    for fnT in fn: assert not exists(fnT), f"Output for requested step '{k}' exists already: {fnT}\n Tip: Use option '--reprocess' if you want to reprocess and overwrite"
+                    for fnT in fn:
+                        if exists(fnT):
+                            raise ValueError(f"Output for requested step '{k}' exists already: {fnT}\n Tip: Use option '--reprocess' if you want to reprocess and overwrite")
             else:
                 for k in shouldNotExist:
                     fn = stepsOutput[k]
@@ -1139,7 +1279,6 @@ def pipeline_psmd2():
             if not warnFlag: print('No problems detected!')
 
 
-    # Create temp folder
     if not os.path.exists(dirTemp):
         print(f"\nCreating temporary folder for processing:\n"
               f"  {dirTemp}")
@@ -1149,11 +1288,11 @@ def pipeline_psmd2():
     #----------------------------------
     # Conduct the main processing steps
 
-    # Free water corrrection
+    # Free water correction
     startTime=None
     if 'fwc' in args.steps:
 
-        print(f"\nTime point(s) will be copied and processed in following folder(s):")
+        print("\nTime point(s) will be copied and processed in following folder(s):")
         for i,tp in enumerate(dirTP):
             print(f' {tp}')
 
@@ -1161,44 +1300,36 @@ def pipeline_psmd2():
         for i in range(len(dirTP)):
             startTime = section_header(f'DTI-fit and free-water correction for {i+1}. timepoint in: {dirTP[i]}', startTime)
 
-            # Create output directory
             Path(dirTP[i]).mkdir(parents=True, exist_ok=True)
 
-            # Filter DWI data according to b-values
             dwi, bval, bvec = filter_b_values(fn_data = args.dwi[i], 
                                               fn_bval = args.bval[i], 
                                               fn_bvec = args.bvec[i],
                                               out_dir = dirTP[i],
                                               bRange = [min(args.bRange), max(args.bRange)])
             
-            # Run FW correction
             print('')
             free_water_correction(fn_data = dwi, 
                         fn_mask = args.bmask[i], 
                         fn_bval = bval, 
                         fn_bvec = bvec,
                         out_dir = dirTP[i],
-                        smooth = args.smooth)
+                        smooth = args.smooth,
+                        nproc = min(CORE_BUDGET, FW_MAX_WORKERS))
             
-            # Copy and, by default, set brain mask equal 0, where Free-Water equals 1
+            # Copy and, by default, set brain mask equal 0, where Free-Water equals 1.
+            niiBmask = nib.load(args.bmask[i])
+            imgBmask = binarise_mask(niiBmask.get_fdata(), 'brain mask', args.bmask[i])
             if args.adjustBmaskForFW:
-                # if fwc-FA should be used for skeleton projection, set voxels in brain-mask to zero, where FW==1 (corresponding to "fwc-FA"==0)
                 print('Setting brain mask to zero, where free-water equals one.')
-                niiBmask = nib.load(args.bmask[i])
-                imgBmask = niiBmask.get_fdata()
                 niiFAt = nib.load(join(dirTP[i], 'fwc_wls_dti_FA.nii.gz'))
                 imgFAt = niiFAt.get_fdata()
                 imgBmask[imgFAt==0] = 0
-                save_nifti(join(dirTP[i],'brain_mask.nii.gz'), imgBmask, niiBmask.affine, niiBmask.header, dtype='uint8')
-            else:
-                copy2(args.bmask[i], join(dirTP[i],'brain_mask.nii.gz'))
+            save_nifti(join(dirTP[i],'brain_mask.nii.gz'), imgBmask, niiBmask.affine, niiBmask.header, dtype='uint8')
 
     
-    # Decide whether to use the free-water-corrected or the uncorrected FA image for skeleton projection
-    # >>> Opion deleted <<< Use always the free water-corrected FA: 'fwc_wls_dti_FA_05.nii.gz'
     
     
-    # Define modalities to be coregistered
     fnCoreg = [
             'fwc_wls_dti_FA_05.nii.gz',
             'wls_dti_FW.nii.gz',
@@ -1209,8 +1340,8 @@ def pipeline_psmd2():
     # Run template construction
     if 'template' in args.steps  and  len(dirTP)>1:
         Path(dirTemplate).mkdir(parents=True, exist_ok=True)
-        startTime = section_header(f'Template construction and co-registration of modalities for all time-points', startTime)
-        create_template(timepoints = dirTP, fnCoreg = fnCoreg, dirOut = dirTemplate, nCPU = args.para, nThreads = args.threads, iterations=args.iterations, numRegistrations=args.numRegistrations)
+        startTime = section_header('Template construction and co-registration of all images for all time-points', startTime)
+        create_template(timepoints = dirTP, fnCoreg = fnCoreg, dirOut = dirTemplate, coreBudget = CORE_BUDGET, paraOverride = args.para, iterations=args.iterations, numRegistrations=args.numRegistrations, itkThreads=args.itkThreads)
 
     # Run TBSS
     if len(dirTP)>1:
@@ -1224,7 +1355,7 @@ def pipeline_psmd2():
         Path(dirTBSS).mkdir(parents=True, exist_ok=True)
         run_tbss(fnameFAt, dirTBSS)
 
-    # Define non-FA modalities
+    # Define non-FA maps
     suffix = '_to_template.nii.gz' if len(dirTP)>1 else '.nii.gz'
     nonFA = {
         'FW'    :'wls_dti_FW'+suffix,
@@ -1239,28 +1370,24 @@ def pipeline_psmd2():
             startTime = section_header(f'Non-FA TBSS for {i+1}. timepoint in: {dirTP[i]}', startTime)
             batch_tbss_non_fa(dirTP[i], dirTBSS, nonFA)
         
-        startTime = section_header(f'Non-FA TBSS for additional mask images', startTime)
+        startTime = section_header('Non-FA TBSS for additional mask images', startTime)
 
-        # Transform and merge additional masks with ROI or exclusions/lesions (if None, then None is returned)
+        # Transform and merge the optional exclusion/ROI masks (None if none given)
         Emask = coreg_merge_masks(timepoints = dirTP, masks = args.Emask, label='mask_exclusive', dirTemplate = dirTemplate, binarise = True)
         Rmask = coreg_merge_masks(timepoints = dirTP, masks = args.Rmask, label='mask_roi', dirTemplate = dirTemplate, binarise=False)
-        # non-FA TBSS for masks
         flagAdditionalMasks = False
         if Emask is not None:
             run_tbss_non_fa(Emask, 'E-MASK', dirTBSS)
             flagAdditionalMasks = True
         if Rmask is not None: 
-            # check if there are multiple labels
             niiROI = nib.load(Rmask)
             imgROI = niiROI.get_fdata()
             uROI = np.unique(imgROI)
             uROI = uROI[uROI>0].astype('uint8')
-            # run non-FA TBSS for each ROI label separately, because it doesn't use nearset-neighbor for registration into MNI
+            # one label at a time: the MNI registration does not use nearest-neighbor
             for roi in uROI:
                 imgT = imgROI.copy()
                 imgT[imgROI!=roi] = 0
-                if roi==0:
-                    imgT[imgROI!=roi] = 1
                 fnOut = re.sub(r'\.nii(\.gz)?$','-{:02d}.nii.gz'.format(roi), Rmask)
                 save_nifti(fnOut, imgT>0, niiROI.affine, niiROI.header, 'uint8')
                 run_tbss_non_fa(fnOut, 'ROI-{:02d}'.format(roi), dirTBSS)
@@ -1274,11 +1401,10 @@ def pipeline_psmd2():
 
         dfL = []
 
-        # Find common skeleton voxels being in skeleton mask and present at all time-points
         if len(dirTP)>1:
-            startTime = section_header(f'Finding skeleton voxels present in brain masks of all timepoints and in the skeleton mask and ROIs', startTime)
+            startTime = section_header('Finding skeleton voxels present in brain masks of all timepoints and in the skeleton mask and ROIs', startTime)
         else:
-            startTime = section_header(f'Finding skeleton voxels present in the brain mask and in the skeleton mask and ROIs', startTime)
+            startTime = section_header('Finding skeleton voxels present in the brain mask and in the skeleton mask and ROIs', startTime)
         dfT = integrate_masks(dirTP, dirTBSS, skelMask = args.skeletonMask, fnROI_MNI = args.RmaskMNI, analyseHemispheres=args.hemispheres)
         dfL.append(dfT)
         print('Done analysing skeletons and masks:')
@@ -1309,10 +1435,9 @@ def pipeline_psmd2():
     # Prepare images for QC
     if 'qc' in args.steps:
 
-        startTime = section_header(f'Creating QC images (deprojecting skeleton mask and transforming into native space)', startTime)
-        dirQC = join(args.dirOutput, 'psmd2_QC')
+        startTime = section_header('Creating QC images (deprojecting skeleton mask and transforming into native space)', startTime)
         Path(dirQC).mkdir(parents=True, exist_ok=True)
-        prepare_qc(dirQC, args.skeletonMask, dirTBSS, dirTemplate, dirTP, fnCSV, args)
+        prepare_qc(dirQC, fnHTML, args.skeletonMask, dirTBSS, dirTemplate, dirTP, fnCSV, args)
 
 
     # Clean up
@@ -1329,4 +1454,4 @@ def pipeline_psmd2():
 
 
 if __name__ == "__main__":
-    pipeline_psmd2()
+    pipeline_delta_svd()

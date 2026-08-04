@@ -1,0 +1,22 @@
+Copyright (c) 2026 Anna Dewenter, Benno Gesierich, Marco Duering
+
+This license applies only to the original DELTA-SVD source code and
+documentation in this repository. It does not apply to third-party
+code included in this repository or software bundled in the container
+image (e.g. FSL, ANTs), which remain under their own respective
+licenses — see the NOTICE file for details.
+
+This work is licensed under a Creative Commons
+Attribution-NonCommercial-NoDerivatives 4.0 International License.
+
+To view a copy of this license, visit
+https://creativecommons.org/licenses/by-nc-nd/4.0/
+
+Attribution: If you use this software, please:
+
+  1. Cite the method publication:
+     Dewenter A, [manuscript submitted].
+     Full citation details will be provided upon publication.
+
+  2. Include a link to this repository:
+     https://github.com/isdneuroimaging/DELTA-SVD

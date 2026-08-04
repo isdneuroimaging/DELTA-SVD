@@ -1,0 +1,97 @@
+This project's container image includes and redistributes portions of FSL
+(FMRIB Software Library), developed by the Analysis Group, FMRIB, University
+of Oxford, and licensed by Oxford University Innovation Limited. This source
+repository additionally contains two reference images derived from FSL
+standard-space data; see "FSL-derived reference data" below.
+
+FSL is licensed for non-commercial use only. By using this software, this
+source repository or this container image, you agree to be bound by the FSL
+Licence: https://fsl.fmrib.ox.ac.uk/fsl/docs/license.html
+
+The FSL Licence permits reproduction, modification, transmission or
+transference of the Software without the University's express permission
+only if all of the following hold: (1) no financial return is received,
+(2) the conditions of the FSL Licence are imposed upon the receiver of the
+product, and (3) all original and amended source code is included in any
+transmitted product. This distribution is provided under that exception:
+it is non-commercial, these conditions apply to you as the recipient, and
+the source of the bundled FSL components is included in the image under
+/opt/fsl-source/.
+
+FSL components bundled in this image (built from unmodified upstream
+source, versions resolved at image build time):
+  - fsl-flirt      https://git.fmrib.ox.ac.uk/fsl/flirt
+  - fsl-fnirt      https://git.fmrib.ox.ac.uk/fsl/fnirt
+  - fsl-avwutils   https://git.fmrib.ox.ac.uk/fsl/avwutils
+  - fsl-tbss       https://git.fmrib.ox.ac.uk/fsl/tbss
+
+FSL standard-space reference data bundled in this image, from the
+fsl-data_standard package, required at runtime by tbss_2_reg -T /
+tbss_3_postreg -T (unmodified originals):
+  - FMRIB58_FA_1mm.nii.gz
+  - FMRIB58_FA-skeleton_1mm.nii.gz
+  - Fornix_FMRIB_FA1mm.nii.gz
+  - LowerCingulum_1mm.nii.gz
+
+FSL-derived reference data
+--------------------------
+
+Two reference images in container/scripts/ are derivatives of FSL
+standard-space data. They are versioned in this repository, rather than
+rebuilt during the image build, because the numbers this pipeline produces
+depend on their exact contents and neither is reproducible from a build-time
+recipe: resampling afresh yields a subtly different image, and the skeleton
+mask encodes method decisions that no recipe captures.
+
+  - FMRIB58_FA_2mm_crop.nii.gz
+    A 2mm-resampled and cropped derivative of FMRIB58_FA_1mm.nii.gz. It is
+    the initial target for the within-subject ANTs template construction
+    used on longitudinal (multi-timepoint) runs.
+
+  - delta-svd_skeletonmask_v1.nii.gz
+    A masked subset of FMRIB58_FA-skeleton_1mm.nii.gz on the same 1mm grid,
+    restricting the analysed skeleton to the tracts this method evaluates.
+
+No FSL software is redistributed in this source repository -- only these two
+derived reference images. Condition (3) above concerns source code; these are
+image data, for which no source code exists and none is therefore withheld.
+Conditions (1) and (2) are met: this repository is distributed with no
+financial return, and this notice imposes the conditions of the FSL Licence on
+you as its recipient. The unmodified originals from which both were derived
+are not included here; they are distributed by FSL in the fsl-data_standard
+package, and are present in the container image under /opt/conda/data/standard/.
+
+FSL is (c) University of Oxford. All rights reserved.
+
+------------------------------------------------------------------------
+
+This project's container image also includes ANTs (Advanced Normalization
+Tools, https://github.com/ANTsX/ANTs), licensed under the Apache License,
+Version 2.0. A copy of the license is included in the image at
+/opt/third-party-licenses/ANTs-LICENSE-Apache-2.0.txt.
+
+Two ANTs scripts (ANTSpexec.sh and antsMultivariateTemplateConstruction2.sh)
+are modified from upstream (killme.sh invocation disabled; similarity
+metric for linear registration stages switched from MI to GC) and carry an
+in-file notice stating they were changed, per Apache License 2.0 sec. 4(b).
+
+ANTs is (c) the ANTs / ANTsX contributors.
+
+------------------------------------------------------------------------
+
+This project's container image also includes free-water/single-tensor
+weighted least-squares fitting code (/opt/scripts/markvcid_fw_mrn.py)
+vendored from the MarkVCID Free Water Kit, developed at UC Davis and UNM
+as part of the MarkVCID consortium:
+https://github.com/davisidealab/MarkVCID_FW (fw_mrn.py)
+
+Reference: Maillard P, Lu H, Arfanakis K, et al. Instrumental validation
+of free water, peak-width of skeletonized mean diffusivity, and white
+matter hyperintensities: MarkVCID neuroimaging kits. Alzheimer's &
+Dementia: Diagnosis, Assessment & Disease Monitoring 2022;14:e12261.
+
+This code is redistributed as part of DELTA-SVD with permission. The 
+vendored copy differs from upstream only in cosmetic cleanup (a 
+commented-out line and one unused variable assignment were removed).
+
+MarkVCID_FW is (c) the MarkVCID_FW / UC Davis-UNM contributors.

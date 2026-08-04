@@ -1,0 +1,28 @@
+# This file lets GitHub show a "Cite this repository" button and generate
+# APA/BibTeX citations. See https://citation-file-format.github.io/
+cff-version: 1.2.0
+message: >-
+  If you use DELTA-SVD, please cite this software and the method
+  publication. A preferred-citation entry for the manuscript will be added
+  to this file once it is published; until then, see README.md and
+  LICENSE for the attribution requirements.
+title: DELTA-SVD
+abstract: >-
+  Diffusion Endpoints for Longitudinal Tracking of white matter Alterations
+  in cerebral Small Vessel Disease
+type: software
+authors:
+  - family-names: Dewenter
+    given-names: Anna
+    orcid: "https://orcid.org/0000-0002-5636-196X"
+  - family-names: Gesierich
+    given-names: Benno
+    orcid: "https://orcid.org/0000-0003-2842-7105"
+  - family-names: Duering
+    given-names: Marco
+    orcid: "https://orcid.org/0000-0003-2302-3136"
+# Must match the repo-root VERSION file; tests/test_version.py enforces it.
+version: 1.0.0
+license: CC-BY-NC-ND-4.0
+repository-code: https://github.com/isdneuroimaging/DELTA-SVD
+url: https://delta-svd.com

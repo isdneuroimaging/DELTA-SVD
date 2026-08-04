@@ -1,0 +1,76 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same branch/PR; unlike the docs workflow's Pages
+# deploy, there is nothing here that would be wrong to cancel mid-flight.
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    # Python-version compatibility only, NOT the pinned conda stack: this
+    # installs dipy/nibabel/numpy unpinned from PyPI. 3.11 matches the version
+    # the container ships (see container/conda-explicit-linux-64.txt); 3.14 is
+    # the current interpreter, keeping honest the CONTRIBUTING.md claim that
+    # the suite also passes on a current stack. Neither entry exercises the
+    # pinned scientific stack - that is tests/run-in-locked-env.sh below.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+      - run: pip install -r tests/requirements.txt
+      - run: python -m pytest -q
+
+  compileall:
+    # Tripwire for syntax that a non-3.11 dev interpreter accepts but the
+    # container's Python 3.11 does not (e.g. PEP 701 f-string syntax added in
+    # 3.12). ast.parse(..., feature_version=(3, 11)) does NOT catch this - the
+    # tokenizer runs before the feature-version check - so this needs a real
+    # 3.11 interpreter compiling every module.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: python -m compileall -q container/scripts tools tests
+
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hadolint/hadolint-action@v3.4.0
+        with:
+          dockerfile: container/Dockerfile
+          # container/Dockerfile carries one pre-existing info-level finding
+          # (DL3066 on `USER nonroot`); CONTRIBUTING.md's hadolint-clean claim
+          # is scoped to "no warnings or errors", not zero info findings.
+          failure-threshold: warning
+
+  # Only thing that exercises the pinned conda lock (numerical behaviour of
+  # the scientific stack), rather than just interpreter/PyPI compatibility.
+  # Manual-only: it builds a conda environment inside a container and pulls
+  # from FSL's/Anaconda's servers, which is too slow and too flaky for every PR.
+  locked-env:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: tests/run-in-locked-env.sh

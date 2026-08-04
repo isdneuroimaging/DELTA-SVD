@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import base64, os, datetime
+import base64, os, datetime, html
 import pandas as pd
 import numpy as np
 
@@ -17,14 +17,14 @@ def define_notes(args):
           bmaskLong  = 'The'
           bmaskCross = 'The'
 
-      if args.skeletonMask == "/opt/scripts/psmd2-skeletonmask-v1.nii.gz":
-          whichSmask = 'the default white matter skeleton mask "psmd2-skeletonmask-v1.nii.gz", designed to exclude regions with frequent partial volume effets.'
+      if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
+          whichSmask = 'the default white matter skeleton mask "delta-svd_skeletonmask_v1.nii.gz", designed to exclude regions with frequent partial volume effects.'
       else:
-          whichSmask = f'a custom (provided by the user) white matter skeleton mask.'
+          whichSmask = 'a custom (provided by the user) white matter skeleton mask.'
 
       if len(args.tp)>1:
-        notes = [f'PSMD2 was conducted longitudinally over {len(args.tp)} timepoints. In short:',
-                f'A within-subject template was first created by registering the free water-corrected FA images non-linearly across all timepoints. '
+        notes = [f'DELTA-SVD was conducted longitudinally over {len(args.tp)} timepoints. In short:',
+                'A within-subject template was first created by registering the free water-corrected FA images non-linearly across all timepoints. '
                 'The template was then registered non-linearly onto FSL\'s FMRIB58_FA template in MNI space and further projected onto that template\'s white matter skeleton.',
                 f'{bmaskLong} brain mask and the MD and FW image of each timepoint were then taken along the path of estimated transformations, to get a skeletonised version for each of them. '
                 'These transformations introduce interpolations between fore- and background voxels, which can be tracked and, hence, were removed from the skeletonised brain mask to reduce partial volume effects.',
@@ -33,8 +33,8 @@ def define_notes(args):
                 'For quality checking, this final white matter skeleton was also back projected into the MNI space, into the within-subject template space and into the '
                 'native space of each timepoint (see red overlays shown above).']
       else:
-        notes = ['PSMD2 was conducted cross-sectionally for a single timepoint. In short:',
-                f'The free water-corrected FA image of the single timepoint was registered non-linearly onto FSL\'s FMRIB58_FA template in MNI space and further projected onto that template\'s white matter skeleton.',
+        notes = ['DELTA-SVD was conducted cross-sectionally for a single timepoint. In short:',
+                'The free water-corrected FA image of the single timepoint was registered non-linearly onto FSL\'s FMRIB58_FA template in MNI space and further projected onto that template\'s white matter skeleton.',
                 f'{bmaskCross} brain mask and the MD and FW image were then taken along the path of estimated transformations, to get a skeletonised version for each of them. '
                 'These transformations introduce interpolations between fore- and background voxels, which can be tracked and, hence, were removed from the skeletonised brain mask to reduce partial volume effects.',
                 f'The skeletonised brain mask was intersected with {whichSmask} '
@@ -45,48 +45,28 @@ def define_notes(args):
       notes = '<br>'.join(notes)
       notes = f'<p class="text">{notes}</p>'
 
-      if not args.adjustBmaskForFW or args.skeletonMask != "/opt/scripts/psmd2-skeletonmask-v1.nii.gz":
+      if not args.adjustBmaskForFW or args.skeletonMask != "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
         notes += '<p class="textbold">Please note that the above described behaviour deviates from the default behaviour, due to the options chosen by the user.</p>'
         
   return notes
   
 
-def rows_to_table(rows):
-    
-    trows = ''
-    for row in rows:
-       trows += f'''
-        <tr>
-          <td> </td>
-          <td>{row[0]}</td>
-          <td>: <code>{row[1]}</code></td>
-        </tr>
-      '''
-    table = f'''
-    <table style="margin:0; white-space:pre">
-      <tbody>
-        {trows}
-      </tbody>
-    </table>
-    '''
-    
-    return table
-
-
 def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, args=None):
     
-  #--- Create title
   current_date = datetime.datetime.now()
   date_string = current_date.strftime("%Y-%m-%d %H:%M:%S")
-  # title = f'PSMD2 Quality Control Report<br>created on {date_string}'
   title = f'''
     <header class="report-header">
-      <h1 class="report-header__title">PSMD2 Quality Control Report</h1>
+      <h1 class="report-header__title">DELTA-SVD Quality Control Report</h1>
       <p class="report-header__date">created on {date_string}</p>
     </header>
   '''
 
-  #--- Create prolog
+  if args is not None and args.id is not None:
+    page_title = f'{html.escape(str(args.id))} - DELTA-SVD QC Report'
+  else:
+    page_title = 'DELTA-SVD QC Report'
+
   if args is None:
     meta_table = ''
     inputs_table = ''
@@ -95,27 +75,57 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
   else:
     n_tp = len(args.tp)
 
-    #--- Metadata as a key-value table (Patient + settings), same style as the
-    #    timepoint table below, so the whole first part is harmonized.
-    meta_rows = [('Patient ID', f'<span class="summary__id">{args.id}</span>')]
-    if args.skeletonMask == "/opt/scripts/psmd2-skeletonmask-v1.nii.gz":
-        meta_rows.append(('Skeleton mask', f'<code>{os.path.basename(args.skeletonMask)}</code> <span class="tag">default</span>'))
+    #--- badge revealing on hover the default it deviates from; tabindex makes
+    #    that tooltip reachable by keyboard too (see the .tag--tip CSS)
+    def custom_tag(default_html):
+        return ('<span class="tag tag--alt tag--tip" tabindex="0" '
+                f'data-default="Default: {default_html}">custom</span>')
+
+    #--- A path as <code>, directory dimmed and filename emphasised so it stays
+    #    scannable when it wraps; <wbr> lets it break at "/" and "_" only.
+    def path_code(p):
+        def brk(s):
+            return html.escape(s).replace('/', '/<wbr>').replace('_', '_<wbr>')
+        d, name = os.path.split(p)
+        if not d:
+            return f'<code>{brk(name)}</code>'
+        return (f'<code><span class="path-dir">{brk(d + "/")}</span>'
+                f'<span class="path-name">{brk(name)}</span></code>')
+
+    #--- metadata table, sharing the style of the timepoint table below
+    meta_rows = []
+    if args.id is not None:
+        meta_rows.append(('Patient ID', f'<span class="summary__id">{html.escape(str(args.id))}</span>'))
+    #--- the release that produced this report; results from different versions
+    #    must not be pooled
+    version = getattr(args, 'version', None)
+    if version:
+        meta_rows.append(('DELTA-SVD version', f'<code>{html.escape(str(version))}</code>'))
+    if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
+        meta_rows.append(('Skeleton mask', f'{path_code(os.path.basename(args.skeletonMask))} <span class="tag">default</span>'))
     else:
-        meta_rows.append(('Skeleton mask', f'<code>{args.skeletonMask}</code> <span class="tag tag--alt">custom</span>'))
+        meta_rows.append(('Skeleton mask', f'{path_code(args.skeletonMask)} {custom_tag("delta-svd_skeletonmask_v1.nii.gz (white matter skeleton excluding regions with frequent partial volume effects)")}'))
     if list(args.bRange) != [800, 1200]:
-        meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; <span class="tag tag--alt">custom</span>'))
+        meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; {custom_tag("800&ndash;1200 s/mm&sup2;")}'))
     if args.RmaskMNI is not None:
-        meta_rows.append(('ROI mask (MNI)', f'<code>{args.RmaskMNI}</code>'))
+        meta_rows.append(('ROI mask (MNI)', path_code(args.RmaskMNI)))
     if args.hemispheres:
         meta_rows.append(('Hemispheres', 'left and right analysed separately'))
     if not args.adjustBmaskForFW:
-        meta_rows.append(('Brain masks', 'not adjusted, i.e. voxels with 100% free water were not removed <span class="tag tag--alt">custom</span>'))
+        meta_rows.append(('Brain masks', f'not adjusted, i.e. voxels with 100% free water were not removed {custom_tag("adjusted, i.e. voxels with 100% free water are removed")}'))
+    #--- only shown when it leaves the validated 12: it is the one threading
+    #    setting that changes the metrics, so a deviation belongs beside them
+    itkThreads = getattr(args, 'itkThreads', None)
+    if n_tp > 1 and itkThreads is not None and itkThreads != 12:
+        meta_rows.append(('ITK threads',
+                          f'{itkThreads} per registration job '
+                          + custom_tag('12 (the validated value; results from different '
+                                       'values must not be pooled)')))
     meta_body = ''.join(f'<tr><td class="key">{k}</td><td>{v}</td></tr>' for k, v in meta_rows)
     meta_table = ('<table class="meta-table">'
                   '<thead><tr><th>Item</th><th>Value</th></tr></thead>'
                   f'<tbody>{meta_body}</tbody></table>')
 
-    #--- Inputs: one row per timepoint, paths as code
     has_emask = any(args.Emask[i] for i in range(n_tp))
     has_rmask = any(args.Rmask[i] for i in range(n_tp))
     head = '<th>Timepoint</th><th>DWI image</th><th>Brain mask</th>'
@@ -123,22 +133,21 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
     if has_rmask: head += '<th>ROI mask</th>'
     body = ''
     for i, tp in enumerate(args.tp):
-        row = (f'<td class="key">{tp}</td>'
-               f'<td><code>{args.dwi[i]}</code></td>'
-               f'<td><code>{args.bmask[i]}</code></td>')
+        row = (f'<td class="key">{html.escape(str(tp))}</td>'
+               f'<td>{path_code(args.dwi[i])}</td>'
+               f'<td>{path_code(args.bmask[i])}</td>')
         if has_emask:
-            row += f'<td>{"<code>"+args.Emask[i]+"</code>" if args.Emask[i] else "&ndash;"}</td>'
+            row += f'<td>{path_code(args.Emask[i]) if args.Emask[i] else "&ndash;"}</td>'
         if has_rmask:
-            row += f'<td>{"<code>"+args.Rmask[i]+"</code>" if args.Rmask[i] else "&ndash;"}</td>'
+            row += f'<td>{path_code(args.Rmask[i]) if args.Rmask[i] else "&ndash;"}</td>'
         body += f'<tr>{row}</tr>'
     inputs_table = (
         f'<table class="inputs"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
     )
 
-    #--- The full PSMD2 call as a labelled code block
-    function_call = f'<p class="label">PSMD2 call</p><pre class="code">{args.function_call}</pre>'
+    function_call = f'<p class="label">DELTA-SVD call</p><pre class="code">{html.escape(args.function_call)}</pre>'
 
-  #--- Convert "notes" to HTML paragraph (these notes follow the pictures)
+  #--- notes, shown below the pictures
   if notes is None:
      notes = define_notes(args)
   else:
@@ -147,7 +156,6 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
   if notes:
      notes = '<p class="label">Method summary</p>' + notes
 
-  #--- Read CSV file, if DataFrame "df" is not provided
   fnCSV = None
   if df is None:
       fnCSV = os.path.splitext(fnHTML)[0] + '.csv'
@@ -158,29 +166,24 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         df = pd.read_csv(fnCSV)
     else:
         df = None
-  #--- Adjust df and transform into HTML table
   if df is None:
       dfHTML = ''
   else:
-      # convert values to integer, if appropriate
+      # mutates the caller's DataFrame in place (drop/assign below too)
       df['value'] = df['value'].astype('object')
       for i,row in df.iterrows():
           if np.mod(row['value'],1)<0.0000001:
             df.loc[i,'value'] = int(row['value'])
       df.drop('skeleton', axis=1, inplace=True)
-      # set index and convert
-      # df.set_index('Name', inplace=True)
       dfHTML = df.to_html(classes="mystyle", index=True, index_names=False, border=0)
-      dfHTML = f'<p class="label">Extracted metrics</p>' + dfHTML
+      dfHTML = '<p class="label">Extracted metrics</p>' + dfHTML
 
-  #--- Image captions
   if captions is None:
      captions = [''] * len(fnamesPNG)
   else:
      captions = [captions[i] if i<len(captions) else '' for i,_ in enumerate(fnamesPNG)]
   captions = [f'<p class="label">{cap}</p>' if len(cap)>0 else '' for cap in captions]
 
-  #--- Read image
   images = []
   for iPng, fnPNG in enumerate(fnamesPNG):
     with open(fnPNG, 'rb') as f:
@@ -189,9 +192,8 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         images.append(f'{captions[iPng]}<img width=100% src="data:image/png;base64,{base64_image}">')
   images = ''.join(images)
 
-  license='<p class="text">Notice: By using PSMD, you agree to the software license terms described at <a href="http://psmd-marker.com">http://psmd-marker.com</a></p>'
+  license='<p class="text">Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the <a href="https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE">LICENSE file</a> at <a href="https://github.com/isdneuroimaging/DELTA-SVD">https://github.com/isdneuroimaging/DELTA-SVD</a></p>'
 
-  #--- Style
   style='''
   <style>
     :root {
@@ -273,6 +275,32 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         background: #fdecd6;
         color: #b5651d;
     }
+    /* Hoverable badge: reveals the default it deviates from */
+    .tag--tip {
+        position: relative;
+        cursor: help;
+        border-bottom: 1px dotted currentColor;
+    }
+    .tag--tip:hover::after,
+    .tag--tip:focus::after {
+        content: attr(data-default);
+        position: absolute;
+        left: 0;
+        top: calc(100% + 6px);
+        width: max-content;
+        max-width: 260px;
+        white-space: normal;
+        text-align: left;
+        font-size: 8.5pt;
+        font-weight: 400;
+        line-height: 1.3;
+        color: #ffffff;
+        background: var(--ink);
+        padding: 5px 8px;
+        border-radius: 6px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+        z-index: 10;
+    }
 
     /* Code & paths */
     code {
@@ -342,6 +370,20 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         white-space: nowrap;
         text-align: left;
     }
+    /* Long file paths wrap inside their cell instead of widening the whole
+       table past the page (important for printing/PDF, where there is no
+       horizontal scroll). The filename is emphasised and the directory dimmed
+       so the path stays scannable once it wraps across lines. */
+    .inputs td code,
+    .meta-table td code {
+        overflow-wrap: anywhere;
+    }
+    .path-dir {
+        color: var(--muted);
+    }
+    .path-name {
+        font-weight: 700;
+    }
 
     /* Footer / license notice */
     .footer .text {
@@ -351,14 +393,13 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
   </style>
   '''
 
-  #--- Create html string
-  html=f'''
+  html_doc=f'''
   <!DOCTYPE html>
   <html lang="en">
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>QC Image WMH Segmentation</title>
+      <title>{page_title}</title>
       {style}
     </head>
     <body>
@@ -376,6 +417,5 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
   </html>
   '''
   
-  #--- write to HTML file
   with open(fnHTML, 'w') as fp:
-      fp.write(html)
+      fp.write(html_doc)

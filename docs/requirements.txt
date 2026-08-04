@@ -1,0 +1,9 @@
+# Documentation build dependencies (Zensical static site generator).
+# Kept separate from the project's runtime/container dependencies.
+#
+# Zensical is pre-1.0 (alpha); pin exactly so builds stay reproducible.
+zensical==0.0.46
+# NOT bundled with Zensical: provides the `github-callouts` extension that turns
+# GitHub-style "> [!NOTE]" alerts into admonitions. Removing this breaks them.
+markdown-callouts==0.4.0
+# pymdown-extensions is pulled in transitively by zensical.

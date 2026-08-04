@@ -1,0 +1,10 @@
+*
+!container/
+!LICENSE
+!NOTICE
+# Copied next to the scripts, which read it for --version
+!VERSION
+
+# Re-exclude Python bytecode caches pulled back in by !container/
+**/__pycache__
+**/*.pyc

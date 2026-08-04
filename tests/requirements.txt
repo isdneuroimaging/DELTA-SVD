@@ -1,0 +1,20 @@
+# Dependencies for running the unit tests outside the container image.
+#
+# Deliberately unpinned. These tests exercise script logic - argument handling,
+# path resolution, table assembly, metric naming - which is stable across a wide
+# range of versions; the suite passes unchanged on a current scientific stack.
+# They are NOT a check of the numbers the pipeline produces - that is
+# tools/compare_results.py's job, run on before/after full pipeline runs (see
+# CONTRIBUTING.md). Running this suite against the exact stack pinned in
+# container/conda-explicit-linux-64.txt instead of PyPI is what
+# tests/run-in-locked-env.sh is for; the image itself ships no pytest.
+pytest
+
+# The scientific stack imported by container/scripts/
+dipy
+imageio
+matplotlib
+nibabel
+numpy
+pandas
+scipy

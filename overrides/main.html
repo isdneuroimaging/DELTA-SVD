@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{#
+  Open Graph / Twitter card tags for link previews; the theme emits none itself.
+  Scrapers do not resolve relative URLs, hence the absolute ones built from
+  'site_url'. The card image is 'docs/assets/og-image.png' on every page.
+#}
+
+{% block extrahead %}
+  {% set site = config.site_url | trim('/') %}
+  {% if page.meta and page.meta.title %}
+    {% set page_title = page.meta.title %}
+  {% else %}
+    {% set page_title = page.title | d(config.site_name) | striptags %}
+  {% endif %}
+  {# Avoids "DELTA-SVD - DELTA-SVD" on the landing page. #}
+  {% if page_title == config.site_name %}
+    {% set title = config.site_name %}
+  {% else %}
+    {% set title = page_title ~ " - " ~ config.site_name %}
+  {% endif %}
+  {% if page.meta and page.meta.description %}
+    {% set description = page.meta.description %}
+  {% else %}
+    {% set description = config.site_description | trim %}
+  {% endif %}
+  {% set image = site ~ "/assets/og-image.png" %}
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description }}">
+  <meta property="og:url" content="{{ page.canonical_url | d(site ~ '/') }}">
+  <meta property="og:image" content="{{ image }}">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="{{ config.site_name }} - {{ description }}">
+
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ title }}">
+  <meta name="twitter:description" content="{{ description }}">
+  <meta name="twitter:image" content="{{ image }}">
+  <meta name="twitter:image:alt" content="{{ config.site_name }} - {{ description }}">
+{% endblock %}
