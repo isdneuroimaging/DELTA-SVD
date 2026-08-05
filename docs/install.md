@@ -69,6 +69,16 @@ docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.0 --help
 
 If you see the DELTA-SVD option help, you are ready to go; continue with [Usage](usage.md).
 
+## Verify the image's provenance
+
+Every release image is built and pushed by a GitHub Actions workflow that attaches a [Sigstore](https://www.sigstore.dev/)-signed build attestation, verifiable with the [GitHub CLI](https://cli.github.com/) (`gh`, version 2.49 or later):
+
+```
+gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.0 --owner isdneuroimaging
+```
+
+A successful verification confirms the image was built by that workflow from the corresponding tagged commit in the [DELTA-SVD repository](https://github.com/isdneuroimaging/DELTA-SVD), not assembled or pushed by hand.
+
 ## Checking which version you have
 
 Because results from different versions must not be pooled, it is worth being able to confirm which one a `.sif` file or an image tag actually is. Pass `--version`:

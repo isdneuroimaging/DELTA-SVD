@@ -78,7 +78,7 @@ container/build.sh delta-svd:dev   # custom tag; extra args pass through to dock
 
 ### Releasing
 
-Releases are cut by hand — there is no release CI. Rebuilding the same commit does not reliably reproduce the image byte-for-byte, since the `apt` pins in the `Dockerfile` are wildcards and the FSL source tarballs are fetched at build time. So the artefact is built once, checked, validated, and only then pushed.
+Releases are built and staged by CI ([`release-build.yml`](.github/workflows/release-build.yml)), validated by hand against the staged digest, then published by a second CI workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) that copies the validated manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` without a human having checked the exact digest first.
 
 Expect rebuilding an *older* commit to fail outright rather than merely differ: the `apt` pins resolve against the live Ubuntu archive, and `ca-certificates`' version is itself a date, so the pin stops matching as soon as the archive moves on. **The pushed image digest, not the source tree, is the artefact of record for a release.** Recover an old release by pulling its digest, not by rebuilding its tag.
 
@@ -91,67 +91,38 @@ Only exact version tags are published. There is **no `latest` tag**: results fro
     - [`CITATION.cff`](CITATION.cff) — its `version:` field, which GitHub renders in "Cite this repository";
     - [`docs/install.md`](docs/install.md) — the image tag in the `apptainer pull` / `docker pull` / verification commands, which otherwise keeps handing users the *previous* image.
 
-    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `build.sh` stamps the OCI label, and the `Dockerfile` copies the file next to the scripts, which is what `--version` reports.
+    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `release-build.yml` stamps the OCI label the same way `build.sh` does for a local build, and the `Dockerfile` copies the file next to the scripts, which is what `--version` reports.
 
-2. **Build from the release commit on a Linux x86-64 host**, with a clean working tree:
-
-    ```bash
-    container/build.sh "ghcr.io/isdneuroimaging/delta-svd:$(tr -d '[:space:]' < VERSION)"
-    ```
-
-3. **Check the image before it leaves the machine.** The labels must name the release commit, and the revision must not end in `-dirty`:
-
-    ```bash
-    IMAGE="ghcr.io/isdneuroimaging/delta-svd:$(tr -d '[:space:]' < VERSION)"
-    docker inspect -f 'version={{index .Config.Labels "org.opencontainers.image.version"}} revision={{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE"
-    docker run --rm "$IMAGE" --help
-    docker run --rm "$IMAGE" --version
-    ```
-
-    `--version` must print the same version as the label, and must not say `unknown`: both come from `VERSION`, the label via `build.sh`'s build arg and the runtime string via the copy of the file the `Dockerfile` places next to the scripts. A mismatch or `unknown` means that `COPY` (or the `!VERSION` line in `.dockerignore`) was lost.
-
-4. **Validate**, unless the change is provably not metric-affecting. Run the longitudinal comparison from [Validation status](#validation-status-read-this-first) using *this* image, not a local rebuild: it is this artefact that the numbers are being attached to.
-
-5. **Push, and record the digest**: the digest, not the tag, identifies what was validated, and step 7 is where it gets written down. `docker push` prints it, and it can be read back afterwards:
-
-    ```bash
-    docker login ghcr.io
-    docker push "$IMAGE"
-    docker inspect -f '{{index .RepoDigests 0}}' "$IMAGE"
-    ```
-
-    **On the first push ever, the package is created private**, so the `docker pull` / `apptainer pull` commands in [`docs/install.md`](docs/install.md) fail for everyone except accounts with access to the organisation. Making it public is a one-time manual step — package page → Package settings → Danger Zone → Change visibility — with no REST API behind it; once set, later releases inherit it. Check from an unauthenticated shell, which needs no `gh` login and no package scopes:
-
-    ```bash
-    curl -s -o /dev/null -w '%{http_code}\n' \
-        'https://ghcr.io/token?scope=repository:isdneuroimaging/delta-svd:pull&service=ghcr.io'
-    ```
-
-    `200` means public and pullable by anyone; `401` means still private. The package's link back to this repository, which populates the sidebar on the package page and the "Packages" entry on the repository page, needs no action: it comes from `org.opencontainers.image.source` in the [`Dockerfile`](container/Dockerfile), which GHCR reads on push. A package showing no repository means that label was lost.
-
-6. **Tag the source** at the release commit, and push the tag:
+2. **Tag the release commit and push the tag.** This triggers `release-build.yml`, which checks the tag against `VERSION`, builds the image (same semantics as a local `build.sh` run), and pushes it — attested via `actions/attest-build-provenance` — to a public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`, tagged by commit SHA only so it can never be mistaken for a release.
 
     ```bash
     git tag -a "v$(tr -d '[:space:]' < VERSION)" -m "DELTA-SVD $(tr -d '[:space:]' < VERSION)"
     git push origin "v$(tr -d '[:space:]' < VERSION)"
     ```
 
-    Pushing a tag triggers no CI: both workflows are branch-triggered, so nothing happens automatically from here on.
+    Watch the run's job summary for the staged digest — everything from here on refers to that digest, not the tag.
 
-7. **Draft the GitHub release**, which is where the digest from step 5 gets recorded. `--draft` keeps it unpublished and visible only to accounts with push access, so the notes can be refined in the web UI before anyone sees them. Needs `gh auth login`, which is separate from the `docker login ghcr.io` in step 5:
+    If validation below fails and needs a fix, delete the tag, commit the fix, and re-tag: nothing has reached the production package yet, so moving the tag is safe.
+
+3. **Validate**, unless the change is provably not metric-affecting. Run the longitudinal comparison from [Validation status](#validation-status-read-this-first) using *the staged digest*, not a local rebuild:
 
     ```bash
-    VER="$(tr -d '[:space:]' < VERSION)"
-    gh release create "v$VER" \
-        --draft \
-        --verify-tag \
-        --title "DELTA-SVD $VER" \
-        --notes "Image: \`$(docker inspect -f '{{index .RepoDigests 0}}' "$IMAGE")\`"
+    DIGEST="sha256:..."   # from the release-build.yml job summary
+    docker pull "ghcr.io/isdneuroimaging/delta-svd-staging@$DIGEST"
     ```
 
-    `--verify-tag` is not optional. Without it, a tag that has not reached the remote is created by `gh` itself from the tip of the default branch, which would attach the release to whatever `main` currently is rather than to the validated release commit; with it, the command aborts instead. Check that the drafted notes actually name a digest before publishing: `RepoDigests` is populated only after a successful push and expands to an empty string otherwise.
+4. **Promote.** Once validated, run `release-promote.yml` with that digest — Actions tab → "Run workflow", or `gh workflow run release-promote.yml -f digest="$DIGEST"`. It re-reads the image's own `version`/`revision` labels (refusing anything malformed, `unknown`, or `-dirty`), copies the manifest — never a rebuild — to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, and opens a draft GitHub release recording it.
 
-    Publish from the web UI once the notes are final, or with `gh release edit "v$VER" --draft=false`. The "Latest" badge GitHub then puts on the release is unrelated to the container registry's deliberately absent `latest` tag — it marks the newest release on the repository page and is fine to leave on.
+    **On the first push ever to the production package**, GHCR creates it private, so `docker pull` / `apptainer pull` fail for everyone outside the organisation until it's made public by hand — package page → Package settings → Danger Zone → Change visibility. Check from an unauthenticated shell:
+
+    ```bash
+    curl -s -o /dev/null -w '%{http_code}\n' \
+        'https://ghcr.io/token?scope=repository:isdneuroimaging/delta-svd:pull&service=ghcr.io'
+    ```
+
+    `200` means public; `401` means still private.
+
+5. **Publish the draft release** from the web UI, or `gh release edit "v$VER" --draft=false`.
 
 ### Tests
 
