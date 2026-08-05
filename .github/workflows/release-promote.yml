@@ -1,13 +1,15 @@
 name: release-promote
 
 # Publishes a digest staged by release-build.yml, once a human has validated
-# it; see CONTRIBUTING.md "Releasing". Copies the manifest, never rebuilds,
-# so the published image is byte-for-byte the artefact that was validated.
+# it; see CONTRIBUTING.md "Releasing". Copies the manifest with crane, never
+# rebuilds, so the published image is byte-for-byte the artefact that was
+# validated. Not `docker buildx imagetools create`: even given one source, it
+# re-wraps the manifest into a new index and changes the digest.
 on:
   workflow_dispatch:
     inputs:
-      digest:
-        description: 'Validated digest from delta-svd-staging (sha256:...)'
+      image:
+        description: 'Validated staged image, e.g. ghcr.io/isdneuroimaging/delta-svd-staging@sha256:... (copy straight from the release-build.yml job summary)'
         required: true
 
 permissions:
@@ -18,34 +20,32 @@ jobs:
   promote:
     runs-on: ubuntu-latest
     env:
-      SRC: ghcr.io/isdneuroimaging/delta-svd-staging@${{ github.event.inputs.digest }}
+      SRC: ${{ github.event.inputs.image }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: imjasonh/setup-crane@v0.7
 
       # Version comes from the image's own labels, not a checkout: this re-check is
       # what stops a malformed or unvalidated digest reaching the production tag.
       - name: Re-verify labels on the staged digest
         id: labels
         run: |
-          LABELS="$(docker buildx imagetools inspect "$SRC" --format '{{json .Image.Config.Labels}}')"
+          LABELS="$(crane config "$SRC" | jq '.config.Labels')"
           VERSION="$(echo "$LABELS" | jq -r '."org.opencontainers.image.version" // empty')"
           REVISION="$(echo "$LABELS" | jq -r '."org.opencontainers.image.revision" // empty')"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad or missing version label: '$VERSION'"; exit 1; }
           [[ -n "$REVISION" && "$REVISION" != "unknown" && "$REVISION" != *-dirty ]] || { echo "::error::bad, unknown, or dirty revision label: '$REVISION'"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "digest=${SRC#*@}" >> "$GITHUB_OUTPUT"
 
       - name: Copy manifest to the production package
-        run: |
-          docker buildx imagetools create \
-            --tag "ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}" \
-            "$SRC"
+        run: crane copy "$SRC" "ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}"
 
       # --verify-tag requires the v<VERSION> tag on the remote; it does, since
       # pushing it is what triggered the build.
@@ -57,11 +57,11 @@ jobs:
             --draft \
             --verify-tag \
             --title "DELTA-SVD ${VER}" \
-            --notes "Image: \`ghcr.io/isdneuroimaging/delta-svd@${{ github.event.inputs.digest }}\`"
+            --notes "Image: \`ghcr.io/isdneuroimaging/delta-svd@${{ steps.labels.outputs.digest }}\`"
 
       - name: Job summary
         run: |
           {
             echo "### Promoted"
-            echo "\`ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}\` @ \`${{ github.event.inputs.digest }}\`"
+            echo "\`ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}\` @ \`${{ steps.labels.outputs.digest }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

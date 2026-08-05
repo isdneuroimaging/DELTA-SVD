@@ -78,7 +78,7 @@ container/build.sh delta-svd:dev   # custom tag; extra args pass through to dock
 
 ### Releasing
 
-Releases are built and staged by CI ([`release-build.yml`](.github/workflows/release-build.yml)), validated by hand against the staged digest, then published by a second CI workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) that copies the validated manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` without a human having checked the exact digest first.
+Releases are built and staged by CI ([`release-build.yml`](.github/workflows/release-build.yml)), validated by hand against the staged image, then published by a second CI workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) that copies the validated manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` without a human having checked the exact digest first.
 
 Expect rebuilding an *older* commit to fail outright rather than merely differ: the `apt` pins resolve against the live Ubuntu archive, and `ca-certificates`' version is itself a date, so the pin stops matching as soon as the archive moves on. **The pushed image digest, not the source tree, is the artefact of record for a release.** Recover an old release by pulling its digest, not by rebuilding its tag.
 
@@ -100,27 +100,18 @@ Only exact version tags are published. There is **no `latest` tag**: results fro
     git push origin "v$(tr -d '[:space:]' < VERSION)"
     ```
 
-    Watch the run's job summary for the staged digest — everything from here on refers to that digest, not the tag.
+    Watch the run's job summary for the staged image reference (`ghcr.io/isdneuroimaging/delta-svd-staging@sha256:...`) and copy it — everything from here on refers to that, not the tag.
 
     If validation below fails and needs a fix, delete the tag, commit the fix, and re-tag: nothing has reached the production package yet, so moving the tag is safe.
 
-3. **Validate**, unless the change is provably not metric-affecting. Run the longitudinal comparison from [Validation status](#validation-status-read-this-first) using *the staged digest*, not a local rebuild:
+3. **Validate**, unless the change is provably not metric-affecting. Run the longitudinal comparison from [Validation status](#validation-status-read-this-first) using *the staged image*, not a local rebuild:
 
     ```bash
-    DIGEST="sha256:..."   # from the release-build.yml job summary
-    docker pull "ghcr.io/isdneuroimaging/delta-svd-staging@$DIGEST"
+    STAGED="ghcr.io/isdneuroimaging/delta-svd-staging@sha256:..."   # from the job summary
+    apptainer pull delta-svd_staging.sif "docker://$STAGED"
     ```
 
-4. **Promote.** Once validated, run `release-promote.yml` with that digest — Actions tab → "Run workflow", or `gh workflow run release-promote.yml -f digest="$DIGEST"`. It re-reads the image's own `version`/`revision` labels (refusing anything malformed, `unknown`, or `-dirty`), copies the manifest — never a rebuild — to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, and opens a draft GitHub release recording it.
-
-    **On the first push ever to the production package**, GHCR creates it private, so `docker pull` / `apptainer pull` fail for everyone outside the organisation until it's made public by hand — package page → Package settings → Danger Zone → Change visibility. Check from an unauthenticated shell:
-
-    ```bash
-    curl -s -o /dev/null -w '%{http_code}\n' \
-        'https://ghcr.io/token?scope=repository:isdneuroimaging/delta-svd:pull&service=ghcr.io'
-    ```
-
-    `200` means public; `401` means still private.
+4. **Promote.** Once validated, run `release-promote.yml` with that same image reference — Actions tab → "Run workflow", or `gh workflow run release-promote.yml -f image="$STAGED"`. It re-reads the image's own `version`/`revision` labels (refusing anything malformed, `unknown`, or `-dirty`), copies the manifest — never a rebuild — to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, and opens a draft GitHub release recording it.
 
 5. **Publish the draft release** from the web UI, or `gh release edit "v$VER" --draft=false`.
 
