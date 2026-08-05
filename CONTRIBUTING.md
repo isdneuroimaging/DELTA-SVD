@@ -197,7 +197,7 @@ There is one deliberate exception, documented in the lock's own header: the four
 
 ## Documentation
 
-The documentation site is built with [Zensical](https://zensical.org/), a static site generator by the [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) team. It reads the standard [`mkdocs.yml`](mkdocs.yml); all content lives in [`docs/`](docs/) as Markdown, which stays readable directly on GitHub. The site is published to GitHub Pages by the [`docs` workflow](.github/workflows/docs.yml) on every push to `main` that touches `docs/`, `overrides/`, `mkdocs.yml`, or the workflow itself.
+The documentation site is built with [Zensical](https://zensical.org/), a static site generator by the [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) team. It reads the standard [`mkdocs.yml`](mkdocs.yml); all content lives in [`docs/`](docs/) as Markdown, which stays readable directly on GitHub. The site is published to GitHub Pages by the [`docs` workflow](.github/workflows/docs.yml) on every push to `main` that touches `docs/`, `overrides/`, `mkdocs.yml`, or the workflow itself. Pull requests touching those same paths run the build without deploying, so a broken link or a stale `nav:` entry fails the strict build on the pull request rather than on `main`.
 
 ### One-time setup
 

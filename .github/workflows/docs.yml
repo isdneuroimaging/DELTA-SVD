@@ -1,6 +1,12 @@
 name: docs
 
 on:
+  pull_request:
+    paths:
+      - docs/**
+      - overrides/**
+      - mkdocs.yml
+      - .github/workflows/docs.yml
   push:
     branches: [main]
     paths:
@@ -10,26 +16,27 @@ on:
       - .github/workflows/docs.yml
   workflow_dispatch:
 
-# Deploy the built site to GitHub Pages via the Pages artifact flow.
-# Requires Settings > Pages > Source set to "GitHub Actions".
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-# Allow one Pages deployment at a time; in-progress runs finish
-# (cancel-in-progress defaults to false, so the string form suffices).
-concurrency: pages
 
 jobs:
-  build-deploy:
+  # Runs for every trigger, pull requests included. `zensical build --strict`
+  # fails on a broken link or a stale nav entry, so building on the pull
+  # request catches those before the merge rather than on main, where the
+  # failure would land with a Pages deployment already in flight.
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    # Superseded builds are safe to cancel; only the deploy below is not.
+    concurrency:
+      group: docs-build-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/configure-pages@v6
+      # Pages-specific, so skipped on pull requests: it calls the Pages API,
+      # which the read-only token of a fork's pull request cannot do, and
+      # there is no artifact to deploy from a pull-request build anyway.
+      - if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v6
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -39,8 +46,27 @@ jobs:
       # --clean skips the build cache (not recommended on CI yet); --strict
       # fails on broken links or nav entries.
       - run: zensical build --strict --clean
-      - uses: actions/upload-pages-artifact@v5
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
+
+  # Deploy the built site to GitHub Pages via the Pages artifact flow.
+  # Requires Settings > Pages > Source set to "GitHub Actions".
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Allow one Pages deployment at a time; in-progress runs finish
+    # (cancel-in-progress defaults to false, so the string form suffices).
+    # Scoped to this job, so a pull-request build never queues behind a deploy.
+    concurrency: pages
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - uses: actions/deploy-pages@v5
         id: deployment
