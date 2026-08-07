@@ -38,7 +38,7 @@ Registration divides its similarity metric across threads and sums the parts, so
 
 DELTA-SVD therefore fixes the registration thread count at the value the method was validated with, instead of deriving it from the cores available. This is why `--threads` and `--para` affect only runtime and memory: they decide how many registrations run at once, never how each one is computed.
 
-`--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it**: results produced with a different value cannot be compared with, or pooled with, results produced at the default, exactly as for the DELTA-SVD version itself.
+`--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it**: results produced with a different value cannot be compared with, or pooled with, results produced at the default — unlike a DELTA-SVD `PATCH` version, there is no safe value to deviate to; only the default is validated.
 
 ## Running on an HPC cluster
 

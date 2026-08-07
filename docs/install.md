@@ -28,7 +28,7 @@ No separate Python, FSL, or ANTs installation is required; those are all provide
 
 ## Getting the image
 
-The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**: only results produced with the same version can be compared or pooled, so every run has to name the version it uses and none can silently pick up a newer one.
+The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**: results from a different `MAJOR.MINOR` version can't be pooled (see below), so every run has to name the version it uses and none can silently pick up a newer one.
 
 > [!IMPORTANT]
 > **Use one version per project.** Only results produced with the same DELTA-SVD version can be compared or pooled. Choose a version at the start of a project and process all data with it; do not upgrade partway through. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). The exception is bug-fix releases, which differ only in the last (`PATCH`) digit: these are safe to mix within a project, as they do not change results. Any change in the first two numbers can shift the metrics, so results from different `MAJOR.MINOR` versions must not be combined.
@@ -81,7 +81,7 @@ A successful verification confirms the image was built by that workflow from the
 
 ## Checking which version you have
 
-Because results from different versions must not be pooled, it is worth being able to confirm which one a `.sif` file or an image tag actually is. Pass `--version`:
+Because results from a different `MAJOR.MINOR` version must not be pooled, it is worth being able to confirm which one a `.sif` file or an image tag actually is. Pass `--version`:
 
 ```
 apptainer run delta-svd.sif --version

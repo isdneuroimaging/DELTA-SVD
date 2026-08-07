@@ -64,6 +64,7 @@ Rules for the runs being compared:
 ### Workflow
 
 - Development happens on a feature branch; open pull requests against `main`.
+- `main` is protected: it takes a pull request with at least one approving review and passing status checks (`pytest` on 3.11 and 3.14, `hadolint`, `compileall`). There is no direct-push or force-push exception, including for maintainers.
 - [`VERSION`](VERSION) is the single source of truth for the release version; bump it in the same change that cuts a release.
 - Keep the working tree clean before building a release image: `build.sh` marks the image revision `-dirty` when there is any uncommitted change, including an untracked file.
 
@@ -82,9 +83,11 @@ Releases are built and staged by CI ([`release-build.yml`](.github/workflows/rel
 
 Expect rebuilding an *older* commit to fail outright rather than merely differ: the `apt` pins resolve against the live Ubuntu archive, and `ca-certificates`' version is itself a date, so the pin stops matching as soon as the archive moves on. **The pushed image digest, not the source tree, is the artefact of record for a release.** Recover an old release by pulling its digest, not by rebuilding its tag.
 
-Only exact version tags are published. There is **no `latest` tag**: results from different versions must not be pooled, so no run should be able to pick up a new version by accident.
+Only exact version tags are published. There is **no `latest` tag**: results from a different `MAJOR.MINOR` version must not be pooled, so no run should be able to pick up a new one by accident.
 
 1. **Bump [`VERSION`](VERSION)** and commit it. Last digit only for a change that provably leaves every metric untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones.
+
+    Land this through a normal pull request first — `main` is protected, so the bump commit has to be merged (not pushed directly) before it can be tagged in the next step.
 
     `VERSION` is the single source of truth, but two files restate it by hand because their formats cannot interpolate, and both have to move in the same commit:
 
