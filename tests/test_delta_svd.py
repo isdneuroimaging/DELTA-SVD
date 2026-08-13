@@ -47,8 +47,11 @@ def test_isCSV_accepts_csv_extension(delta_svd, name):
 
 
 def test_isCSV_rejects_other_extensions(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError):
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
         delta_svd.isCSV("results.txt")
+    # every other type= validator names its own option; this one used to be the
+    # odd one out, leaving the reader to guess which flag it meant
+    assert "--reprocess" in str(excinfo.value)
 
 
 def test_assertPositiveJobs_accepts_values_at_or_above_one(delta_svd):
@@ -347,6 +350,31 @@ def test_custom_parser_falls_back_to_the_command_line(delta_svd, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["delta-svd.py", "-o", "foo"])
 
     assert parser.parse_args().dirOutput == "foo"
+
+
+def test_custom_parser_suggests_the_double_dash_form_when_known(delta_svd, capsys):
+    # the likeliest real-world case: '--shells' mistyped with one dash
+    parser = _minimal_parser(delta_svd)
+    parser.add_argument("--shells", nargs="+")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-shells", "700"])
+    assert 'Did you mean "--shells"?' in capsys.readouterr().err
+
+
+def test_custom_parser_suggests_the_double_dash_form_with_attached_value(delta_svd, capsys):
+    # '=' attaches a value to a long option; the suggestion must strip it first
+    parser = _minimal_parser(delta_svd)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-dirOutput=foo"])
+    assert 'Did you mean "--dirOutput"?' in capsys.readouterr().err
+
+
+def test_custom_parser_omits_suggestion_for_unknown_options(delta_svd, capsys):
+    # a typo that doesn't match any registered option gets the plain message
+    parser = _minimal_parser(delta_svd)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-bogus"])
+    assert "Did you mean" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -2003,6 +2031,128 @@ def test_missing_bmask_raises_naming_the_option(delta_svd, tmp_path, monkeypatch
     assert str(tmp_path / "sub01_brainmask.nii.gz") in msg
     assert str(tmp_path / "sub01_brainmask.nii") in msg
     assert "'--bmask'" in msg
+
+
+# ---------------------------------------------------------------------------
+# An inferred path already carries the DWI folder, so re-anchoring it to that
+# folder would only probe '<dwiDir>/<dwiDir>/<name>'. Absolute paths hide this,
+# because os.path.join() discards its first argument for them -- these tests use
+# relative ones on purpose.
+
+def test_inferred_path_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path, monkeypatch):
+    sub = tmp_path / "Notch004" / "BL" / "diffusion"
+    sub.mkdir(parents=True)
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    for fn in ["data.nii.gz", "data.bval", "data.bvec"]:
+        (sub / fn).touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", "Notch004/BL/diffusion/data.nii.gz",
+        "--skeletonMask", "skel.nii.gz", "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    lines = str(excinfo.value).splitlines()
+    looked = [ln.strip() for ln in lines[lines.index(" Looked for:") + 1:]
+              if ln.startswith("   ")]
+    assert looked == ["Notch004/BL/diffusion/data_brainmask.nii.gz",
+                      "Notch004/BL/diffusion/data_brainmask.nii"]
+
+
+def test_candidate_paths_re_anchors_only_what_the_user_typed(delta_svd):
+    dwi = "study/sub01/data.nii.gz"
+    # inferred: already carries the folder, so it is probed as-is only
+    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True, inferred=True) == [
+        "study/sub01/data_brainmask.nii.gz", "study/sub01/data_brainmask.nii"]
+    # typed: a bare basename has to be resolvable against the DWI folder
+    assert delta_svd.candidate_paths("m.nii.gz", dwi, True, inferred=False) == [
+        "m.nii.gz", "study/sub01/m.nii.gz"]
+
+
+def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_path, monkeypatch, capsys):
+    # the feature the second probe exists for must survive the fix, relative too
+    sub = tmp_path / "study" / "sub01"
+    sub.mkdir(parents=True)
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    for fn in ["data.nii.gz", "data.bval", "data.bvec", "mask.nii.gz"]:
+        (sub / fn).touch()
+    monkeypatch.chdir(tmp_path)
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", "study/sub01/data.nii.gz", "--bmask", "mask.nii.gz",
+        "--skeletonMask", "skel.nii.gz", "--steps", "qc", "--qc", "0",
+    ])
+    assert "Bmask :study/sub01/mask.nii.gz" in out
+
+
+# ---------------------------------------------------------------------------
+# The extension probing appends to the name as given, so for 'data.nii' it looks
+# for 'data.nii.nii.gz' -- it never reaches 'data.nii.gz'. The message must not
+# claim otherwise, and the sibling that is actually there is worth naming.
+
+def test_isNIfTI_names_the_sibling_with_the_other_extension(delta_svd, tmp_path):
+    (tmp_path / "data.nii.gz").touch()
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data.nii"))
+
+    msg = str(excinfo.value)
+    assert "also tried" not in msg
+    assert str(tmp_path / "data.nii.gz") in msg
+
+
+def test_isNIfTI_names_the_sibling_in_the_other_direction(delta_svd, tmp_path):
+    (tmp_path / "data.nii").touch()
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data.nii.gz"))
+
+    assert str(tmp_path / "data.nii") in str(excinfo.value)
+
+
+def test_isNIfTI_does_not_claim_probes_it_did_not_make(delta_svd, tmp_path):
+    # nothing there at all, and the name already carries an extension
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data.nii"))
+
+    assert "also tried" not in str(excinfo.value)
+
+
+def test_isNIfTI_still_reports_the_probes_for_an_extensionless_name(delta_svd, tmp_path):
+    # here the probes are real, and naming them tells the user what was searched
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data"))
+
+    msg = str(excinfo.value)
+    assert str(tmp_path / "data.nii.gz") in msg
+    assert str(tmp_path / "data.nii") in msg
+
+
+def test_nifti_sibling_returns_none_without_a_counterpart(delta_svd, tmp_path):
+    (tmp_path / "data.nii.gz").touch()
+    assert delta_svd.nifti_sibling(str(tmp_path / "other.nii")) is None
+    assert delta_svd.nifti_sibling(str(tmp_path / "notes.txt")) is None
+    # the file asked for is never substituted, only reported
+    assert delta_svd.nifti_sibling(str(tmp_path / "data.nii")) == str(tmp_path / "data.nii.gz")
+
+
+def test_explicit_bmask_with_wrong_extension_names_the_sibling(delta_svd, tmp_path, monkeypatch):
+    dwi = tmp_path / "sub01.nii.gz"
+    skel = tmp_path / "skel.nii.gz"
+    for fn in [dwi, skel, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
+               tmp_path / "mask.nii.gz"]:
+        fn.touch()
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", str(dwi), "--bmask", "mask.nii",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "other NIfTI extension" in msg
+    assert str(tmp_path / "mask.nii.gz") in msg
 
 
 def test_missing_explicit_bmask_reports_it_as_given(delta_svd, tmp_path, monkeypatch):

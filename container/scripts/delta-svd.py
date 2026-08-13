@@ -1173,6 +1173,23 @@ def section_header(text, startPrevious = None):
 NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
 
 
+def nifti_sibling(s):
+    """The same path carrying the other NIfTI extension, when that file exists.
+
+    Asking for 'data.nii' where only 'data.nii.gz' is present is an easy mistake,
+    and the extension probing in isNIfTI() cannot catch it: that appends to the
+    name as given, so it looks for 'data.nii.nii.gz'. Reported rather than
+    accepted -- the file asked for is not the file found, and substituting it
+    silently would be the wrong kind of helpful."""
+    if s.endswith('.nii.gz'):
+        alt = s[:-len('.gz')]
+    elif s.endswith('.nii'):
+        alt = s + '.gz'
+    else:
+        return None
+    return alt if os.path.isfile(alt) else None
+
+
 def isNIfTI(s, abort=True):
     if os.path.isfile(s) and s.endswith(NIFTI_EXTENSIONS):
         return s
@@ -1190,22 +1207,38 @@ def isNIfTI(s, abort=True):
                 raise argparse.ArgumentTypeError(
                     f"file is not a NIfTI image -- its name ends in neither '.nii' nor "
                     f"'.nii.gz'. Please check: {s}")
+            sibling = nifti_sibling(s)
+            if sibling is not None:
+                raise argparse.ArgumentTypeError(
+                    f"file does not exist, but one with the other NIfTI extension does:\n"
+                    f"    {sibling}\n  Please check: {s}")
+            # The probes above append to the name as given, so they are only worth
+            # reporting when it carried no NIfTI extension of its own -- otherwise
+            # they looked for 'data.nii.nii.gz' and claiming they tried '.nii.gz'
+            # would be untrue.
+            if s.endswith(NIFTI_EXTENSIONS):
+                raise argparse.ArgumentTypeError(f"file does not exist. Please check: {s}")
             raise argparse.ArgumentTypeError(
-                f"file does not exist (also tried the extensions '.nii.gz' and '.nii'). "
+                f"file does not exist (also tried '{s}.nii.gz' and '{s}.nii'). "
                 f"Please check: {s}")
         else:
             return None
 
 
-def candidate_paths(fn, dwi, anyExtension):
+def candidate_paths(fn, dwi, anyExtension, inferred=False):
     """The paths an input given per time-point is looked for at, in order: as
     given, and relative to the folder of its DWI image; each optionally
     completed with a NIfTI extension.
 
     This mirrors the resolution for the sake of the error message only. What is
     accepted stays entirely with isNIfTI()/exists(), so this cannot widen it."""
+    #--- An inferred name is built from the DWI path and so already carries its
+    #    folder; joining it to that folder again would only look for
+    #    '<dwiDir>/<dwiDir>/<name>'. Only a path the user typed is worth
+    #    re-anchoring, which is what makes a bare basename work.
+    roots = [fn] if inferred else [fn, join(dirname(dwi), fn)]
     paths = []
-    for p in [fn, join(dirname(dwi), fn)]:
+    for p in roots:
         # isNIfTI() completes a path that carries no NIfTI extension of its own.
         # It does probe 'p' itself either way, but a name already ending in one
         # can only ever match as itself, so listing the completions would be noise.
@@ -1226,21 +1259,32 @@ def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
     Names the time-point by its DWI image rather than by an index: the '--tp'
     labels are not resolved yet at this point, and the path is what the user has
     to go and look at anyway."""
-    tried = '\n'.join(f'   {p}' for p in candidate_paths(fn, dwi, anyExtension))
+    paths = candidate_paths(fn, dwi, anyExtension, inferred)
+    tried = '\n'.join(f'   {p}' for p in paths)
     if inferred:
         origin = f" No '--{attr}' was given, so it was inferred from the DWI path."
         fix = f" Provide the correct path with '--{attr}'."
     else:
         origin = f" It was given as '{fn}'."
         fix = f" Please check the path given with '--{attr}'."
+    #--- the likeliest near-miss: the file is there under the other extension
+    siblings = []
+    for p in paths:
+        alt = nifti_sibling(p)
+        if alt is not None and alt not in siblings:
+            siblings.append(alt)
+    hint = ''
+    if siblings:
+        hint = (' A file with the other NIfTI extension is there:\n'
+                + '\n'.join(f'   {a}' for a in siblings) + '\n')
     return (f"No '--{attr}' file was found for the DWI image:\n   {dwi}\n"
-            f"{origin}\n Looked for:\n{tried}\n{fix}{note}")
+            f"{origin}\n Looked for:\n{tried}\n{hint}{fix}{note}")
 
 def isCSV(s):
     if s == 'overwrite' or s.endswith('.csv') or s.endswith('.CSV'):
         return s
     else:
-        raise argparse.ArgumentTypeError("The provided filename does not have the required '.csv' extension. Please check: %s"%(s))
+        raise argparse.ArgumentTypeError(f"--reprocess filename must end in '.csv'; you provided '{s}'")
     
 def assertPositiveJobs(s):
     try:
@@ -1309,7 +1353,14 @@ class CustomArgumentParser(argparse.ArgumentParser):
         for arg_string in args:
             if arg_string.startswith('-') and not arg_string.startswith('--'):
                 if len(arg_string) > 2 and not arg_string[2].isspace():
-                    self.error(f'single-dash options must be one character and separated from their argument by a space: "{arg_string}"')
+                    # The likeliest cause: a long option typed with one dash
+                    # instead of two, e.g. '-shells' for '--shells'. Only worth
+                    # naming when it really is one of ours; self.error() exits,
+                    # so this is built once and never on the success path.
+                    known = {opt for a in self._actions for opt in a.option_strings}
+                    long_form = '--' + arg_string[1:].split('=', 1)[0]
+                    hint = f' Did you mean "{long_form}"?' if long_form in known else ''
+                    self.error(f'single-dash options must be one character and separated from their argument by a space: "{arg_string}".{hint}')
         return super().parse_known_args(args, namespace)
     
 stepsImplemented = ['fwc','template','tbss','tbss_non_fa','extract','qc']
@@ -1392,7 +1443,9 @@ def pipeline_delta_svd():
                                     f"(n={len(args.dwi)}). Please refer to '--help'.")
         for i, fn in enumerate(flist):
             fnResolved = resolve(fn)
-            if fnResolved is None:
+            if fnResolved is None and not inferred:
+                # only a path the user typed is re-anchored to the DWI folder;
+                # see candidate_paths() for why an inferred one is not
                 fnResolved = resolve(join(dirname(args.dwi[i]), fn))
             if fnResolved is None:
                 raise DeltaSvdError(missing_input_message(attr, fn, args.dwi[i], anyExtension, inferred))
