@@ -94,6 +94,32 @@ Apptainer and rootless Podman map your host identity into the container, so they
 | --- | --- |
 | `--reprocess [name]` | Allow reprocessing over existing output (otherwise a run refuses to overwrite). Optionally give an alternative results-CSV base name to preserve the previous `delta-svd_results.csv`. |
 | `--debug` | Keep the `delta-svd_temp/` folder of intermediate files instead of deleting it. |
-| `--bRange LO HI` | b-value range used for tensor fitting (default `800 1200`). |
+| `--bRange LO HI` | b-value range used for tensor fitting (default `800 1200`). See [Selecting the b-values](#selecting-the-b-values) below. |
+| `--shells B [B ...]` | b-value shells used for tensor fitting, selected individually instead of as a range. Mutually exclusive with `--bRange`. |
 | `--skeletonMask <NIfTI>` | Use an alternative skeleton mask instead of the validated default. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
 | `--para <n>` | Number of ANTs registration jobs run at once during longitudinal template construction. Derived from the `--threads` budget by default and capped at the number of timepoints. Peak memory scales with it, so `--para 1` is the lowest-memory setting. |
+
+## Selecting the b-values
+
+DELTA-SVD fits the tensor on one shell around b = 1000 s/mm², selected from your data automatically, so multi-shell acquisitions need no special handling. Two options change which volumes are selected, and only one of them can be given at a time.
+
+**`--bRange LO HI`** takes the lower and upper limit of the shell(s) to include, and defaults to `800 1200`:
+
+```bash
+delta-svd.py --dwi sub01_dwi.nii.gz --bRange 900 1100
+```
+
+**`--shells B [B ...]`** names the shells individually instead:
+
+```bash
+delta-svd.py --dwi sub01_dwi.nii.gz --shells 700 1000
+```
+
+The difference matters on multi-shell data. `--bRange 700 1000` also selects everything in between, so an acquisition with a b = 850 shell would have it fitted along with the other two; `--shells 700 1000` takes only the two shells named.
+
+A few things hold for both options:
+
+- **b ≈ 0 volumes are always included**, whatever you ask for. They are what S0 is estimated from, and they are selected by their own rule (b ≤ 5 s/mm²). There is no need — and no way — to list them here.
+- **The limits are met with a tolerance**, because scanners report b-values that deviate from the nominal shell, through rounding and through cross-terms with the imaging gradients. A range limit is met within ±5 s/mm², so the default range accepts 795–1205; a shell is matched within ±25 s/mm², so `--shells 1000` accepts 975–1025. A shell needs the wider window because it is a point rather than an interval, where the tolerance is the whole acceptance window. If your data scatters further than that, use `--bRange`.
+- **Both are limited to 250–1800 s/mm².** Below that the diffusion signal is contaminated by perfusion, above it by non-Gaussian diffusion, so a tensor fitted there is not interpretable. A request outside the window is refused rather than fitted.
+- **A shell that matches no volume is an error**, as is a selection that leaves fewer than 12 distinct diffusion directions. See [Data requirements](requirements.md#acquisition) for what the fit needs.

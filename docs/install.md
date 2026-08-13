@@ -38,7 +38,7 @@ The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimag
 Pull the image and convert it to a local `.sif` file in one step:
 
 ```
-apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.0
+apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.1
 ```
 
 This writes `delta-svd.sif` into the current directory, the file used throughout the [Usage](usage.md) examples. Keep it somewhere stable (or on shared storage on a cluster) and point your runs at it.
@@ -48,7 +48,7 @@ This writes `delta-svd.sif` into the current directory, the file used throughout
 Pull the image into the local daemon's store:
 
 ```
-docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.0
+docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.1
 ```
 
 Replace `docker` with `podman` to use rootless Podman instead.
@@ -64,7 +64,7 @@ apptainer run delta-svd.sif --help
 or, with Docker:
 
 ```
-docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.0 --help
+docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --help
 ```
 
 If you see the DELTA-SVD option help, you are ready to go; continue with [Usage](usage.md).
@@ -74,7 +74,7 @@ If you see the DELTA-SVD option help, you are ready to go; continue with [Usage]
 Every release image is built and pushed by a GitHub Actions workflow that attaches a [Sigstore](https://www.sigstore.dev/)-signed build attestation, verifiable with the [GitHub CLI](https://cli.github.com/) (`gh`, version 2.49 or later):
 
 ```
-gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.0 --owner isdneuroimaging
+gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.1 --owner isdneuroimaging
 ```
 
 A successful verification confirms the image was built by that workflow from the corresponding tagged commit in the [DELTA-SVD repository](https://github.com/isdneuroimaging/DELTA-SVD), not assembled or pushed by hand.
@@ -87,7 +87,7 @@ Because results from a different `MAJOR.MINOR` version must not be pooled, it is
 apptainer run delta-svd.sif --version
 ```
 
-It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.0 --version`).
+It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --version`).
 
 Every run also reports its version in two other places, so results can be traced back after the fact:
 

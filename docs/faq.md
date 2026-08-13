@@ -45,7 +45,7 @@ Because of these methodological differences, the PSMD values produced by DELTA-S
 
 ## Can I use multi-shell data?
 
-**Yes.** DELTA-SVD fits the tensor on b-values around b = 1000 s/mm² (default range 800–1200, together with the b ≈ 0 volumes) and selects the appropriate shell(s) from your data automatically, so multi-shell acquisitions are fine. Adjust the range with `--bRange` if needed. See [Data requirements](requirements.md) and [Advanced usage](advanced-usage.md#other-options).
+**Yes.** DELTA-SVD fits the tensor on b-values around b = 1000 s/mm² (default range 800–1200, together with the b ≈ 0 volumes) and selects the appropriate shell(s) from your data automatically, so multi-shell acquisitions are fine. If you need a different selection, `--bRange` sets the limits and `--shells` names the shells individually — the latter is the safer choice on multi-shell data, since it does not pull in the shells lying between the ones you want. The b ≈ 0 volumes are always kept either way. See [Data requirements](requirements.md) and [Selecting the b-values](advanced-usage.md#selecting-the-b-values).
 
 ## How do I exclude a region, or restrict the analysis to specific ROIs?
 

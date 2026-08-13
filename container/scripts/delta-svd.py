@@ -197,32 +197,173 @@ def write_bval_or_bvec(arrStr, fname):
 # Functions for major processing steps
 
 
-def filter_b_values(fn_data = 'data.nii.gz', 
-                fn_bval = 'file.bval', 
+#--- b-values at or below this count as b = 0: they carry no usable diffusion
+#    weighting, and are what S0 is averaged from. Always kept, whatever b-value
+#    selection the user asks for.
+B0_MAX = 5
+
+#--- Scanners report b-values that deviate from the nominal shell (rounding, and
+#    cross-terms with the imaging gradients), so a requested limit is met with a
+#    tolerance. A range carries slack in its endpoints already, so it only needs
+#    enough to absorb rounding; a shell is a point, where the tolerance is the
+#    whole acceptance window, so it gets more. Neither can merge adjacent shells,
+#    which sit at least 100 s/mm2 apart in practice.
+BRANGE_TOL = 5
+SHELL_TOL = 25
+
+#--- The window the diffusion-tensor model is valid in. Below the floor the
+#    signal is contaminated by perfusion (IVIM), above the ceiling by
+#    non-Gaussian diffusion; a tensor fitted outside it is not interpretable, so
+#    b-value selections beyond these are refused rather than fitted.
+BVAL_MIN = 250
+BVAL_MAX = 1800
+
+#--- Identifiability of the fits.
+#
+#    The design matrix both fits solve has seven columns -- the six tensor
+#    components plus the log-S0 intercept (see markvcid_fw_mrn.wls_iter_fw) --
+#    so rank 7 is what "the tensor is estimable at all" means, and six
+#    non-collinear directions reach it. The free-water fraction is not part of
+#    that linear solve: it is grid-searched and scored by the residual, so it is
+#    constrained only by *distinct* design rows. Repeated acquisitions of one
+#    direction average noise but add no constraint on it -- hence the floor
+#    counts unique directions, not volumes.
+#
+#    Twelve is the lowest direction count of a real clinical DTI protocol: below
+#    it a dataset is far more likely truncated, corrupted, or over-filtered than
+#    deliberately acquired, so it is refused. Between twelve and the twenty
+#    directions docs/requirements.md recommends the fit works but the free-water
+#    fraction is noisy, which is a warning rather than an error. None of this
+#    fails on its own: the bi-tensor fit solves with a pseudo-inverse, which
+#    returns a minimum-norm solution for a degenerate gradient table instead of
+#    raising, so an unchecked run produces plausible-looking numbers.
+DESIGN_MATRIX_RANK = 7
+MIN_DIRECTIONS = 12
+RECOMMENDED_DIRECTIONS = 20
+
+#--- Two gradient directions count as one below an angle of ~2.6 degrees. Even a
+#    128-direction scheme separates its directions by more than 10 degrees, so
+#    this can only ever merge genuine repeats.
+DIRECTION_COS_TOL = 0.999
+
+
+def resolve_b_intervals(bRange=None, shells=None):
+    """The accepted non-zero b-value windows, tolerance included.
+
+    One window for '--bRange', one per shell for '--shells'; the two options are
+    mutually exclusive on the command line."""
+    if shells:
+        return [(float(s) - SHELL_TOL, float(s) + SHELL_TOL) for s in sorted(set(shells))]
+    return [(float(min(bRange)) - BRANGE_TOL, float(max(bRange)) + BRANGE_TOL)]
+
+
+def describe_directions(bvals, bvecs):
+    """Unique diffusion directions, and design-matrix rank, of a gradient table.
+
+    Directions are identified antipodally -- g and -g probe the same tensor
+    element -- and up to DIRECTION_COS_TOL, so repeats of a direction count once.
+    The rank returned is that of the seven-column design matrix the fits solve:
+    scaling a row by its b-value and repeating rows change neither, so it is
+    computed from the unique unit directions plus a single b = 0 row."""
+    bvals = np.asarray(bvals, dtype=float)
+    dwi = bvals > B0_MAX
+    g = np.asarray(bvecs, dtype=float).reshape(len(bvals), 3)[dwi]
+    norms = np.linalg.norm(g, axis=1)
+    g = g[norms > 0] / norms[norms > 0, None]        # a zero bvec probes no direction
+
+    unique = []
+    for v in g:
+        if not any(abs(float(np.dot(v, u))) >= DIRECTION_COS_TOL for u in unique):
+            unique.append(v)
+
+    #--- lower-triangular ordering, matching dipy's design_matrix()
+    rows = [[v[0]**2, 2*v[0]*v[1], v[1]**2, 2*v[0]*v[2], 2*v[1]*v[2], v[2]**2]
+            for v in unique]
+    if np.any(~dwi):
+        rows.append([0.0]*6)                         # every b = 0 volume gives this row
+    W = np.column_stack([np.array(rows).reshape(len(rows), 6), np.ones(len(rows))])
+
+    return len(unique), int(np.linalg.matrix_rank(W))
+
+
+def format_b_values(bvals):
+    """The b-values present with their counts, rounded to 10 s/mm2 so that
+    per-direction deviation within a shell reads as one shell. For messages."""
+    shells = np.round(np.asarray(bvals, dtype=float) / 10.0) * 10.0
+    values, counts = np.unique(shells, return_counts=True)
+    return ', '.join(f'{int(v)} (n={n})' for v, n in zip(values, counts))
+
+
+def filter_b_values(fn_data = 'data.nii.gz',
+                fn_bval = 'file.bval',
                 fn_bvec = 'file.bvec',
                 out_dir = None,
-                bRange = [800,1200]):
-    
-    print("Filtering DWI data according to b-values:")
-    print(f"Accepted are b-values close to Zero (b-value <= 5) and in the range: {bRange}")
-    
-    bvals, bvalsStr = read_bval_or_bvec(fn_bval)
+                bIntervals = ((800-BRANGE_TOL, 1200+BRANGE_TOL),)):
 
-    selB0 =  (bvals <= 5)
-    selBRange =  ((bvals >= bRange[0]) & (bvals <= bRange[1]))
+    accepted = ', '.join(f'[{lo:g}, {hi:g}]' for lo, hi in bIntervals)
+    print("Filtering DWI data according to b-values:")
+    print(f"Accepted are b-values close to Zero (b-value <= {B0_MAX}) and in: {accepted}")
+
+    bvals, bvalsStr = read_bval_or_bvec(fn_bval)
+    bvecs, bvecsStr = read_bval_or_bvec(fn_bvec)
+    if len(bvecs) != len(bvals):
+        raise ValueError(f"The bvec file holds {len(bvecs)} directions but the bval file holds "
+                         f"{len(bvals)} b-values. They have to describe the same volumes.\n"
+                         f" bval: {fn_bval}\n bvec: {fn_bvec}")
+
+    selB0 =  (bvals <= B0_MAX)
+    perInterval = [((bvals >= lo) & (bvals <= hi) & ~selB0) for lo, hi in bIntervals]
+    selBRange = np.logical_or.reduce(perInterval)
     sel = selB0 | selBRange
     print(f' total number of images        : n={len(bvals)}')
-    print(f' images with b-value <= 5      : n={sum(selB0==True)}')
+    print(f' images with b-value <= {B0_MAX}      : n={sum(selB0==True)}')
     print(f' images with b-value in range  : n={sum(selBRange==True)}')
     print(f' images with excluded b-values : n={sum(sel==False)}')
 
+    #--- Everything below refuses data the fits cannot be trusted on, before any
+    #    image is loaded: a too-narrow selection then costs seconds rather than a
+    #    tensor fit. The checks run on the unfiltered path too, so they are
+    #    placed ahead of the 'applyFilter' branch.
+    for (lo, hi), selInterval in zip(bIntervals, perInterval):
+        if not np.any(selInterval):
+            raise ValueError(f"No volume has a b-value in [{lo:g}, {hi:g}]. Check the requested "
+                             f"b-values ('--bRange' / '--shells', tolerance included above) "
+                             f"against the b-values in the data: {format_b_values(bvals)}.\n"
+                             f" bval: {fn_bval}")
+    if not np.any(selB0):
+        raise ValueError(f"No volume with a b-value close to zero (b <= {B0_MAX}) was found. The "
+                         f"fits need at least one to estimate S0. b-values in the data: "
+                         f"{format_b_values(bvals)}.\n bval: {fn_bval}")
+
+    nDirections, rank = describe_directions(bvals[sel], bvecs[sel])
+    print(f' unique diffusion directions   : n={nDirections}')
+    if nDirections < MIN_DIRECTIONS:
+        raise ValueError(f"Only {nDirections} unique diffusion direction(s) remain after the "
+                         f"b-value selection, but the free-water bi-tensor fit needs at least "
+                         f"{MIN_DIRECTIONS} (repeated directions constrain the free-water "
+                         f"fraction no further than a single one does, so they are counted "
+                         f"once). Check the requested b-values ('--bRange' / '--shells') "
+                         f"against the b-values in the data: {format_b_values(bvals)}.\n"
+                         f" bval: {fn_bval}\n bvec: {fn_bvec}")
+    if rank < DESIGN_MATRIX_RANK:
+        raise ValueError(f"The {nDirections} diffusion directions do not span the diffusion "
+                         f"tensor: the design matrix has rank {rank} instead of "
+                         f"{DESIGN_MATRIX_RANK}, so the tensor cannot be estimated from them. "
+                         f"They are collinear or lie in a single plane, which usually means a "
+                         f"damaged gradient table.\n bvec: {fn_bvec}")
+    if nDirections < RECOMMENDED_DIRECTIONS:
+        print(f'WARNING: {nDirections} unique diffusion directions is below the recommended '
+              f'minimum of {RECOMMENDED_DIRECTIONS}.\n The fit runs, but the free-water fraction '
+              f'and hence the reported metrics are noisy.\n Please interpret the results with '
+              f'care, and do not pool them with results from data with more directions.')
+
     applyFilter = False
-    
+
     if sum(sel==False)>0:
         applyFilter = True
         print('Removing excluded b-values!')
 
-    b5 = (bvals>0) & (bvals<=5)
+    b5 = (bvals>0) & (bvals<=B0_MAX)
     if sum(b5==True) > 0:
         print(f'Some b-values (n={sum(b5)}) are close but not exactly Zero:\n {bvals[b5]}')
         print('These values are set to Zero!')
@@ -232,13 +373,12 @@ def filter_b_values(fn_data = 'data.nii.gz',
     if not applyFilter:
         print('Nothing to do.')
     else:
-        
+
         bvals = bvalsStr[sel]
         print('New set of b-values:')
         print(bvals)
-    
-        _, bvecs = read_bval_or_bvec(fn_bvec)
-        bvecs = bvecs[sel]
+
+        bvecs = bvecsStr[sel]
 
         nii = nib.load(fn_data)
         img = nii.get_fdata()
@@ -258,9 +398,9 @@ def filter_b_values(fn_data = 'data.nii.gz',
         print(fn_bval)
         print(fn_bvec)
         print(fn_data)
-        
-        
-    return fn_data, fn_bval, fn_bvec
+
+
+    return fn_data, fn_bval, fn_bvec, nDirections
 
 
 ###########################################################################
@@ -1013,6 +1153,23 @@ def assertPositiveItkThreads(s):
     return v
 
 
+def assertBValue(s):
+    """A b-value for '--bRange' / '--shells', inside the window the tensor fit
+    is valid in."""
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"b-values given with --bRange / --shells must be whole numbers; you provided '{s}'")
+    if not BVAL_MIN <= v <= BVAL_MAX:
+        raise argparse.ArgumentTypeError(
+            f"b-values given with --bRange / --shells have to lie between {BVAL_MIN} and "
+            f"{BVAL_MAX} s/mm2; you provided {v}. Below {BVAL_MIN} the diffusion signal is "
+            f"contaminated by perfusion and above {BVAL_MAX} by non-Gaussian diffusion, so a "
+            f"diffusion tensor fitted there is not interpretable. Note that b-values close to "
+            f"zero (b <= {B0_MAX}) are always included and must not be given here.")
+    return v
+
+
 def threadBudget(s):
     """A positive integer, or 'auto' to auto-detect the physical cores."""
     if str(s).strip().lower() == 'auto':
@@ -1057,7 +1214,9 @@ def iniParser():
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
     group2 = parser.add_argument_group('advanced options')
     group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/delta-svd_skeletonmask_v1.nii.gz", help="input path to an alternative skeleton mask. It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
-    group2.add_argument("--bRange", metavar='Integer', type=int, default = [800, 1200], nargs=2, help="range of b-values to consider for diffusion tensor fitting. Defaults to range [800,1200].")
+    group2b = group2.add_mutually_exclusive_group()
+    group2b.add_argument("--bRange", metavar='Integer', type=assertBValue, default = [800, 1200], nargs=2, help=f"range of b-values to consider for diffusion tensor fitting, given as the lower and upper limit of the non-zero shell(s) to include. Defaults to range [800,1200]. The limits are met with a tolerance of {BRANGE_TOL} s/mm2, so that shells the scanner reports slightly off their nominal value are not discarded. Volumes with a b-value close to zero (b <= {B0_MAX}) are always included and are not affected by this option. Both limits have to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2, outside of which the diffusion tensor model is not valid. Mutually exclusive with '--shells'.")
+    group2b.add_argument("--shells", metavar='Integer', type=assertBValue, nargs="+", action='extend', help=f"b-value shell(s) to consider for diffusion tensor fitting, e.g. '--shells 700 1000'. An alternative to '--bRange' for selecting shells individually rather than as one range, which avoids pulling in the shells in between. Each shell is matched with a tolerance of {SHELL_TOL} s/mm2, and a shell that matches no volume in the data is an error. As for '--bRange', volumes with a b-value close to zero (b <= {B0_MAX}) are always included, and each shell has to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2. Mutually exclusive with '--bRange'.")
     group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
     group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."
     group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of time-points either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
@@ -1296,18 +1455,24 @@ def pipeline_delta_svd():
         for i,tp in enumerate(dirTP):
             print(f' {tp}')
 
+        bIntervals = resolve_b_intervals(bRange=args.bRange, shells=args.shells)
+        #--- carried on 'args' for the QC report: the direction count qualifies
+        #    every metric the run produces, so it belongs with them
+        args.nDirections = []
 
         for i in range(len(dirTP)):
             startTime = section_header(f'DTI-fit and free-water correction for {i+1}. timepoint in: {dirTP[i]}', startTime)
 
             Path(dirTP[i]).mkdir(parents=True, exist_ok=True)
 
-            dwi, bval, bvec = filter_b_values(fn_data = args.dwi[i], 
-                                              fn_bval = args.bval[i], 
+            dwi, bval, bvec, nDirections = filter_b_values(fn_data = args.dwi[i],
+                                              fn_bval = args.bval[i],
                                               fn_bvec = args.bvec[i],
                                               out_dir = dirTP[i],
-                                              bRange = [min(args.bRange), max(args.bRange)])
-            
+                                              bIntervals = bIntervals)
+            args.nDirections.append(nDirections)
+
+
             print('')
             free_water_correction(fn_data = dwi, 
                         fn_mask = args.bmask[i], 
