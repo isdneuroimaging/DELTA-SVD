@@ -254,7 +254,7 @@ def test_aggregate_rejects_ids_that_are_not_distinct_between_files(tmp_path):
     result = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
 
     assert result.returncode != 0
-    assert "not all distinct" in result.stdout
+    assert "not all distinct" in result.stderr
 
 
 def test_aggregate_rejects_id_varying_within_one_file(tmp_path):
@@ -269,7 +269,7 @@ def test_aggregate_rejects_id_varying_within_one_file(tmp_path):
     result = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
 
     assert result.returncode != 0
-    assert "not constant" in result.stdout
+    assert "not constant" in result.stderr
 
 
 def test_aggregate_overwrite_guard_requires_explicit_flag(tmp_path):
@@ -297,3 +297,31 @@ def test_aggregate_appends_date_suffix_to_output_filename(tmp_path):
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     produced = os.listdir(out_dir)
     assert any(today in fn for fn in produced), produced
+
+
+# ---------------------------------------------------------------------------
+# Errors go to stderr with an 'ERROR:' prefix and no traceback, matching
+# delta-svd.py. Every check here sits in one linear script-level flow, so this
+# uses sys.exit() directly rather than delta-svd.py's DeltaSvdError.
+
+def test_aggregate_errors_go_to_stderr_without_a_traceback(tmp_path):
+    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
+    out = tmp_path / "agg.csv"
+    assert _run(str(tmp_path), "-o", str(out)).returncode == 0
+
+    result = _run(str(tmp_path), "-o", str(out))
+
+    assert result.returncode == 1
+    assert result.stderr.startswith("\nERROR: ")
+    assert "Traceback" not in result.stderr
+    # the hint naming the option that resolves it travels with the message
+    assert "'-x'" in result.stderr
+
+
+def test_aggregate_reports_an_empty_glob_on_stderr(tmp_path):
+    result = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
+
+    assert result.returncode == 1
+    assert "No CSV files found" in result.stderr
+    assert "'-f'" in result.stderr and "'-d'" in result.stderr
+

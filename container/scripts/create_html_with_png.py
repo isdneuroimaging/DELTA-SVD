@@ -105,8 +105,26 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         meta_rows.append(('Skeleton mask', f'{path_code(os.path.basename(args.skeletonMask))} <span class="tag">default</span>'))
     else:
         meta_rows.append(('Skeleton mask', f'{path_code(args.skeletonMask)} {custom_tag("delta-svd_skeletonmask_v1.nii.gz (white matter skeleton excluding regions with frequent partial volume effects)")}'))
-    if list(args.bRange) != [800, 1200]:
-        meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; {custom_tag("800&ndash;1200 s/mm&sup2;")}'))
+    shells = getattr(args, 'shells', None)
+    if shells:
+        meta_rows.append(('b-value shells',
+                          f'{", ".join(str(s) for s in shells)} s/mm&sup2; (&plusmn;25) '
+                          + custom_tag("range 800&ndash;1200 s/mm&sup2;")))
+    elif list(args.bRange) != [800, 1200]:
+        meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; (&plusmn;5) {custom_tag("800&ndash;1200 s/mm&sup2;")}'))
+    #--- the angular sampling the tensor and free-water fits had to work with;
+    #    below 20 it qualifies every metric in the report, and a warning printed
+    #    to a log that is not kept would not travel with the results
+    nDirections = getattr(args, 'nDirections', None)
+    if nDirections:
+        shown = (str(nDirections[0]) if len(set(nDirections)) == 1
+                 else ', '.join(f'{n} ({tp})' for n, tp in zip(nDirections, args.tp)))
+        caution = ('' if min(nDirections) >= 20 else
+                   ' <span class="tag tag--alt tag--tip" tabindex="0" data-default="Below the '
+                   'recommended minimum of 20: the free-water fraction and hence the reported '
+                   'metrics are noisy. Do not pool with results from data with more '
+                   'directions.">few</span>')
+        meta_rows.append(('Diffusion directions', f'{shown}{caution}'))
     if args.RmaskMNI is not None:
         meta_rows.append(('ROI mask (MNI)', path_code(args.RmaskMNI)))
     if args.hemispheres:

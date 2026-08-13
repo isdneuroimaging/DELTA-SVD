@@ -47,8 +47,11 @@ def test_isCSV_accepts_csv_extension(delta_svd, name):
 
 
 def test_isCSV_rejects_other_extensions(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError):
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
         delta_svd.isCSV("results.txt")
+    # every other type= validator names its own option; this one used to be the
+    # odd one out, leaving the reader to guess which flag it meant
+    assert "--reprocess" in str(excinfo.value)
 
 
 def test_assertPositiveJobs_accepts_values_at_or_above_one(delta_svd):
@@ -349,6 +352,31 @@ def test_custom_parser_falls_back_to_the_command_line(delta_svd, monkeypatch):
     assert parser.parse_args().dirOutput == "foo"
 
 
+def test_custom_parser_suggests_the_double_dash_form_when_known(delta_svd, capsys):
+    # the likeliest real-world case: '--shells' mistyped with one dash
+    parser = _minimal_parser(delta_svd)
+    parser.add_argument("--shells", nargs="+")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-shells", "700"])
+    assert 'Did you mean "--shells"?' in capsys.readouterr().err
+
+
+def test_custom_parser_suggests_the_double_dash_form_with_attached_value(delta_svd, capsys):
+    # '=' attaches a value to a long option; the suggestion must strip it first
+    parser = _minimal_parser(delta_svd)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-dirOutput=foo"])
+    assert 'Did you mean "--dirOutput"?' in capsys.readouterr().err
+
+
+def test_custom_parser_omits_suggestion_for_unknown_options(delta_svd, capsys):
+    # a typo that doesn't match any registered option gets the plain message
+    parser = _minimal_parser(delta_svd)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["-bogus"])
+    assert "Did you mean" not in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # iniParser() defaults
 
@@ -359,6 +387,7 @@ def test_iniparser_defaults(delta_svd):
     assert parser.get_default("threads") == "auto"
     assert parser.get_default("itkThreads") == delta_svd.ITK_THREADS_DEFAULT
     assert parser.get_default("bRange") == [800, 1200]
+    assert parser.get_default("shells") is None
     assert parser.get_default("skeletonMask") == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
     assert parser.get_default("adjustBmaskForFW") is True
     assert parser.get_default("debug") is False
@@ -393,6 +422,65 @@ def test_iniparser_para_zero_is_rejected_by_cli(delta_svd, tmp_path, capsys):
         parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel), "--para", "0"])
     # assert the exit really came from '--para', not from some other argument
     assert "--para" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# assertBValue(): the window the diffusion tensor model is valid in
+#
+# Outside it the tensor is not interpretable - below the floor the signal is
+# contaminated by perfusion, above the ceiling by non-Gaussian diffusion - so
+# such a request is refused before anything runs rather than fitted.
+
+@pytest.mark.parametrize("value", ["250", "1000", "1800"])
+def test_assertBValue_accepts_the_valid_window(delta_svd, value):
+    assert delta_svd.assertBValue(value) == int(value)
+
+
+@pytest.mark.parametrize("value", ["249", "1801", "0", "-100"])
+def test_assertBValue_rejects_b_values_outside_the_window(delta_svd, value):
+    with pytest.raises(argparse.ArgumentTypeError, match="have to lie between 250 and 1800"):
+        delta_svd.assertBValue(value)
+
+
+def test_assertBValue_points_a_zero_at_the_b0_rule(delta_svd):
+    # the mistake this catches: passing 0 as the lower limit to 'keep the b0s',
+    # which they never needed - it only drags every shell below the upper limit
+    # into the fit
+    with pytest.raises(argparse.ArgumentTypeError, match="always included"):
+        delta_svd.assertBValue("0")
+
+
+def test_assertBValue_rejects_non_numeric(delta_svd):
+    with pytest.raises(argparse.ArgumentTypeError, match="whole numbers"):
+        delta_svd.assertBValue("1000.5")
+
+
+def test_iniparser_shells_accepts_several_shells(delta_svd, tmp_path):
+    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
+    parser = delta_svd.iniParser()
+    ns = parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel),
+                            "--shells", "700", "1000", "1500"])
+    assert ns.shells == [700, 1000, 1500]
+
+
+def test_iniparser_rejects_brange_and_shells_together(delta_svd, tmp_path, capsys):
+    # they answer the same question in two ways; taking both would leave it
+    # undefined which one selected the data
+    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
+    parser = delta_svd.iniParser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel),
+                           "--bRange", "800", "1200", "--shells", "1000"])
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_iniparser_brange_outside_the_valid_window_is_rejected_by_cli(delta_svd, tmp_path, capsys):
+    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
+    parser = delta_svd.iniParser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel),
+                           "--bRange", "800", "2500"])
+    assert "--bRange" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -431,53 +519,264 @@ def test_read_bval_or_bvec_rejects_malformed_shape(delta_svd, tmp_path):
         delta_svd.read_bval_or_bvec(str(fn))
 
 
+# A ragged or non-numeric file used to escape as numpy's own ValueError, whose
+# message ("inhomogeneous shape", "could not convert string to float") names
+# neither the file nor the line. Both are the user's to fix, so both are ours
+# to report.
+
+def test_read_bval_or_bvec_rejects_lines_of_unequal_length(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bvec"
+    fn.write_text("0 1 0\n0 0 1\n0 0\n")          # third direction truncated
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    msg = str(excinfo.value)
+    assert str(fn) in msg
+    assert "line 1: 3 value(s)" in msg
+    assert "line 3: 2 value(s)" in msg
+    assert "blank line" not in msg               # none here, so no misleading hint
+
+
+def test_read_bval_or_bvec_points_at_a_blank_line(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bval"
+    fn.write_text("0 1000 1000\n\n")             # trailing blank line
+    with pytest.raises(delta_svd.DeltaSvdError, match="blank line"):
+        delta_svd.read_bval_or_bvec(str(fn))
+
+
+def test_read_bval_or_bvec_locates_a_non_numeric_value(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bval"
+    fn.write_text("0 1000 abc 1000\n")
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    msg = str(excinfo.value)
+    assert "'abc'" in msg
+    assert "line 1 at position 3" in msg
+    assert str(fn) in msg
+
+
+def test_read_bval_or_bvec_locates_a_non_numeric_value_in_a_bvec(delta_svd, tmp_path):
+    # the reported position is the one in the file, not in the transposed array
+    fn = tmp_path / "bad.bvec"
+    fn.write_text("1 0 0\n0 1 0\n0 0 x\n")
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    assert "line 3 at position 3" in str(excinfo.value)
+
+
+def test_read_bval_or_bvec_truncates_a_long_list_of_lines(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bval"
+    fn.write_text("\n".join(["1 2 3"] * 12 + ["1 2"]) + "\n")
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    msg = str(excinfo.value)
+    assert f"line {delta_svd.MAX_LINES_REPORTED}:" in msg
+    assert f"line {delta_svd.MAX_LINES_REPORTED + 1}:" not in msg
+    assert "and 3 more line(s)" in msg
+
+
+@pytest.mark.parametrize("content", ["0 0 1000 1000\n", "1 0 0.7071\n0 1 0.7071\n0 0 0\n"])
+def test_read_bval_or_bvec_still_accepts_well_formed_files(delta_svd, tmp_path, content):
+    # the added checks must not narrow what parses: 'nan'/'inf'/exponents included
+    fn = tmp_path / "ok.bval"
+    fn.write_text(content)
+    arrFloat, arrStr = delta_svd.read_bval_or_bvec(str(fn))
+    assert arrFloat.size == arrStr.size
+
+
+def test_read_bval_or_bvec_accepts_exponent_notation(delta_svd, tmp_path):
+    fn = tmp_path / "ok.bval"
+    fn.write_text("0 1e3 1.2E+03\n")
+    arrFloat, _ = delta_svd.read_bval_or_bvec(str(fn))
+    assert arrFloat.tolist() == [0.0, 1000.0, 1200.0]
+
+
+# ---------------------------------------------------------------------------
+# resolve_b_intervals(): the '--bRange' / '--shells' request as b-value windows
+
+def test_resolve_b_intervals_widens_a_range_by_its_tolerance(delta_svd):
+    assert delta_svd.resolve_b_intervals(bRange=[800, 1200]) == [(795.0, 1205.0)]
+
+
+def test_resolve_b_intervals_orders_the_range_limits(delta_svd):
+    # argparse takes the two limits positionally, so nothing stops a user from
+    # passing them the wrong way round
+    assert delta_svd.resolve_b_intervals(bRange=[1200, 800]) == [(795.0, 1205.0)]
+
+
+def test_resolve_b_intervals_gives_each_shell_its_own_window(delta_svd):
+    # one window per shell, so the b-values *between* the shells stay excluded -
+    # the whole point of '--shells' over a range spanning them
+    assert delta_svd.resolve_b_intervals(shells=[700, 1000]) == [(675.0, 725.0), (975.0, 1025.0)]
+
+
+def test_resolve_b_intervals_sorts_and_deduplicates_shells(delta_svd):
+    assert delta_svd.resolve_b_intervals(shells=[1000, 700, 1000]) == [(675.0, 725.0), (975.0, 1025.0)]
+
+
+def test_resolve_b_intervals_prefers_shells_over_the_range_default(delta_svd):
+    # '--bRange' keeps its default even when '--shells' is given, so the shells
+    # have to win - argparse guarantees the user set only one of the two
+    assert delta_svd.resolve_b_intervals(bRange=[800, 1200], shells=[1000]) == [(975.0, 1025.0)]
+
+
+# ---------------------------------------------------------------------------
+# describe_directions(): angular sampling, and whether the tensor is estimable
+#
+# The count drives the hard floor in filter_b_values(), and it counts *unique*
+# directions: the free-water fraction is grid-searched against the residual, so
+# a repeated direction adds no constraint on it, however many times it was
+# acquired.
+
+def _directions(n):
+    """n distinct unit vectors, spread over a hemisphere by the golden-section
+    spiral. A hemisphere because directions are antipodally equivalent here, so
+    a full sphere would hand back near-duplicate pairs. Well-conditioned for a
+    tensor fit at any n >= 6."""
+    i = np.arange(n) + 0.5
+    z = i / n
+    r = np.sqrt(np.maximum(0.0, 1 - z**2))
+    phi = np.pi * (1 + 5**0.5) * i
+    return np.stack([r * np.cos(phi), r * np.sin(phi), z], axis=1)
+
+
+def _plane_directions(n):
+    """n distinct unit vectors, all in the xy-plane. However many there are,
+    their outer products span only three of the six tensor components, so the
+    design matrix stays rank-deficient - a damaged gradient table looks like
+    this."""
+    a = np.linspace(0, np.pi, n, endpoint=False)
+    return np.stack([np.cos(a), np.sin(a), np.zeros(n)], axis=1)
+
+
+def test_describe_directions_counts_directions_and_reports_full_rank(delta_svd):
+    g = _directions(30)
+    bvals = np.r_[0.0, np.full(30, 1000.0)]
+    bvecs = np.vstack([np.zeros(3), g])
+
+    assert delta_svd.describe_directions(bvals, bvecs) == (30, 7)
+
+
+def test_describe_directions_counts_a_repeated_direction_once(delta_svd):
+    # 24 volumes, 12 directions: the extra acquisitions average noise, they do
+    # not constrain the free-water fraction any further
+    g = _directions(12)
+    bvals = np.r_[0.0, np.full(24, 1000.0)]
+    bvecs = np.vstack([np.zeros(3), g, g])
+
+    assert delta_svd.describe_directions(bvals, bvecs)[0] == 12
+
+
+def test_describe_directions_counts_antipodal_directions_once(delta_svd):
+    # g and -g probe the same tensor element, so a full-sphere scheme that
+    # includes both must not be credited with twice the angular sampling
+    g = _directions(12)
+    bvals = np.r_[0.0, np.full(24, 1000.0)]
+    bvecs = np.vstack([np.zeros(3), g, -g])
+
+    assert delta_svd.describe_directions(bvals, bvecs)[0] == 12
+
+
+def test_describe_directions_ignores_b0_volumes_and_zero_bvecs(delta_svd):
+    g = _directions(12)
+    # three b0s, and one diffusion-weighted volume whose bvec is all zeros: it
+    # probes no direction at all
+    bvals = np.r_[np.zeros(3), np.full(13, 1000.0)]
+    bvecs = np.vstack([np.zeros((3, 3)), g, np.zeros(3)])
+
+    assert delta_svd.describe_directions(bvals, bvecs)[0] == 12
+
+
+def test_describe_directions_reports_deficient_rank_for_coplanar_directions(delta_svd):
+    # plenty of directions, but they span only part of the tensor
+    bvals = np.r_[0.0, np.full(20, 1000.0)]
+    bvecs = np.vstack([np.zeros(3), _plane_directions(20)])
+
+    nDirections, rank = delta_svd.describe_directions(bvals, bvecs)
+    assert nDirections == 20
+    assert rank < delta_svd.DESIGN_MATRIX_RANK
+
+
+def test_describe_directions_reaches_full_rank_at_six_directions(delta_svd):
+    # six non-collinear directions plus a b0 are what the seven-column design
+    # matrix needs; the floor in filter_b_values() sits well above this, but the
+    # rank check must not fire here
+    bvals = np.r_[0.0, np.full(6, 1000.0)]
+    bvecs = np.vstack([np.zeros(3), _directions(6)])
+
+    assert delta_svd.describe_directions(bvals, bvecs)[1] == 7
+
+
+# ---------------------------------------------------------------------------
+# format_b_values(): the b-values present, for error messages
+
+def test_format_b_values_groups_within_shell_deviation(delta_svd):
+    # scanners report b-values that scatter around the nominal shell; an error
+    # message listing each of them verbatim would be unreadable
+    assert delta_svd.format_b_values([0, 0, 998, 1000, 1002, 2000]) == '0 (n=2), 1000 (n=3), 2000 (n=1)'
+
+
 # ---------------------------------------------------------------------------
 # filter_b_values(): shell selection of the b-value range
 #
 # This is the gate every later step depends on - the DWI volumes, the bvals and
 # the bvecs have to stay index-aligned after filtering, or the tensor fit is
-# silently fitted against the wrong gradient directions.
+# silently fitted against the wrong gradient directions. It is also where data
+# the fits cannot be trusted on is refused: the bi-tensor fit solves with a
+# pseudo-inverse, so nothing downstream raises on a degenerate gradient table.
 
-def _write_dwi_set(tmp_path, bvalLine, bvecLines, nVol):
-    """Write a matched data/bval/bvec triplet. Volume i is filled with the
-    constant i, so a test can tell from the voxel values which volumes survived."""
+DEFAULT_INTERVALS = [(795.0, 1205.0)]
+
+
+def _write_dwi_set(tmp_path, bvals, bvecs):
+    """Write a matched data/bval/bvec triplet from a b-value sequence and an
+    (n, 3) array of directions. Volume i is filled with the constant i, so a
+    test can tell from the voxel values which volumes survived."""
+    bvals = list(bvals)
+    bvecs = np.asarray(bvecs, dtype=float)
     (tmp_path / "in").mkdir(exist_ok=True)
     fnBval = tmp_path / "in" / "sub01.bval"
     fnBvec = tmp_path / "in" / "sub01.bvec"
     fnData = tmp_path / "in" / "sub01.nii.gz"
-    fnBval.write_text(bvalLine)
-    fnBvec.write_text(bvecLines)
-    img = np.arange(nVol, dtype=float) * np.ones((2, 2, 2, nVol))
+    fnBval.write_text(" ".join(str(b) for b in bvals) + "\n")
+    fnBvec.write_text("\n".join(" ".join(f"{v:.6f}" for v in row) for row in bvecs.T) + "\n")
+    img = np.arange(len(bvals), dtype=float) * np.ones((2, 2, 2, len(bvals)))
     nib.save(nib.Nifti1Image(img, np.eye(4)), str(fnData))
     outDir = tmp_path / "out"
     outDir.mkdir(exist_ok=True)
     return str(fnData), str(fnBval), str(fnBvec), str(outDir)
 
 
+def _shelled_set(tmp_path, shells, nPerShell=20, nB0=1):
+    """A b0 plus 'nPerShell' whole-sphere directions on each of 'shells'."""
+    g = _directions(nPerShell)
+    bvals = [0] * nB0 + [b for b in shells for _ in range(nPerShell)]
+    bvecs = np.vstack([np.zeros((nB0, 3))] + [g for _ in shells])
+    return _write_dwi_set(tmp_path, bvals, bvecs)
+
+
 def test_filter_b_values_drops_volumes_outside_brange(delta_svd, tmp_path):
     # b=2000 falls outside the default [800, 1200] shell and must go, together
-    # with its bvec column and its image volume.
-    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
-        tmp_path,
-        "0 1000 2000 1000\n",
-        "0 1 0 0\n0 0 1 0\n0 0 0 1\n",
-        nVol=4,
-    )
+    # with its bvec columns and its image volumes.
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000, 2000], nPerShell=20)
 
-    fnDataO, fnBvalO, fnBvecO = delta_svd.filter_b_values(
+    fnDataO, fnBvalO, fnBvecO, _ = delta_svd.filter_b_values(
         fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
-        out_dir=outDir, bRange=[800, 1200],
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
     )
 
     assert [Path(f).parent.name for f in (fnDataO, fnBvalO, fnBvecO)] == ["out"] * 3
     # b-value strings are carried over verbatim, not reformatted
-    assert Path(fnBvalO).read_text() == "0 1000 1000\n"
-    # the dropped volume was index 2, so the bvec column [0, 1, 0] goes with it
-    assert Path(fnBvecO).read_text() == "0 1 0\n0 0 0\n0 0 1\n"
-    # volumes 0, 1, 3 survive - and in that order
+    assert Path(fnBvalO).read_text().split() == ["0"] + ["1000"] * 20
+    # bvecs stay index-aligned with what survived: three rows, 21 columns
+    assert [len(line.split()) for line in Path(fnBvecO).read_text().splitlines()] == [21] * 3
+    # volumes 0..20 survive - and in that order
     kept = nib.load(fnDataO).get_fdata()
-    assert kept.shape == (2, 2, 2, 3)
-    assert kept[0, 0, 0].tolist() == [0.0, 1.0, 3.0]
+    assert kept.shape == (2, 2, 2, 21)
+    assert kept[0, 0, 0].tolist() == list(range(21))
 
 
 def test_filter_b_values_rounds_near_zero_bvalues_to_zero(delta_svd, tmp_path):
@@ -486,56 +785,269 @@ def test_filter_b_values_rounds_near_zero_bvalues_to_zero(delta_svd, tmp_path):
     # volume is kept, only its b-value is rewritten.
     fnData, fnBval, fnBvec, outDir = _write_dwi_set(
         tmp_path,
-        "3 1000 1000\n",
-        "0 1 0\n0 0 1\n0 0 0\n",
-        nVol=3,
+        [3] + [1000] * 20,
+        np.vstack([np.zeros(3), _directions(20)]),
     )
 
-    fnDataO, fnBvalO, fnBvecO = delta_svd.filter_b_values(
+    fnDataO, fnBvalO, fnBvecO, _ = delta_svd.filter_b_values(
         fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
-        out_dir=outDir, bRange=[800, 1200],
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
     )
 
-    assert Path(fnBvalO).read_text() == "0 1000 1000\n"
-    assert nib.load(fnDataO).get_fdata().shape[-1] == 3      # no volume dropped
-    assert Path(fnBvecO).read_text() == "0 1 0\n0 0 1\n0 0 0\n"
+    assert Path(fnBvalO).read_text().split() == ["0"] + ["1000"] * 20
+    assert nib.load(fnDataO).get_fdata().shape[-1] == 21     # no volume dropped
 
 
 def test_filter_b_values_is_a_no_op_when_nothing_needs_filtering(delta_svd, tmp_path):
     # The no-op path must hand back the *input* paths untouched: it writes no
     # files, so returning out_dir paths would point the pipeline at nothing.
-    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
-        tmp_path,
-        "0 1000 1000\n",
-        "0 1 0\n0 0 1\n0 0 0\n",
-        nVol=3,
-    )
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=20)
 
-    fnDataO, fnBvalO, fnBvecO = delta_svd.filter_b_values(
+    fnDataO, fnBvalO, fnBvecO, _ = delta_svd.filter_b_values(
         fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
-        out_dir=outDir, bRange=[800, 1200],
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
     )
 
     assert (fnDataO, fnBvalO, fnBvecO) == (fnData, fnBval, fnBvec)
     assert list(Path(outDir).iterdir()) == []
 
 
+def test_filter_b_values_checks_the_unfiltered_data_too(delta_svd, tmp_path):
+    # the no-op path returns early, so the guards have to sit ahead of it - a
+    # dataset that needs no filtering can still be unfittable
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=8)
+
+    with pytest.raises(ValueError, match="unique diffusion direction"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
 def test_filter_b_values_keeps_b0s_regardless_of_brange(delta_svd, tmp_path):
-    # b0 volumes are selected by the '<= 5' rule, not by bRange - a narrow
-    # bRange must never strip the b0s the fit needs for S0.
+    # b0 volumes are selected by the '<= 5' rule, not by the requested range - a
+    # narrow range must never strip the b0s the fit needs for S0.
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [700, 1000], nPerShell=20)
+
+    _, fnBvalO, _, _ = delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+    )
+
+    assert Path(fnBvalO).read_text().split() == ["0"] + ["1000"] * 20
+
+
+def test_filter_b_values_returns_the_direction_count(delta_svd, tmp_path):
+    # the count qualifies every metric the run produces, so it is handed back
+    # for the QC report rather than only printed
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=32)
+
+    assert delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+    )[3] == 32
+
+
+# ---------------------------------------------------------------------------
+# filter_b_values(): the b-value tolerance
+#
+# Scanners report b-values that deviate from the nominal shell, so a limit met
+# exactly would discard volumes of the very shell that was asked for.
+
+@pytest.mark.parametrize("bval,kept", [(1205, True), (1206, False),
+                                       (795, True), (794, False)])
+def test_filter_b_values_meets_the_range_limits_with_a_tolerance(delta_svd, tmp_path, bval, kept):
     fnData, fnBval, fnBvec, outDir = _write_dwi_set(
         tmp_path,
-        "0 700 1000\n",
-        "0 1 0\n0 0 1\n0 0 0\n",
-        nVol=3,
+        [0] + [1000] * 20 + [bval],
+        np.vstack([np.zeros(3), _directions(21)]),
     )
 
-    _, fnBvalO, _ = delta_svd.filter_b_values(
+    _, fnBvalO, _, _ = delta_svd.filter_b_values(
         fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
-        out_dir=outDir, bRange=[800, 1200],
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
     )
 
-    assert Path(fnBvalO).read_text() == "0 1000\n"
+    assert (str(bval) in Path(fnBvalO).read_text().split()) is kept
+
+
+@pytest.mark.parametrize("bval,kept", [(1025, True), (1026, False),
+                                       (975, True), (974, False)])
+def test_filter_b_values_matches_a_shell_with_its_tolerance(delta_svd, tmp_path, bval, kept):
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
+        tmp_path,
+        [0] + [1000] * 20 + [bval],
+        np.vstack([np.zeros(3), _directions(21)]),
+    )
+
+    _, fnBvalO, _, _ = delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=delta_svd.resolve_b_intervals(shells=[1000]),
+    )
+
+    assert (str(bval) in Path(fnBvalO).read_text().split()) is kept
+
+
+def test_filter_b_values_excludes_shells_between_requested_ones(delta_svd, tmp_path):
+    # what '--shells' is for: a range spanning 700 and 1500 would drag the 1000
+    # shell into the fit with it
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [700, 1000, 1500], nPerShell=20)
+
+    _, fnBvalO, _, _ = delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=delta_svd.resolve_b_intervals(shells=[700, 1500]),
+    )
+
+    kept = set(Path(fnBvalO).read_text().split())
+    assert kept == {"0", "700", "1500"}
+
+
+# ---------------------------------------------------------------------------
+# filter_b_values(): the guards
+#
+# Each of these would otherwise reach the fits, which solve with a pseudo-inverse
+# and so return a minimum-norm solution instead of raising - the run would finish
+# and report plausible-looking numbers.
+
+def test_filter_b_values_rejects_a_shell_that_matches_nothing(delta_svd, tmp_path):
+    # the user named the shell explicitly, so its absence is a misconfiguration,
+    # not something to quietly carry on without
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=20)
+
+    with pytest.raises(ValueError, match=r"No volume has a b-value in \[1475, 1525\]"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=delta_svd.resolve_b_intervals(shells=[1000, 1500]),
+        )
+
+
+def test_filter_b_values_reports_the_b_values_present_when_nothing_matches(delta_svd, tmp_path):
+    # the likeliest cause is a selection that does not fit the data, so the
+    # error has to show what the data actually holds
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [2000], nPerShell=20)
+
+    with pytest.raises(ValueError, match=r"0 \(n=1\), 2000 \(n=20\)"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_rejects_data_without_a_b0(delta_svd, tmp_path):
+    # S0 is averaged from the b0 volumes; without one the fits have no scale
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
+        tmp_path, [1000] * 20, _directions(20))
+
+    with pytest.raises(ValueError, match="close to zero"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_rejects_too_few_directions(delta_svd, tmp_path):
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=11)
+
+    with pytest.raises(ValueError, match="Only 11 unique diffusion direction"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_accepts_exactly_the_minimum_directions(delta_svd, tmp_path):
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=12)
+
+    assert delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+    )[3] == 12
+
+
+def test_filter_b_values_does_not_count_repeats_towards_the_minimum(delta_svd, tmp_path):
+    # 24 volumes, but only 6 directions: enough to solve for the tensor, and
+    # nowhere near enough to pin the free-water fraction down
+    g = _directions(6)
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
+        tmp_path,
+        [0] + [1000] * 24,
+        np.vstack([np.zeros(3), g, g, g, g]),
+    )
+
+    with pytest.raises(ValueError, match="Only 6 unique diffusion direction"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_counts_directions_after_the_selection(delta_svd, tmp_path):
+    # 20 directions per shell, but a range that keeps only eight of them: the
+    # floor applies to what reaches the fit, not to what was acquired
+    g = _directions(20)
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
+        tmp_path,
+        [0] + [1000] * 8 + [2000] * 12,
+        np.vstack([np.zeros(3), g[:8], g[8:]]),
+    )
+
+    with pytest.raises(ValueError, match="Only 8 unique diffusion direction"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_rejects_a_degenerate_gradient_table(delta_svd, tmp_path):
+    # enough directions to pass the count, but they lie in one plane and so
+    # cannot span the tensor - what a damaged bvec file looks like
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(
+        tmp_path,
+        [0] + [1000] * 20,
+        np.vstack([np.zeros(3), _plane_directions(20)]),
+    )
+
+    with pytest.raises(ValueError, match="do not span the diffusion tensor"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_rejects_a_bvec_file_of_the_wrong_length(delta_svd, tmp_path):
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=20)
+    Path(fnBvec).write_text("\n".join(" ".join("0" for _ in range(19)) for _ in range(3)) + "\n")
+
+    with pytest.raises(ValueError, match="19 directions but the bval file holds 21"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
+def test_filter_b_values_warns_below_the_recommended_direction_count(delta_svd, tmp_path, capsys):
+    # between the floor and the recommendation the fit runs, but the free-water
+    # fraction is noisy - a warning, not an error
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=16)
+
+    delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+    )
+
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "recommended minimum of 20" in out
+
+
+def test_filter_b_values_does_not_warn_at_the_recommended_direction_count(delta_svd, tmp_path, capsys):
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=20)
+
+    delta_svd.filter_b_values(
+        fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+        out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+    )
+
+    assert "WARNING" not in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
@@ -1508,8 +2020,204 @@ def test_missing_bmask_raises_naming_the_option(delta_svd, tmp_path, monkeypatch
         "delta-svd.py", "--dwi", str(dwi), "--skeletonMask", str(skel),
         "--steps", "qc", "--qc", "0",
     ])
-    with pytest.raises(ValueError, match="'bmask' files does not exist"):
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
         delta_svd.pipeline_delta_svd()
+
+    # the message has to name the DWI it belongs to, say the path was inferred
+    # rather than given, list every path probed, and name the option that fixes it
+    msg = str(excinfo.value)
+    assert str(dwi) in msg
+    assert "inferred from the DWI path" in msg
+    assert str(tmp_path / "sub01_brainmask.nii.gz") in msg
+    assert str(tmp_path / "sub01_brainmask.nii") in msg
+    assert "'--bmask'" in msg
+
+
+# ---------------------------------------------------------------------------
+# An inferred path already carries the DWI folder, so re-anchoring it to that
+# folder would only probe '<dwiDir>/<dwiDir>/<name>'. Absolute paths hide this,
+# because os.path.join() discards its first argument for them -- these tests use
+# relative ones on purpose.
+
+def test_inferred_path_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path, monkeypatch):
+    sub = tmp_path / "Notch004" / "BL" / "diffusion"
+    sub.mkdir(parents=True)
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    for fn in ["data.nii.gz", "data.bval", "data.bvec"]:
+        (sub / fn).touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", "Notch004/BL/diffusion/data.nii.gz",
+        "--skeletonMask", "skel.nii.gz", "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    lines = str(excinfo.value).splitlines()
+    looked = [ln.strip() for ln in lines[lines.index(" Looked for:") + 1:]
+              if ln.startswith("   ")]
+    assert looked == ["Notch004/BL/diffusion/data_brainmask.nii.gz",
+                      "Notch004/BL/diffusion/data_brainmask.nii"]
+
+
+def test_candidate_paths_re_anchors_only_what_the_user_typed(delta_svd):
+    dwi = "study/sub01/data.nii.gz"
+    # inferred: already carries the folder, so it is probed as-is only
+    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True, inferred=True) == [
+        "study/sub01/data_brainmask.nii.gz", "study/sub01/data_brainmask.nii"]
+    # typed: a bare basename has to be resolvable against the DWI folder
+    assert delta_svd.candidate_paths("m.nii.gz", dwi, True, inferred=False) == [
+        "m.nii.gz", "study/sub01/m.nii.gz"]
+
+
+def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_path, monkeypatch, capsys):
+    # the feature the second probe exists for must survive the fix, relative too
+    sub = tmp_path / "study" / "sub01"
+    sub.mkdir(parents=True)
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    for fn in ["data.nii.gz", "data.bval", "data.bvec", "mask.nii.gz"]:
+        (sub / fn).touch()
+    monkeypatch.chdir(tmp_path)
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", "study/sub01/data.nii.gz", "--bmask", "mask.nii.gz",
+        "--skeletonMask", "skel.nii.gz", "--steps", "qc", "--qc", "0",
+    ])
+    assert "Bmask :study/sub01/mask.nii.gz" in out
+
+
+# ---------------------------------------------------------------------------
+# The extension probing appends to the name as given, so for 'data.nii' it looks
+# for 'data.nii.nii.gz' -- it never reaches 'data.nii.gz'. The message must not
+# claim otherwise, and the sibling that is actually there is worth naming.
+
+def test_isNIfTI_names_the_sibling_with_the_other_extension(delta_svd, tmp_path):
+    (tmp_path / "data.nii.gz").touch()
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data.nii"))
+
+    msg = str(excinfo.value)
+    assert "also tried" not in msg
+    assert str(tmp_path / "data.nii.gz") in msg
+
+
+def test_isNIfTI_names_the_sibling_in_the_other_direction(delta_svd, tmp_path):
+    (tmp_path / "data.nii").touch()
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data.nii.gz"))
+
+    assert str(tmp_path / "data.nii") in str(excinfo.value)
+
+
+def test_isNIfTI_does_not_claim_probes_it_did_not_make(delta_svd, tmp_path):
+    # nothing there at all, and the name already carries an extension
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data.nii"))
+
+    assert "also tried" not in str(excinfo.value)
+
+
+def test_isNIfTI_still_reports_the_probes_for_an_extensionless_name(delta_svd, tmp_path):
+    # here the probes are real, and naming them tells the user what was searched
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        delta_svd.isNIfTI(str(tmp_path / "data"))
+
+    msg = str(excinfo.value)
+    assert str(tmp_path / "data.nii.gz") in msg
+    assert str(tmp_path / "data.nii") in msg
+
+
+def test_nifti_sibling_returns_none_without_a_counterpart(delta_svd, tmp_path):
+    (tmp_path / "data.nii.gz").touch()
+    assert delta_svd.nifti_sibling(str(tmp_path / "other.nii")) is None
+    assert delta_svd.nifti_sibling(str(tmp_path / "notes.txt")) is None
+    # the file asked for is never substituted, only reported
+    assert delta_svd.nifti_sibling(str(tmp_path / "data.nii")) == str(tmp_path / "data.nii.gz")
+
+
+def test_explicit_bmask_with_wrong_extension_names_the_sibling(delta_svd, tmp_path, monkeypatch):
+    dwi = tmp_path / "sub01.nii.gz"
+    skel = tmp_path / "skel.nii.gz"
+    for fn in [dwi, skel, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
+               tmp_path / "mask.nii.gz"]:
+        fn.touch()
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", str(dwi), "--bmask", "mask.nii",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "other NIfTI extension" in msg
+    assert str(tmp_path / "mask.nii.gz") in msg
+
+
+def test_missing_explicit_bmask_reports_it_as_given(delta_svd, tmp_path, monkeypatch):
+    dwi = tmp_path / "sub01.nii"
+    skel = tmp_path / "skel.nii.gz"
+    for fn in [dwi, skel, tmp_path / "sub01.bval", tmp_path / "sub01.bvec"]:
+        fn.touch()
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", str(dwi), "--bmask", "nowhere.nii.gz",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "given as 'nowhere.nii.gz'" in msg
+    assert "inferred" not in msg
+    # probed relative to the DWI folder as well, and that is reported
+    assert str(tmp_path / "nowhere.nii.gz") in msg
+
+
+# ---------------------------------------------------------------------------
+# Every user-fixable error is a DeltaSvdError, so the __main__ guard can report
+# it without a traceback. A ValueError from anywhere else is a bug and has to
+# keep its traceback, so the guard must not swallow it.
+
+def test_delta_svd_error_is_a_value_error(delta_svd):
+    assert issubclass(delta_svd.DeltaSvdError, ValueError)
+
+
+def test_missing_emask_names_the_option_and_the_NA_escape(delta_svd, tmp_path, monkeypatch):
+    dwi = tmp_path / "sub01.nii"
+    skel = tmp_path / "skel.nii.gz"
+    for fn in [dwi, skel, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
+               tmp_path / "sub01_brainmask.nii"]:
+        fn.touch()
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", str(dwi), "--Emask", "lesion.nii.gz",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    # used to escape as a bare argparse.ArgumentTypeError, from outside argparse
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "'--Emask'" in msg
+    assert "'NA'" in msg
+
+
+@pytest.mark.parametrize("attr", ["Emask", "Rmask"])
+def test_mask_given_without_extension_is_resolved_for_later_steps(delta_svd, tmp_path, monkeypatch, capsys, attr):
+    # the resolved name used to be discarded, leaving the bare basename on
+    # 'args' for nibabel to choke on much later
+    dwi = tmp_path / "sub01.nii"
+    skel = tmp_path / "skel.nii.gz"
+    mask = tmp_path / "lesion.nii.gz"
+    for fn in [dwi, skel, mask, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
+               tmp_path / "sub01_brainmask.nii"]:
+        fn.touch()
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", str(dwi), "--" + attr, "lesion", "--skeletonMask", str(skel),
+        "--steps", "qc", "--qc", "0",
+    ])
+    assert f"{attr} :{mask}" in out
 
 
 def test_bval_bvec_inferred_from_dwi_path(delta_svd, tmp_path, monkeypatch, capsys):

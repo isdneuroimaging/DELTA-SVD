@@ -155,8 +155,48 @@ from scipy.ndimage import gaussian_filter
 from markvcid_fw_mrn import wls_fit_tensor_fw, wls_fit_dti
 from delta_svd_version import __version__
 
+
+class DeltaSvdError(ValueError):
+    """A problem with the input or with what was asked for -- not a bug.
+
+    Raised for everything a user can fix by changing the command line or the
+    data, and caught in the __main__ guard at the bottom of this file, which
+    reports it the way argparse reports its own errors: one message on stderr,
+    no traceback. Anything else that escapes is a fault in the pipeline and
+    keeps its traceback, which is what makes it debuggable.
+
+    An exception rather than a direct sys.exit() because these checks live in
+    functions that are unit-tested directly and called as a library; exiting
+    from inside them would make that impossible. It derives from ValueError
+    because that is what they raised before, and callers may still catch it
+    as one.
+
+    delta-svd_aggregate_results.py has no such structure -- every check there
+    sits in one linear script-level flow -- so it calls sys.exit() directly
+    instead of importing this. Both produce the same 'ERROR: ...' on stderr.
+    """
+
 ###########################################################################
 # Functions for reading/writing bval/bvec files
+
+#--- How many lines of a malformed file to list before summarising the rest.
+MAX_LINES_REPORTED = 10
+
+
+def first_non_numeric(rows):
+    """Where the first entry that is not a number sits, as (line, position,
+    value) with both indices 1-based. None when every entry is a number.
+
+    For error messages only: numpy names the offending value but not where in
+    the file it is, which is the part needed to go and fix it."""
+    for iRow, row in enumerate(rows):
+        for iVal, val in enumerate(row):
+            try:
+                float(val)
+            except ValueError:
+                return iRow + 1, iVal + 1, val
+    return None
+
 
 def read_bval_or_bvec(fname):
 
@@ -166,6 +206,21 @@ def read_bval_or_bvec(fname):
     for i,l in enumerate(ll):
         ll[i] = l.split()
 
+    #--- Lines of unequal length make np.array() raise on its own, with a message
+    #    about inhomogeneous shapes that names neither the file nor the line.
+    lengths = {len(row) for row in ll}
+    if len(lengths) > 1:
+        shown = '\n'.join(f'   line {i+1}: {len(row)} value(s)'
+                          for i, row in enumerate(ll[:MAX_LINES_REPORTED]))
+        more = (f'\n   ... and {len(ll)-MAX_LINES_REPORTED} more line(s)'
+                if len(ll) > MAX_LINES_REPORTED else '')
+        blanks = ('\n A blank line holds no values and counts here, so remove any.'
+                  if 0 in lengths else '')
+        raise DeltaSvdError(f"Every line of a bval/bvec file has to hold the same number of values "
+                            f"-- one per volume -- but these do not:\n{shown}{more}{blanks}\n"
+                            f" {fname}")
+
+    rows = ll                      # kept for reporting: 'll' is reshaped below
     ll = np.array(ll)
 
     if ll.shape[0]==1:
@@ -173,11 +228,21 @@ def read_bval_or_bvec(fname):
     elif ll.shape[0]==3:
         ll = ll.T
     else:
-        raise ValueError('Input file has to contain either one row (for bval files) or three rows (for bvec files).')
+        raise DeltaSvdError(f"Input file has to contain either one row (for bval files) or three "
+                            f"rows (for bvec files), but this one has {ll.shape[0]}:\n {fname}")
 
     arrStr   = ll
-    arrFloat = ll.astype('float')
-    
+    #--- Attempted rather than pre-checked, so that what counts as a number stays
+    #    exactly what numpy accepts; the scan below runs only once it has failed.
+    try:
+        arrFloat = ll.astype('float')
+    except ValueError:
+        found = first_non_numeric(rows)
+        where = (f" The first is '{found[2]}', on line {found[0]} at position {found[1]}."
+                 if found else '')
+        raise DeltaSvdError(f"A bval/bvec file may only hold numbers, but this one holds a value "
+                            f"that is not a number.{where}\n {fname}") from None
+
     return arrFloat, arrStr
 
 
@@ -197,32 +262,173 @@ def write_bval_or_bvec(arrStr, fname):
 # Functions for major processing steps
 
 
-def filter_b_values(fn_data = 'data.nii.gz', 
-                fn_bval = 'file.bval', 
+#--- b-values at or below this count as b = 0: they carry no usable diffusion
+#    weighting, and are what S0 is averaged from. Always kept, whatever b-value
+#    selection the user asks for.
+B0_MAX = 5
+
+#--- Scanners report b-values that deviate from the nominal shell (rounding, and
+#    cross-terms with the imaging gradients), so a requested limit is met with a
+#    tolerance. A range carries slack in its endpoints already, so it only needs
+#    enough to absorb rounding; a shell is a point, where the tolerance is the
+#    whole acceptance window, so it gets more. Neither can merge adjacent shells,
+#    which sit at least 100 s/mm2 apart in practice.
+BRANGE_TOL = 5
+SHELL_TOL = 25
+
+#--- The window the diffusion-tensor model is valid in. Below the floor the
+#    signal is contaminated by perfusion (IVIM), above the ceiling by
+#    non-Gaussian diffusion; a tensor fitted outside it is not interpretable, so
+#    b-value selections beyond these are refused rather than fitted.
+BVAL_MIN = 250
+BVAL_MAX = 1800
+
+#--- Identifiability of the fits.
+#
+#    The design matrix both fits solve has seven columns -- the six tensor
+#    components plus the log-S0 intercept (see markvcid_fw_mrn.wls_iter_fw) --
+#    so rank 7 is what "the tensor is estimable at all" means, and six
+#    non-collinear directions reach it. The free-water fraction is not part of
+#    that linear solve: it is grid-searched and scored by the residual, so it is
+#    constrained only by *distinct* design rows. Repeated acquisitions of one
+#    direction average noise but add no constraint on it -- hence the floor
+#    counts unique directions, not volumes.
+#
+#    Twelve is the lowest direction count of a real clinical DTI protocol: below
+#    it a dataset is far more likely truncated, corrupted, or over-filtered than
+#    deliberately acquired, so it is refused. Between twelve and the twenty
+#    directions docs/requirements.md recommends the fit works but the free-water
+#    fraction is noisy, which is a warning rather than an error. None of this
+#    fails on its own: the bi-tensor fit solves with a pseudo-inverse, which
+#    returns a minimum-norm solution for a degenerate gradient table instead of
+#    raising, so an unchecked run produces plausible-looking numbers.
+DESIGN_MATRIX_RANK = 7
+MIN_DIRECTIONS = 12
+RECOMMENDED_DIRECTIONS = 20
+
+#--- Two gradient directions count as one below an angle of ~2.6 degrees. Even a
+#    128-direction scheme separates its directions by more than 10 degrees, so
+#    this can only ever merge genuine repeats.
+DIRECTION_COS_TOL = 0.999
+
+
+def resolve_b_intervals(bRange=None, shells=None):
+    """The accepted non-zero b-value windows, tolerance included.
+
+    One window for '--bRange', one per shell for '--shells'; the two options are
+    mutually exclusive on the command line."""
+    if shells:
+        return [(float(s) - SHELL_TOL, float(s) + SHELL_TOL) for s in sorted(set(shells))]
+    return [(float(min(bRange)) - BRANGE_TOL, float(max(bRange)) + BRANGE_TOL)]
+
+
+def describe_directions(bvals, bvecs):
+    """Unique diffusion directions, and design-matrix rank, of a gradient table.
+
+    Directions are identified antipodally -- g and -g probe the same tensor
+    element -- and up to DIRECTION_COS_TOL, so repeats of a direction count once.
+    The rank returned is that of the seven-column design matrix the fits solve:
+    scaling a row by its b-value and repeating rows change neither, so it is
+    computed from the unique unit directions plus a single b = 0 row."""
+    bvals = np.asarray(bvals, dtype=float)
+    dwi = bvals > B0_MAX
+    g = np.asarray(bvecs, dtype=float).reshape(len(bvals), 3)[dwi]
+    norms = np.linalg.norm(g, axis=1)
+    g = g[norms > 0] / norms[norms > 0, None]        # a zero bvec probes no direction
+
+    unique = []
+    for v in g:
+        if not any(abs(float(np.dot(v, u))) >= DIRECTION_COS_TOL for u in unique):
+            unique.append(v)
+
+    #--- lower-triangular ordering, matching dipy's design_matrix()
+    rows = [[v[0]**2, 2*v[0]*v[1], v[1]**2, 2*v[0]*v[2], 2*v[1]*v[2], v[2]**2]
+            for v in unique]
+    if np.any(~dwi):
+        rows.append([0.0]*6)                         # every b = 0 volume gives this row
+    W = np.column_stack([np.array(rows).reshape(len(rows), 6), np.ones(len(rows))])
+
+    return len(unique), int(np.linalg.matrix_rank(W))
+
+
+def format_b_values(bvals):
+    """The b-values present with their counts, rounded to 10 s/mm2 so that
+    per-direction deviation within a shell reads as one shell. For messages."""
+    shells = np.round(np.asarray(bvals, dtype=float) / 10.0) * 10.0
+    values, counts = np.unique(shells, return_counts=True)
+    return ', '.join(f'{int(v)} (n={n})' for v, n in zip(values, counts))
+
+
+def filter_b_values(fn_data = 'data.nii.gz',
+                fn_bval = 'file.bval',
                 fn_bvec = 'file.bvec',
                 out_dir = None,
-                bRange = [800,1200]):
-    
-    print("Filtering DWI data according to b-values:")
-    print(f"Accepted are b-values close to Zero (b-value <= 5) and in the range: {bRange}")
-    
-    bvals, bvalsStr = read_bval_or_bvec(fn_bval)
+                bIntervals = ((800-BRANGE_TOL, 1200+BRANGE_TOL),)):
 
-    selB0 =  (bvals <= 5)
-    selBRange =  ((bvals >= bRange[0]) & (bvals <= bRange[1]))
+    accepted = ', '.join(f'[{lo:g}, {hi:g}]' for lo, hi in bIntervals)
+    print("Filtering DWI data according to b-values:")
+    print(f"Accepted are b-values close to Zero (b-value <= {B0_MAX}) and in: {accepted}")
+
+    bvals, bvalsStr = read_bval_or_bvec(fn_bval)
+    bvecs, bvecsStr = read_bval_or_bvec(fn_bvec)
+    if len(bvecs) != len(bvals):
+        raise DeltaSvdError(f"The bvec file holds {len(bvecs)} directions but the bval file holds "
+                            f"{len(bvals)} b-values. They have to describe the same volumes.\n"
+                            f" bval: {fn_bval}\n bvec: {fn_bvec}")
+
+    selB0 =  (bvals <= B0_MAX)
+    perInterval = [((bvals >= lo) & (bvals <= hi) & ~selB0) for lo, hi in bIntervals]
+    selBRange = np.logical_or.reduce(perInterval)
     sel = selB0 | selBRange
     print(f' total number of images        : n={len(bvals)}')
-    print(f' images with b-value <= 5      : n={sum(selB0==True)}')
+    print(f' images with b-value <= {B0_MAX}      : n={sum(selB0==True)}')
     print(f' images with b-value in range  : n={sum(selBRange==True)}')
     print(f' images with excluded b-values : n={sum(sel==False)}')
 
+    #--- Everything below refuses data the fits cannot be trusted on, before any
+    #    image is loaded: a too-narrow selection then costs seconds rather than a
+    #    tensor fit. The checks run on the unfiltered path too, so they are
+    #    placed ahead of the 'applyFilter' branch.
+    for (lo, hi), selInterval in zip(bIntervals, perInterval):
+        if not np.any(selInterval):
+            raise DeltaSvdError(f"No volume has a b-value in [{lo:g}, {hi:g}]. Check the requested "
+                                f"b-values ('--bRange' / '--shells', tolerance included above) "
+                                f"against the b-values in the data: {format_b_values(bvals)}.\n"
+                                f" bval: {fn_bval}")
+    if not np.any(selB0):
+        raise DeltaSvdError(f"No volume with a b-value close to zero (b <= {B0_MAX}) was found. The "
+                            f"fits need at least one to estimate S0. b-values in the data: "
+                            f"{format_b_values(bvals)}.\n bval: {fn_bval}")
+
+    nDirections, rank = describe_directions(bvals[sel], bvecs[sel])
+    print(f' unique diffusion directions   : n={nDirections}')
+    if nDirections < MIN_DIRECTIONS:
+        raise DeltaSvdError(f"Only {nDirections} unique diffusion direction(s) remain after the "
+                            f"b-value selection, but the free-water bi-tensor fit needs at least "
+                            f"{MIN_DIRECTIONS} (repeated directions constrain the free-water "
+                            f"fraction no further than a single one does, so they are counted "
+                            f"once). Check the requested b-values ('--bRange' / '--shells') "
+                            f"against the b-values in the data: {format_b_values(bvals)}.\n"
+                            f" bval: {fn_bval}\n bvec: {fn_bvec}")
+    if rank < DESIGN_MATRIX_RANK:
+        raise DeltaSvdError(f"The {nDirections} diffusion directions do not span the diffusion "
+                            f"tensor: the design matrix has rank {rank} instead of "
+                            f"{DESIGN_MATRIX_RANK}, so the tensor cannot be estimated from them. "
+                            f"They are collinear or lie in a single plane, which usually means a "
+                            f"damaged gradient table.\n bvec: {fn_bvec}")
+    if nDirections < RECOMMENDED_DIRECTIONS:
+        print(f'WARNING: {nDirections} unique diffusion directions is below the recommended '
+              f'minimum of {RECOMMENDED_DIRECTIONS}.\n The fit runs, but the free-water fraction '
+              f'and hence the reported metrics are noisy.\n Please interpret the results with '
+              f'care, and do not pool them with results from data with more directions.')
+
     applyFilter = False
-    
+
     if sum(sel==False)>0:
         applyFilter = True
         print('Removing excluded b-values!')
 
-    b5 = (bvals>0) & (bvals<=5)
+    b5 = (bvals>0) & (bvals<=B0_MAX)
     if sum(b5==True) > 0:
         print(f'Some b-values (n={sum(b5)}) are close but not exactly Zero:\n {bvals[b5]}')
         print('These values are set to Zero!')
@@ -232,13 +438,12 @@ def filter_b_values(fn_data = 'data.nii.gz',
     if not applyFilter:
         print('Nothing to do.')
     else:
-        
+
         bvals = bvalsStr[sel]
         print('New set of b-values:')
         print(bvals)
-    
-        _, bvecs = read_bval_or_bvec(fn_bvec)
-        bvecs = bvecs[sel]
+
+        bvecs = bvecsStr[sel]
 
         nii = nib.load(fn_data)
         img = nii.get_fdata()
@@ -258,9 +463,9 @@ def filter_b_values(fn_data = 'data.nii.gz',
         print(fn_bval)
         print(fn_bvec)
         print(fn_data)
-        
-        
-    return fn_data, fn_bval, fn_bvec
+
+
+    return fn_data, fn_bval, fn_bvec, nDirections
 
 
 ###########################################################################
@@ -945,7 +1150,8 @@ def run_subprocess(cmd, displayStdout, label):
     if output.returncode != 0:
         print("STDOUT/STDERR:")
         print(output.stdout.decode("utf-8"))
-        raise ValueError(f"ERROR during call of {label} command! For stdout/stderr of the command see above!")
+        raise DeltaSvdError(f"The '{label}' command failed with exit code {output.returncode}. "
+                            f"Its stdout/stderr is printed above.")
     else:
         stdout = output.stdout.decode("utf-8")
         if displayStdout and len(stdout)>0 and not stdout.isspace(): print(stdout)
@@ -964,8 +1170,28 @@ def section_header(text, startPrevious = None):
     return time.time()
 
 
+NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
+
+
+def nifti_sibling(s):
+    """The same path carrying the other NIfTI extension, when that file exists.
+
+    Asking for 'data.nii' where only 'data.nii.gz' is present is an easy mistake,
+    and the extension probing in isNIfTI() cannot catch it: that appends to the
+    name as given, so it looks for 'data.nii.nii.gz'. Reported rather than
+    accepted -- the file asked for is not the file found, and substituting it
+    silently would be the wrong kind of helpful."""
+    if s.endswith('.nii.gz'):
+        alt = s[:-len('.gz')]
+    elif s.endswith('.nii'):
+        alt = s + '.gz'
+    else:
+        return None
+    return alt if os.path.isfile(alt) else None
+
+
 def isNIfTI(s, abort=True):
-    if os.path.isfile(s) and (s.endswith('.nii.gz') or s.endswith('.nii')):
+    if os.path.isfile(s) and s.endswith(NIFTI_EXTENSIONS):
         return s
     elif os.path.isfile(s+'.nii.gz'):
         return s+'.nii.gz'
@@ -973,15 +1199,92 @@ def isNIfTI(s, abort=True):
         return s+'.nii'
     else:
         if abort:
-            raise argparse.ArgumentTypeError("File path does not exist or is not NIfTI. Please check: %s"%(s))
+            # An existing file that is merely named wrong needs a different fix
+            # from one that is not there at all, so the two are told apart. This
+            # stays an ArgumentTypeError: argparse calls it as a 'type' and turns
+            # that into its own clean 'error:' line.
+            if os.path.isfile(s):
+                raise argparse.ArgumentTypeError(
+                    f"file is not a NIfTI image -- its name ends in neither '.nii' nor "
+                    f"'.nii.gz'. Please check: {s}")
+            sibling = nifti_sibling(s)
+            if sibling is not None:
+                raise argparse.ArgumentTypeError(
+                    f"file does not exist, but one with the other NIfTI extension does:\n"
+                    f"    {sibling}\n  Please check: {s}")
+            # The probes above append to the name as given, so they are only worth
+            # reporting when it carried no NIfTI extension of its own -- otherwise
+            # they looked for 'data.nii.nii.gz' and claiming they tried '.nii.gz'
+            # would be untrue.
+            if s.endswith(NIFTI_EXTENSIONS):
+                raise argparse.ArgumentTypeError(f"file does not exist. Please check: {s}")
+            raise argparse.ArgumentTypeError(
+                f"file does not exist (also tried '{s}.nii.gz' and '{s}.nii'). "
+                f"Please check: {s}")
         else:
             return None
+
+
+def candidate_paths(fn, dwi, anyExtension, inferred=False):
+    """The paths an input given per time-point is looked for at, in order: as
+    given, and relative to the folder of its DWI image; each optionally
+    completed with a NIfTI extension.
+
+    This mirrors the resolution for the sake of the error message only. What is
+    accepted stays entirely with isNIfTI()/exists(), so this cannot widen it."""
+    #--- An inferred name is built from the DWI path and so already carries its
+    #    folder; joining it to that folder again would only look for
+    #    '<dwiDir>/<dwiDir>/<name>'. Only a path the user typed is worth
+    #    re-anchoring, which is what makes a bare basename work.
+    roots = [fn] if inferred else [fn, join(dirname(dwi), fn)]
+    paths = []
+    for p in roots:
+        # isNIfTI() completes a path that carries no NIfTI extension of its own.
+        # It does probe 'p' itself either way, but a name already ending in one
+        # can only ever match as itself, so listing the completions would be noise.
+        if anyExtension and not p.endswith(NIFTI_EXTENSIONS):
+            paths += [p + e for e in NIFTI_EXTENSIONS]
+        else:
+            paths.append(p)
+    unique = []
+    for p in paths:                     # dirname() is empty for a bare basename
+        if p not in unique:
+            unique.append(p)
+    return unique
+
+
+def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
+    """Why a per-time-point input could not be found, and what to do about it.
+
+    Names the time-point by its DWI image rather than by an index: the '--tp'
+    labels are not resolved yet at this point, and the path is what the user has
+    to go and look at anyway."""
+    paths = candidate_paths(fn, dwi, anyExtension, inferred)
+    tried = '\n'.join(f'   {p}' for p in paths)
+    if inferred:
+        origin = f" No '--{attr}' was given, so it was inferred from the DWI path."
+        fix = f" Provide the correct path with '--{attr}'."
+    else:
+        origin = f" It was given as '{fn}'."
+        fix = f" Please check the path given with '--{attr}'."
+    #--- the likeliest near-miss: the file is there under the other extension
+    siblings = []
+    for p in paths:
+        alt = nifti_sibling(p)
+        if alt is not None and alt not in siblings:
+            siblings.append(alt)
+    hint = ''
+    if siblings:
+        hint = (' A file with the other NIfTI extension is there:\n'
+                + '\n'.join(f'   {a}' for a in siblings) + '\n')
+    return (f"No '--{attr}' file was found for the DWI image:\n   {dwi}\n"
+            f"{origin}\n Looked for:\n{tried}\n{hint}{fix}{note}")
 
 def isCSV(s):
     if s == 'overwrite' or s.endswith('.csv') or s.endswith('.CSV'):
         return s
     else:
-        raise argparse.ArgumentTypeError("The provided filename does not have the required '.csv' extension. Please check: %s"%(s))
+        raise argparse.ArgumentTypeError(f"--reprocess filename must end in '.csv'; you provided '{s}'")
     
 def assertPositiveJobs(s):
     try:
@@ -1013,6 +1316,23 @@ def assertPositiveItkThreads(s):
     return v
 
 
+def assertBValue(s):
+    """A b-value for '--bRange' / '--shells', inside the window the tensor fit
+    is valid in."""
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"b-values given with --bRange / --shells must be whole numbers; you provided '{s}'")
+    if not BVAL_MIN <= v <= BVAL_MAX:
+        raise argparse.ArgumentTypeError(
+            f"b-values given with --bRange / --shells have to lie between {BVAL_MIN} and "
+            f"{BVAL_MAX} s/mm2; you provided {v}. Below {BVAL_MIN} the diffusion signal is "
+            f"contaminated by perfusion and above {BVAL_MAX} by non-Gaussian diffusion, so a "
+            f"diffusion tensor fitted there is not interpretable. Note that b-values close to "
+            f"zero (b <= {B0_MAX}) are always included and must not be given here.")
+    return v
+
+
 def threadBudget(s):
     """A positive integer, or 'auto' to auto-detect the physical cores."""
     if str(s).strip().lower() == 'auto':
@@ -1033,7 +1353,14 @@ class CustomArgumentParser(argparse.ArgumentParser):
         for arg_string in args:
             if arg_string.startswith('-') and not arg_string.startswith('--'):
                 if len(arg_string) > 2 and not arg_string[2].isspace():
-                    self.error(f'single-dash options must be one character and separated from their argument by a space: "{arg_string}"')
+                    # The likeliest cause: a long option typed with one dash
+                    # instead of two, e.g. '-shells' for '--shells'. Only worth
+                    # naming when it really is one of ours; self.error() exits,
+                    # so this is built once and never on the success path.
+                    known = {opt for a in self._actions for opt in a.option_strings}
+                    long_form = '--' + arg_string[1:].split('=', 1)[0]
+                    hint = f' Did you mean "{long_form}"?' if long_form in known else ''
+                    self.error(f'single-dash options must be one character and separated from their argument by a space: "{arg_string}".{hint}')
         return super().parse_known_args(args, namespace)
     
 stepsImplemented = ['fwc','template','tbss','tbss_non_fa','extract','qc']
@@ -1057,7 +1384,9 @@ def iniParser():
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
     group2 = parser.add_argument_group('advanced options')
     group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/delta-svd_skeletonmask_v1.nii.gz", help="input path to an alternative skeleton mask. It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
-    group2.add_argument("--bRange", metavar='Integer', type=int, default = [800, 1200], nargs=2, help="range of b-values to consider for diffusion tensor fitting. Defaults to range [800,1200].")
+    group2b = group2.add_mutually_exclusive_group()
+    group2b.add_argument("--bRange", metavar='Integer', type=assertBValue, default = [800, 1200], nargs=2, help=f"range of b-values to consider for diffusion tensor fitting, given as the lower and upper limit of the non-zero shell(s) to include. Defaults to range [800,1200]. The limits are met with a tolerance of {BRANGE_TOL} s/mm2, so that shells the scanner reports slightly off their nominal value are not discarded. Volumes with a b-value close to zero (b <= {B0_MAX}) are always included and are not affected by this option. Both limits have to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2, outside of which the diffusion tensor model is not valid. Mutually exclusive with '--shells'.")
+    group2b.add_argument("--shells", metavar='Integer', type=assertBValue, nargs="+", action='extend', help=f"b-value shell(s) to consider for diffusion tensor fitting, e.g. '--shells 700 1000'. An alternative to '--bRange' for selecting shells individually rather than as one range, which avoids pulling in the shells in between. Each shell is matched with a tolerance of {SHELL_TOL} s/mm2, and a shell that matches no volume in the data is an error. As for '--bRange', volumes with a b-value close to zero (b <= {B0_MAX}) are always included, and each shell has to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2. Mutually exclusive with '--bRange'.")
     group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
     group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."
     group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of time-points either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
@@ -1102,19 +1431,24 @@ def pipeline_delta_svd():
         anyExtension = (attr == 'bmask')
         resolve = (lambda fn: isNIfTI(fn, abort=False)) if anyExtension else (lambda fn: fn if exists(fn) else None)
         flist = getattr(args,attr)
-        if flist is None:
+        inferred = flist is None
+        if inferred:
             flist = [re.sub(r'\.nii(\.gz)?$', ext, fn) for fn in args.dwi]
         elif len(flist) != len(args.dwi):
             if len(flist) == 1:
                 flist = flist * len(args.dwi)
             else:
-                raise ValueError(f"Number of files provided with option '--{attr}' has to be zero or correspond to number of DWI files. Please refer to '--help'")
+                raise DeltaSvdError(f"The number of files given with option '--{attr}' (n={len(flist)}) "
+                                    f"has to be either one or match the number of DWI images "
+                                    f"(n={len(args.dwi)}). Please refer to '--help'.")
         for i, fn in enumerate(flist):
             fnResolved = resolve(fn)
-            if fnResolved is None:
+            if fnResolved is None and not inferred:
+                # only a path the user typed is re-anchored to the DWI folder;
+                # see candidate_paths() for why an inferred one is not
                 fnResolved = resolve(join(dirname(args.dwi[i]), fn))
             if fnResolved is None:
-                raise ValueError(f"The {i+1}. of the expected '{attr}' files does not exist")
+                raise DeltaSvdError(missing_input_message(attr, fn, args.dwi[i], anyExtension, inferred))
             flist[i] = fnResolved
         setattr(args,attr,flist)
     
@@ -1122,35 +1456,44 @@ def pipeline_delta_svd():
     if args.tp is None:
         args.tp = ['TP{:02d}'.format(i+1) for i in range(len(args.dwi))] #-- folders for all time-points
     if len(args.tp) != len(args.dwi):
-        raise ValueError(f'If timepoint labels are provided, their number has to correspond to the number of provided DWI files! You passed {len(args.tp)} labels for {len(args.dwi)} DWI files.')
+        raise DeltaSvdError(f"The number of time-point labels given with '--tp' (n={len(args.tp)}) has "
+                            f"to match the number of DWI images (n={len(args.dwi)}).")
     duplicates = sorted({tp for tp in args.tp if args.tp.count(tp) > 1})
     if duplicates:
-        raise ValueError(f'Timepoint labels have to be unique! You passed {", ".join(duplicates)} more than once.')
+        raise DeltaSvdError(f"Time-point labels given with '--tp' have to be unique. You passed "
+                            f"{', '.join(duplicates)} more than once.")
     if len(args.dwi) > 1 and 'all' in args.tp:
-        raise ValueError("'all' is reserved as the label for the rows summarising all time-points and cannot be used as a timepoint label!")
+        raise DeltaSvdError("'all' is reserved as the label for the rows summarising all time-points, "
+                            "so it cannot be used as a '--tp' label.")
 
-    # Check exclusion and ROI masks
-    if len(args.Emask) > len(args.dwi):
-        raise ValueError(f'Number of provided exclusion masks (n={len(args.Emask)}) exceeds number of time-points (n={len(args.dwi)})! Allowed is max. one mask per timepoint!')
-    if len(args.Rmask) > len(args.dwi):
-        raise ValueError(f'Number of provided ROI masks in DWI space (n={len(args.Rmask)}) exceeds number of time-points (n={len(args.dwi)})! Allowed is max. one mask per timepoint!')
+    # Check exclusion and ROI masks. Both are optional and per time-point, with
+    # 'NA' skipping one, so a short list is padded rather than rejected.
+    maskLabels = {'Emask': 'exclusion mask', 'Rmask': 'ROI mask in DWI space'}
+    for attr, label in maskLabels.items():
+        masks = getattr(args, attr)
+        if len(masks) > len(args.dwi):
+            raise DeltaSvdError(f"More {label}s were given with '--{attr}' (n={len(masks)}) than there "
+                                f"are time-points (n={len(args.dwi)}). At most one per time-point is "
+                                f"allowed; enter 'NA' to skip a time-point.")
     for i,_ in enumerate(args.dwi):
-            if len(args.Emask)>i :
-                if args.Emask[i]!='NA':
-                    if isNIfTI(args.Emask[i], abort=False) is None:
-                        args.Emask[i] = isNIfTI(join(dirname(args.dwi[i]), args.Emask[i]))
-                else:
-                    args.Emask[i] = None
-            else:
-                args.Emask.append(None)
-            if len(args.Rmask)>i:
-                if args.Rmask[i]!='NA':
-                    if isNIfTI(args.Rmask[i], abort=False) is None:
-                        args.Rmask[i] = isNIfTI(join(dirname(args.dwi[i]), args.Rmask[i]))
-                else:
-                    args.Rmask[i] = None
-            else:
-                args.Rmask.append(None)
+        for attr in maskLabels:
+            masks = getattr(args, attr)
+            if len(masks) <= i:
+                masks.append(None)
+                continue
+            if masks[i] == 'NA':
+                masks[i] = None
+                continue
+            fnResolved = isNIfTI(masks[i], abort=False)
+            if fnResolved is None:
+                fnResolved = isNIfTI(join(dirname(args.dwi[i]), masks[i]), abort=False)
+            if fnResolved is None:
+                raise DeltaSvdError(missing_input_message(
+                    attr, masks[i], args.dwi[i], True, False,
+                    note=" Enter 'NA' instead of a path to skip this time-point."))
+            # assigned back, so that a name resolved by extension or against the
+            # DWI folder is the one every later step loads
+            masks[i] = fnResolved
 
     print(f"\nInput contains N={len(args.dwi)} time-points")
     for i in range(len(args.dwi)):
@@ -1188,7 +1531,9 @@ def pipeline_delta_svd():
     stepsAvailable = list(stepsImplemented)
     if args.qc==0:
         if args.steps is not None and 'qc' in args.steps:
-            raise ValueError("You asked to do '--step qc' and to skip it '--qc 0' at the same time! Your choice is contradictory!")
+            raise DeltaSvdError("You asked for the 'qc' step with '--steps qc' and to skip it with "
+                                "'--qc 0' at the same time. That is contradictory; please drop one "
+                                "of the two.")
         stepsAvailable.remove('qc')
     if args.steps is None:
         args.steps = stepsAvailable
@@ -1198,7 +1543,10 @@ def pipeline_delta_svd():
         print('\nOn request, only the following processing steps will be conducted:')
         for i,step in enumerate(args.steps): print(f' {i+1}. {step}')
         if len(stepsIdx)>1 and any(np.diff(stepsIdx)>1):
-            print(' '); raise ValueError(f"Requested processing steps have to be contiguous. This is not the case.\nThe available steps in order are: {stepsAvailable}")
+            print(' ')
+            raise DeltaSvdError(f"The requested processing steps have to be contiguous, and these "
+                                f"are not. Each step consumes the output of the one before it.\n "
+                                f"The available steps, in order, are: {', '.join(stepsAvailable)}")
         if 'extract' not in args.steps and not args.debug:
             print("NOTE: Given that the final 'extract' step is not selected, we assume that you want to keep intermediate/temporary output and switch on the option '--debug' for you!")
             args.debug = True
@@ -1219,13 +1567,18 @@ def pipeline_delta_svd():
     fnHTML = join(args.dirOutput, 'delta-svd_qc.html')
     
     # Check if output exists already
-    if os.path.exists(dirTemp) or os.path.exists(fnCSV) or os.path.exists(dirQC) or os.path.exists(fnHTML):
+    outputExisting = [p for p in (dirTemp, fnCSV, dirQC, fnHTML) if os.path.exists(p)]
+    if outputExisting:
 
         # all steps requested: simply delete everything
         if set(args.steps+['qc']) == set(stepsAvailable+['qc']):
             print('\nChecking existence of output')
             if args.reprocess is None:
-                raise ValueError("Output exists already.\n Tip: Use option '--reprocess' if you want to reprocess and overwrite")
+                # the paths themselves, not '--dirOutput': that is an empty string
+                # when the DWI was given as a bare name in the working directory
+                raise DeltaSvdError("Output from a previous run exists already:\n"
+                                    + '\n'.join(f'   {p}' for p in outputExisting)
+                                    + "\n Use option '--reprocess' to reprocess and overwrite it.")
             if os.path.exists(dirTemp): print(f'Deleting: {dirTemp}'); rmtree(dirTemp)
             if os.path.exists(fnCSV): print(f'Deleting: {fnCSV}'); os.remove(fnCSV)
             if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); rmtree(dirQC)
@@ -1259,14 +1612,16 @@ def pipeline_delta_svd():
                 if not isinstance(fn, list): fn = [fn]
                 for fnT in fn:
                     if not exists(fnT):
-                        raise ValueError(f"Output from skipped processing steps '{k}' is missing: {fnT}")
+                        raise DeltaSvdError(f"Step '{k}' is not among the requested '--steps', but its output "
+                                            f"is missing and the requested steps need it:\n {fnT}")
             if args.reprocess is None:
                 for k in shouldNotExist:
                     fn = stepsOutput[k]
                     if not isinstance(fn, list): fn = [fn]
                     for fnT in fn:
                         if exists(fnT):
-                            raise ValueError(f"Output for requested step '{k}' exists already: {fnT}\n Tip: Use option '--reprocess' if you want to reprocess and overwrite")
+                            raise DeltaSvdError(f"Output for the requested step '{k}' exists already:\n {fnT}\n "
+                                                f"Use option '--reprocess' to reprocess and overwrite it.")
             else:
                 for k in shouldNotExist:
                     fn = stepsOutput[k]
@@ -1296,18 +1651,24 @@ def pipeline_delta_svd():
         for i,tp in enumerate(dirTP):
             print(f' {tp}')
 
+        bIntervals = resolve_b_intervals(bRange=args.bRange, shells=args.shells)
+        #--- carried on 'args' for the QC report: the direction count qualifies
+        #    every metric the run produces, so it belongs with them
+        args.nDirections = []
 
         for i in range(len(dirTP)):
             startTime = section_header(f'DTI-fit and free-water correction for {i+1}. timepoint in: {dirTP[i]}', startTime)
 
             Path(dirTP[i]).mkdir(parents=True, exist_ok=True)
 
-            dwi, bval, bvec = filter_b_values(fn_data = args.dwi[i], 
-                                              fn_bval = args.bval[i], 
+            dwi, bval, bvec, nDirections = filter_b_values(fn_data = args.dwi[i],
+                                              fn_bval = args.bval[i],
                                               fn_bvec = args.bvec[i],
                                               out_dir = dirTP[i],
-                                              bRange = [min(args.bRange), max(args.bRange)])
-            
+                                              bIntervals = bIntervals)
+            args.nDirections.append(nDirections)
+
+
             print('')
             free_water_correction(fn_data = dwi, 
                         fn_mask = args.bmask[i], 
@@ -1454,4 +1815,15 @@ def pipeline_delta_svd():
 
 
 if __name__ == "__main__":
-    pipeline_delta_svd()
+    # Only DeltaSvdError is caught, and only here rather than inside
+    # pipeline_delta_svd(): a problem with the input is reported as one message,
+    # the way argparse reports its own, while anything else keeps its traceback
+    # -- an unexpected exception is a fault in the pipeline, and the traceback is
+    # what makes it reportable. Catching it here also leaves the pipeline
+    # importable and testable as a plain function.
+    try:
+        pipeline_delta_svd()
+    except DeltaSvdError as err:
+        sys.exit(f"\nERROR: {err}\n")
+    except KeyboardInterrupt:
+        sys.exit("\nABORTED: interrupted by the user\n")

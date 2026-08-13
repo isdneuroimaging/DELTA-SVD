@@ -96,24 +96,24 @@ if __name__ == "__main__":
         fnDebug = re.sub(r'\.csv$', '_debugging.csv', fnOut)
         if os.path.isfile(fnMetric):
             if not args.overwrite:
-                print(f'\nERROR: Output file already exists:\n {fnMetric}')
-                print(" Use option '-x' to overwrite existing file or change output filepath with option '-o' or '-t datetime'.\n")
-                sys.exit(1)
+                sys.exit(f"\nERROR: Output file already exists:\n {fnMetric}\n Use option '-x' "
+                         f"to overwrite it, or change the output path with option '-o' or "
+                         f"'-t datetime'.\n")
             else:
                 print(f'\nWARNING: Output file already exists and will be overwritten:\n {fnMetric}')
         if os.path.isfile(fnDebug):
             if not args.overwrite:
-                print(f'\nERROR: Output file already exists:\n {fnDebug}')
-                print(" Use option '-x' to overwrite existing file or change output filepath with option '-o' or '-t datetime'.\n")
-                sys.exit(1) 
+                sys.exit(f"\nERROR: Output file already exists:\n {fnDebug}\n Use option '-x' "
+                         f"to overwrite it, or change the output path with option '-o' or "
+                         f"'-t datetime'.\n")
             else:
                 print(f'\nWARNING: Output file already exists and will be overwritten:\n {fnDebug}')
     else:
         if os.path.isfile(fnOut):
             if not args.overwrite:
-                print(f'\nERROR: Output file already exists:\n {fnOut}')
-                print(" Use option '-x' to overwrite existing file or change output filepath with option '-o' or '-t datetime'.\n")
-                sys.exit(1)
+                sys.exit(f"\nERROR: Output file already exists:\n {fnOut}\n Use option '-x' "
+                         f"to overwrite it, or change the output path with option '-o' or "
+                         f"'-t datetime'.\n")
             else:
                 print(f'\nWARNING: Output file already exists and will be overwritten:\n {fnOut}')
     
@@ -128,8 +128,9 @@ if __name__ == "__main__":
     fnames = sorted(glob.glob(os.path.join(args.directory, depth, args.filename), recursive=True))
 
     if len(fnames) == 0:
-        print(f'\nNo CSV files found in "{args.directory}" at {depthStr} and with pattern "{args.filename}"')
-        sys.exit(1)
+        sys.exit(f'\nERROR: No CSV files found in "{args.directory}" at {depthStr} and with '
+                 f'pattern "{args.filename}".\n Check the directory, and the globbing options '
+                 f"'-f' (filename) and '-d' (depth).\n")
 
     if args.verbose:
         print(f'\nFound {len(fnames)} CSV files')
@@ -157,8 +158,8 @@ if __name__ == "__main__":
     if len(fnamesOk)>0:
         fnames = fnamesOk
     else:
-        print('ERROR: none of the globbed files contains readable data!')
-        sys.exit(1)
+        sys.exit(f'\nERROR: None of the {len(fnames)} globbed CSV files contains readable data.'
+                 f'\n The files excluded, and why, are listed above.\n')
 
     headersStr = [f'{header}' for header in headers]
     headersStrUnq = set(headersStr)
@@ -172,8 +173,8 @@ if __name__ == "__main__":
         print("#Files | Header" + ' '*(ll-6+2) + " | Example file")
         for i, row in enumerate(zipped):
             print("{:>6d} | {:s}".format(*row[0:2]) + '-'*(ll-row[2]+2) + " | {:<45s}".format(row[3]))
-        print('Aborting! Aggregation of tables with different headers not supported!')
-        sys.exit(1)
+        sys.exit('\nERROR: Aggregating tables with different headers is not supported.\n The '
+                 'differing headers, and an example file for each, are listed above.\n')
 
     df = pd.concat(dfs)
 
@@ -191,13 +192,13 @@ if __name__ == "__main__":
         fileGroup = np.repeat(np.arange(len(fnames)), nRows)
         idsPerFile = df.groupby(fileGroup)['ID'].agg(['nunique', 'first'])
         if (idsPerFile['nunique'] > 1).any():
-            print("\nERROR: Column 'ID' is not constant within every input CSV file.")
-            print(" Use option '-p' to insert a column 'path' with file path-names as additional, unique identifiers.\n")
-            sys.exit(1)
+            sys.exit("\nERROR: Column 'ID' is not constant within every input CSV file.\n Use "
+                     "option '-p' to insert a column 'path' with the file path-names as "
+                     "additional, unique identifiers.\n")
         if not idsPerFile['first'].is_unique:
-            print("\nERROR: Patient identifiers in column 'ID' are not all distinct.")
-            print(" Use option '-p' to insert a column 'path' with file path-names as additional, unique identifiers.\n")
-            sys.exit(1)
+            sys.exit("\nERROR: Patient identifiers in column 'ID' are not all distinct.\n Use "
+                     "option '-p' to insert a column 'path' with the file path-names as "
+                     "additional, unique identifiers.\n")
 
 
     uL, uC = np.unique(nRows, return_counts=True)
