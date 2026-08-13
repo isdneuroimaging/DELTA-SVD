@@ -45,7 +45,15 @@ Because of these methodological differences, the PSMD values produced by DELTA-S
 
 ## Can I use multi-shell data?
 
-**Yes.** DELTA-SVD fits the tensor on b-values around b = 1000 s/mm² (default range 800–1200, together with the b ≈ 0 volumes) and selects the appropriate shell(s) from your data automatically, so multi-shell acquisitions are fine. If you need a different selection, `--bRange` sets the limits and `--shells` names the shells individually — the latter is the safer choice on multi-shell data, since it does not pull in the shells lying between the ones you want. The b ≈ 0 volumes are always kept either way. See [Data requirements](requirements.md) and [Selecting the b-values](advanced-usage.md#selecting-the-b-values).
+**Yes.** DELTA-SVD fits the tensor on b-values around b = 1000 s/mm² (default range 800–1200, together with the b ≈ 0 volumes) and selects the appropriate shell(s) from your data automatically, so multi-shell acquisitions are fine. If you need a different selection, `--bRange` sets the limits and `--shells` names the shells individually. On multi-shell data `--shells` is the safer choice, because it does not pull in the shells lying between the ones you want. The b ≈ 0 volumes are always kept either way. See [Data requirements](requirements.md) and [Selecting the b-values](advanced-usage.md#selecting-the-b-values).
+
+## Can I use my b = 2000 data?
+
+Only as part of a larger acquisition. DELTA-SVD needs a shell suitable for diffusion-tensor fitting, and accepts b-values between **250 and 1800 s/mm²**. That is a deliberately wide outer bound, marking where the tensor model gives out rather than what to acquire: b ≈ 1000 is what the method is built around. If your data also holds such a shell, it is picked automatically and the rest is ignored; a dataset with only a b = 2000 shell is not suitable.
+
+## How many diffusion directions do I need?
+
+**At least 12 distinct directions** have to survive the b-value selection, or the run stops. **20 or more is recommended**: below that DELTA-SVD warns, and notes the count in the QC report either way. Repeated acquisitions of the same direction are counted once, since they average noise but add nothing to the free-water estimate. See [Data requirements](requirements.md#acquisition).
 
 ## How do I exclude a region, or restrict the analysis to specific ROIs?
 

@@ -103,7 +103,7 @@ Apptainer and rootless Podman map your host identity into the container, so they
 
 DELTA-SVD fits the tensor on one shell around b = 1000 s/mm², selected from your data automatically, so multi-shell acquisitions need no special handling. Two options change which volumes are selected, and only one of them can be given at a time.
 
-**`--bRange LO HI`** takes the lower and upper limit of the shell(s) to include, and defaults to `800 1200`:
+**`--bRange LO HI`** takes the lower and upper limit of the (non-zero) shell(s) to include, and defaults to `800 1200`:
 
 ```bash
 delta-svd.py --dwi sub01_dwi.nii.gz --bRange 900 1100
@@ -119,7 +119,7 @@ The difference matters on multi-shell data. `--bRange 700 1000` also selects eve
 
 A few things hold for both options:
 
-- **b ≈ 0 volumes are always included**, whatever you ask for. They are what S0 is estimated from, and they are selected by their own rule (b ≤ 5 s/mm²). There is no need — and no way — to list them here.
+- **b ≈ 0 volumes are always included**, whatever you ask for. They are what S0 is estimated from, and they are selected by their own rule (b ≤ 5 s/mm²).
 - **The limits are met with a tolerance**, because scanners report b-values that deviate from the nominal shell, through rounding and through cross-terms with the imaging gradients. A range limit is met within ±5 s/mm², so the default range accepts 795–1205; a shell is matched within ±25 s/mm², so `--shells 1000` accepts 975–1025. A shell needs the wider window because it is a point rather than an interval, where the tolerance is the whole acceptance window. If your data scatters further than that, use `--bRange`.
-- **Both are limited to 250–1800 s/mm².** Below that the diffusion signal is contaminated by perfusion, above it by non-Gaussian diffusion, so a tensor fitted there is not interpretable. A request outside the window is refused rather than fitted.
+- **Both are limited to 250–1800 s/mm².** Below that the diffusion signal is contaminated by perfusion, above it by non-Gaussian diffusion, so a tensor fitted there is not interpretable, and a request outside the window is refused rather than fitted. The window is deliberately wide: it marks where the model gives out, not how far from b ≈ 1000 it is sensible to go.
 - **A shell that matches no volume is an error**, as is a selection that leaves fewer than 12 distinct diffusion directions. See [Data requirements](requirements.md#acquisition) for what the fit needs.
