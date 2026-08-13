@@ -491,6 +491,81 @@ def test_read_bval_or_bvec_rejects_malformed_shape(delta_svd, tmp_path):
         delta_svd.read_bval_or_bvec(str(fn))
 
 
+# A ragged or non-numeric file used to escape as numpy's own ValueError, whose
+# message ("inhomogeneous shape", "could not convert string to float") names
+# neither the file nor the line. Both are the user's to fix, so both are ours
+# to report.
+
+def test_read_bval_or_bvec_rejects_lines_of_unequal_length(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bvec"
+    fn.write_text("0 1 0\n0 0 1\n0 0\n")          # third direction truncated
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    msg = str(excinfo.value)
+    assert str(fn) in msg
+    assert "line 1: 3 value(s)" in msg
+    assert "line 3: 2 value(s)" in msg
+    assert "blank line" not in msg               # none here, so no misleading hint
+
+
+def test_read_bval_or_bvec_points_at_a_blank_line(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bval"
+    fn.write_text("0 1000 1000\n\n")             # trailing blank line
+    with pytest.raises(delta_svd.DeltaSvdError, match="blank line"):
+        delta_svd.read_bval_or_bvec(str(fn))
+
+
+def test_read_bval_or_bvec_locates_a_non_numeric_value(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bval"
+    fn.write_text("0 1000 abc 1000\n")
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    msg = str(excinfo.value)
+    assert "'abc'" in msg
+    assert "line 1 at position 3" in msg
+    assert str(fn) in msg
+
+
+def test_read_bval_or_bvec_locates_a_non_numeric_value_in_a_bvec(delta_svd, tmp_path):
+    # the reported position is the one in the file, not in the transposed array
+    fn = tmp_path / "bad.bvec"
+    fn.write_text("1 0 0\n0 1 0\n0 0 x\n")
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    assert "line 3 at position 3" in str(excinfo.value)
+
+
+def test_read_bval_or_bvec_truncates_a_long_list_of_lines(delta_svd, tmp_path):
+    fn = tmp_path / "bad.bval"
+    fn.write_text("\n".join(["1 2 3"] * 12 + ["1 2"]) + "\n")
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.read_bval_or_bvec(str(fn))
+
+    msg = str(excinfo.value)
+    assert f"line {delta_svd.MAX_LINES_REPORTED}:" in msg
+    assert f"line {delta_svd.MAX_LINES_REPORTED + 1}:" not in msg
+    assert "and 3 more line(s)" in msg
+
+
+@pytest.mark.parametrize("content", ["0 0 1000 1000\n", "1 0 0.7071\n0 1 0.7071\n0 0 0\n"])
+def test_read_bval_or_bvec_still_accepts_well_formed_files(delta_svd, tmp_path, content):
+    # the added checks must not narrow what parses: 'nan'/'inf'/exponents included
+    fn = tmp_path / "ok.bval"
+    fn.write_text(content)
+    arrFloat, arrStr = delta_svd.read_bval_or_bvec(str(fn))
+    assert arrFloat.size == arrStr.size
+
+
+def test_read_bval_or_bvec_accepts_exponent_notation(delta_svd, tmp_path):
+    fn = tmp_path / "ok.bval"
+    fn.write_text("0 1e3 1.2E+03\n")
+    arrFloat, _ = delta_svd.read_bval_or_bvec(str(fn))
+    assert arrFloat.tolist() == [0.0, 1000.0, 1200.0]
+
+
 # ---------------------------------------------------------------------------
 # resolve_b_intervals(): the '--bRange' / '--shells' request as b-value windows
 
@@ -1917,8 +1992,82 @@ def test_missing_bmask_raises_naming_the_option(delta_svd, tmp_path, monkeypatch
         "delta-svd.py", "--dwi", str(dwi), "--skeletonMask", str(skel),
         "--steps", "qc", "--qc", "0",
     ])
-    with pytest.raises(ValueError, match="'bmask' files does not exist"):
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
         delta_svd.pipeline_delta_svd()
+
+    # the message has to name the DWI it belongs to, say the path was inferred
+    # rather than given, list every path probed, and name the option that fixes it
+    msg = str(excinfo.value)
+    assert str(dwi) in msg
+    assert "inferred from the DWI path" in msg
+    assert str(tmp_path / "sub01_brainmask.nii.gz") in msg
+    assert str(tmp_path / "sub01_brainmask.nii") in msg
+    assert "'--bmask'" in msg
+
+
+def test_missing_explicit_bmask_reports_it_as_given(delta_svd, tmp_path, monkeypatch):
+    dwi = tmp_path / "sub01.nii"
+    skel = tmp_path / "skel.nii.gz"
+    for fn in [dwi, skel, tmp_path / "sub01.bval", tmp_path / "sub01.bvec"]:
+        fn.touch()
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", str(dwi), "--bmask", "nowhere.nii.gz",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "given as 'nowhere.nii.gz'" in msg
+    assert "inferred" not in msg
+    # probed relative to the DWI folder as well, and that is reported
+    assert str(tmp_path / "nowhere.nii.gz") in msg
+
+
+# ---------------------------------------------------------------------------
+# Every user-fixable error is a DeltaSvdError, so the __main__ guard can report
+# it without a traceback. A ValueError from anywhere else is a bug and has to
+# keep its traceback, so the guard must not swallow it.
+
+def test_delta_svd_error_is_a_value_error(delta_svd):
+    assert issubclass(delta_svd.DeltaSvdError, ValueError)
+
+
+def test_missing_emask_names_the_option_and_the_NA_escape(delta_svd, tmp_path, monkeypatch):
+    dwi = tmp_path / "sub01.nii"
+    skel = tmp_path / "skel.nii.gz"
+    for fn in [dwi, skel, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
+               tmp_path / "sub01_brainmask.nii"]:
+        fn.touch()
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", str(dwi), "--Emask", "lesion.nii.gz",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    # used to escape as a bare argparse.ArgumentTypeError, from outside argparse
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "'--Emask'" in msg
+    assert "'NA'" in msg
+
+
+@pytest.mark.parametrize("attr", ["Emask", "Rmask"])
+def test_mask_given_without_extension_is_resolved_for_later_steps(delta_svd, tmp_path, monkeypatch, capsys, attr):
+    # the resolved name used to be discarded, leaving the bare basename on
+    # 'args' for nibabel to choke on much later
+    dwi = tmp_path / "sub01.nii"
+    skel = tmp_path / "skel.nii.gz"
+    mask = tmp_path / "lesion.nii.gz"
+    for fn in [dwi, skel, mask, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
+               tmp_path / "sub01_brainmask.nii"]:
+        fn.touch()
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", str(dwi), "--" + attr, "lesion", "--skeletonMask", str(skel),
+        "--steps", "qc", "--qc", "0",
+    ])
+    assert f"{attr} :{mask}" in out
 
 
 def test_bval_bvec_inferred_from_dwi_path(delta_svd, tmp_path, monkeypatch, capsys):
