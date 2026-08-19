@@ -2,7 +2,7 @@
 # Kept separate from the project's runtime/container dependencies.
 #
 # Zensical is pre-1.0 (alpha); pin exactly so builds stay reproducible.
-zensical==0.0.46
+zensical==0.0.56
 # NOT bundled with Zensical: provides the `github-callouts` extension that turns
 # GitHub-style "> [!NOTE]" alerts into admonitions. Removing this breaks them.
 markdown-callouts==0.4.0
