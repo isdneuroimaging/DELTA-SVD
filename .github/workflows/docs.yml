@@ -5,14 +5,14 @@ on:
     paths:
       - docs/**
       - overrides/**
-      - mkdocs.yml
+      - zensical.toml
       - .github/workflows/docs.yml
   push:
     branches: [main]
     paths:
       - docs/**
       - overrides/**
-      - mkdocs.yml
+      - zensical.toml
       - .github/workflows/docs.yml
   workflow_dispatch:
 
