@@ -33,10 +33,6 @@ The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimag
 > [!IMPORTANT]
 > **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Bug-fix releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. A patch may correct an optional derived output; when it does, the compatibility note below identifies the affected inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined.
 
-### Version 1.0.2 compatibility
-
-Version 1.0.2 preserves the validated whole-skeleton MSMD, PSMD and MSFW processing path. It corrects custom-ROI handling for two affected inputs: scaled, uncompressed NIfTI masks supplied with `--Rmask`, and ROI labels above 255 supplied with `--Rmask` or `--RmaskMNI`. ROI-specific rows from those inputs can differ from 1.0.1 because 1.0.2 retains the decoded labels instead of losing their scale or truncating them to 8 bits. If a project uses either case, regenerate all of its ROI-specific results with one version rather than pooling those rows across 1.0.1 and 1.0.2. Runs without those custom ROI inputs are unaffected by these corrections.
-
 ### Apptainer (recommended)
 
 Pull the image and convert it to a local `.sif` file in one step:
