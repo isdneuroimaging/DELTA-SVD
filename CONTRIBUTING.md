@@ -9,15 +9,15 @@ Thanks for your interest in DELTA-SVD. This guide covers working on the code and
 
 ### Validation status: read this first
 
-DELTA-SVD is a **clinically and technically validated** tool: its endpoints (MSMD, PSMD, MSFW) were validated as produced by a specific version of this pipeline, and that validation holds only as long as the numbers stay the same.
+DELTA-SVD is a **clinically and technically validated** tool: its whole-skeleton endpoints (MSMD, PSMD, MSFW) were validated as produced by a specific version of this pipeline, and that validation holds only as long as those numbers stay the same.
 
-**Any change that can alter the computed metric values invalidates the validation and requires a new formal validation before release.** This includes:
+**Any change that can alter the validated whole-skeleton endpoint values invalidates the validation and requires a new formal validation before release.** This includes:
 
 - the processing algorithms and their parameters (tensor/free-water fitting, registration, skeletonisation, statistic extraction);
 - the default skeleton mask and other bundled reference data;
 - version changes to the scientific stack that does the maths (FSL, ANTs, and the pinned conda packages such as numpy, scipy, dipy, nibabel).
 
-Changes that provably leave every metric untouched (documentation, packaging, tests, or refactors verified to produce byte-identical output) do not need re-validation. When in doubt, assume a change is metric-affecting and raise it with the maintainers first. This is also why `container/scripts/markvcid_fw_mrn.py` is kept verbatim (see [Conventions](#conventions)).
+Changes that provably leave those endpoints untouched (documentation, packaging, tests, or refactors verified to produce identical standard-run output) do not need re-validation. A correction confined to optional derived rows, such as custom-ROI results, may use a patch version only when the affected inputs and pooling restriction are documented explicitly; it does not make those affected rows interchangeable across the patch. When in doubt, assume a change is endpoint-affecting and raise it with the maintainers first. This is also why `container/scripts/markvcid_fw_mrn.py` is kept verbatim (see [Conventions](#conventions)).
 
 #### External hazards: settings that move the metrics from outside the code
 
@@ -33,7 +33,7 @@ A last-bit difference in the fitted tensors nudges the deformation field, and th
 
 #### Checking whether a change moved the numbers
 
-"Provably untouched" means measured, not assumed: nothing in the test suite checks the metric values. For anything that plausibly reaches the numbers (a regenerated conda lock, an FSL or ANTs version bump, an edit to the fitting, masking or skeletonisation code, a change to the `sed` patches in the `Dockerfile`), build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
+"Provably untouched" means measured, not assumed: nothing in the test suite checks the endpoint values. For anything that plausibly reaches the validated processing path (a regenerated conda lock, an FSL or ANTs version bump, an edit to the fitting, brain/exclusion masking or skeletonisation code, a change to the `sed` patches in the `Dockerfile`), build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
 
 ```bash
 .venv-test/bin/python tools/compare_results.py \
@@ -42,7 +42,7 @@ A last-bit difference in the fitted tensors nudges the deformation field, and th
 
 It runs from the [test virtual environment](#tests), which supplies the numpy and pandas it needs. It compares every metric value and every skeleton voxel count and exits non-zero if anything moved; `--help` covers the rest, including `--ignore-key` for a column that was renamed without the numbers changing.
 
-Everything is compared **exactly**, with no tolerance option: a changed skeleton is a changed result even when the metrics happen to round the same way. A clean run is the evidence that a change is not metric-affecting; any reported difference means re-validation applies.
+Everything is compared **exactly**, with no tolerance option: a changed skeleton is a changed result even when the metrics happen to round the same way. A clean standard run is the evidence that the validated endpoints are not affected. If a change deliberately corrects an optional derived output, also compare a representative affected input and document the expected differences and pooling restriction.
 
 Rules for the runs being compared:
 
@@ -85,7 +85,7 @@ Expect rebuilding an *older* commit to fail outright rather than merely differ: 
 
 Only exact version tags are published. There is **no `latest` tag**: results from a different `MAJOR.MINOR` version must not be pooled, so no run should be able to pick up a new one by accident.
 
-1. **Bump [`VERSION`](VERSION)** and commit it. Last digit only for a change that provably leaves every metric untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones.
+1. **Bump [`VERSION`](VERSION)** and commit it. Use the last digit only for a change that provably leaves the validated whole-skeleton endpoints untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones. A patch that corrects optional derived rows must carry a compatibility note naming the affected inputs and telling users not to pool those rows across the patch.
 
     Land this through a normal pull request first — `main` is protected, so the bump commit has to be merged (not pushed directly) before it can be tagged in the next step.
 

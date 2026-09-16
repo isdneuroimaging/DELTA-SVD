@@ -31,14 +31,18 @@ No separate Python, FSL, or ANTs installation is required; those are all provide
 The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**: results from a different `MAJOR.MINOR` version can't be pooled (see below), so every run has to name the version it uses and none can silently pick up a newer one.
 
 > [!IMPORTANT]
-> **Use one version per project.** Only results produced with the same DELTA-SVD version can be compared or pooled. Choose a version at the start of a project and process all data with it; do not upgrade partway through. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). The exception is bug-fix releases, which differ only in the last (`PATCH`) digit: these are safe to mix within a project, as they do not change results. Any change in the first two numbers can shift the metrics, so results from different `MAJOR.MINOR` versions must not be combined.
+> **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Bug-fix releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. A patch may correct an optional derived output; when it does, the compatibility note below identifies the affected inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined.
+
+### Version 1.0.2 compatibility
+
+Version 1.0.2 preserves the validated whole-skeleton MSMD, PSMD and MSFW processing path. It corrects custom-ROI handling for two affected inputs: scaled, uncompressed NIfTI masks supplied with `--Rmask`, and ROI labels above 255 supplied with `--Rmask` or `--RmaskMNI`. ROI-specific rows from those inputs can differ from 1.0.1 because 1.0.2 retains the decoded labels instead of losing their scale or truncating them to 8 bits. If a project uses either case, regenerate all of its ROI-specific results with one version rather than pooling those rows across 1.0.1 and 1.0.2. Runs without those custom ROI inputs are unaffected by these corrections.
 
 ### Apptainer (recommended)
 
 Pull the image and convert it to a local `.sif` file in one step:
 
 ```
-apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.1
+apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.2
 ```
 
 This writes `delta-svd.sif` into the current directory, the file used throughout the [Usage](usage.md) examples. Keep it somewhere stable (or on shared storage on a cluster) and point your runs at it.
@@ -48,7 +52,7 @@ This writes `delta-svd.sif` into the current directory, the file used throughout
 Pull the image into the local daemon's store:
 
 ```
-docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.1
+docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.2
 ```
 
 Replace `docker` with `podman` to use rootless Podman instead.
@@ -64,7 +68,7 @@ apptainer run delta-svd.sif --help
 or, with Docker:
 
 ```
-docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --help
+docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.2 --help
 ```
 
 If you see the DELTA-SVD option help, you are ready to go; continue with [Usage](usage.md).
@@ -74,7 +78,7 @@ If you see the DELTA-SVD option help, you are ready to go; continue with [Usage]
 Every release image is built and pushed by a GitHub Actions workflow that attaches a [Sigstore](https://www.sigstore.dev/)-signed build attestation, verifiable with the [GitHub CLI](https://cli.github.com/) (`gh`, version 2.49 or later):
 
 ```
-gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.1 --owner isdneuroimaging
+gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.2 --owner isdneuroimaging
 ```
 
 A successful verification confirms the image was built by that workflow from the corresponding tagged commit in the [DELTA-SVD repository](https://github.com/isdneuroimaging/DELTA-SVD), not assembled or pushed by hand.
@@ -87,7 +91,7 @@ Because results from a different `MAJOR.MINOR` version must not be pooled, it is
 apptainer run delta-svd.sif --version
 ```
 
-It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --version`).
+It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.2 --version`).
 
 The version is also recorded with the run so results can be traced back after the fact:
 
