@@ -12,8 +12,8 @@ import imageio.v3 as iio
 import matplotlib.patches as patches
 from matplotlib.colors import ListedColormap
 
-colorExclusions = 'blue'
-cmap = ListedColormap(["red", colorExclusions, "magenta"])
+colourExclusions = 'blue'
+cmap = ListedColormap(["red", colourExclusions, "magenta"])
 
 
 def crop_nonzero(images, mask, border, thr=0, verbose = True):
@@ -131,7 +131,7 @@ def create_qc_image(fnamesBG, vlim, labels=None, fnameMask=None, fnameBmask=None
         ax.text(dist, fontSz+dist, label, fontsize=fontSz, color='white')
         if iBG<addLegends[0]:
             legend_elements = [patches.Rectangle((0, 0), 0.1, 0.1, facecolor='red', edgecolor='k', alpha=0.7, label='white matter skeleton'),
-                               patches.Rectangle((0, 0), 0.1, 0.1, facecolor=colorExclusions, edgecolor='k', alpha=0.7, label='excluded areas'),
+                               patches.Rectangle((0, 0), 0.1, 0.1, facecolor=colourExclusions, edgecolor='k', alpha=0.7, label='excluded areas'),
                                plt.Line2D([0], [0], linewidth=2, color='cyan', label='brain mask (contour)', markersize=10)]
             if addLegends[1]==0:
                 legend_elements.pop(1)

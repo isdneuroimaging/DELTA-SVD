@@ -57,7 +57,7 @@ Only as part of a larger acquisition. DELTA-SVD needs a shell suitable for diffu
 
 ## How do I exclude a region, or restrict the analysis to specific ROIs?
 
-Use an exclusion mask (`--Emask`) to remove a region, for example an acute infarct or a haemorrhage, from the analysis. To report metrics for specific regions instead, supply ROI masks in DWI space (`--Rmask`; integer labels define separate ROIs) or a single ROI mask in MNI space (`--RmaskMNI`). Add `--hemispheres` to also report the skeleton split by left and right hemisphere. See [Restricting the analysis with masks](usage.md#restricting-the-analysis-with-masks).
+Use an exclusion mask (`--Emask`) to remove a region, for example an acute infarct or a haemorrhage, from the analysis. To report metrics for specific regions instead, supply ROI masks in DWI space (`--Rmask`; integer labels define separate ROIs) or a single ROI mask in MNI space (`--RmaskMNI`). Add `--hemispheres` to also report skeleton metrics separately for the left and right hemispheres; ROI masks are not split between hemispheres. See [Restricting the analysis with masks](usage.md#restricting-the-analysis-with-masks).
 
 ## Do I need a GPU, or to install FSL, ANTs or Python?
 

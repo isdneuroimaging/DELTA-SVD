@@ -95,7 +95,7 @@ def test_create_html_with_png_smoke(tmp_path, tiny_png, metrics_df):
     chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, metrics_df, _args())
 
     html = fnHTML.read_text()
-    for token in ["PSMD", "MSMD", "MSFW", "DELTA-SVD", "P01"]:
+    for token in ["PSMD", "MSMD", "MSFW", "Results table", "DELTA-SVD", "P01"]:
         assert token in html
 
 
@@ -113,9 +113,9 @@ def test_create_html_with_png_omits_the_id_row_when_no_id_was_given(tmp_path, ti
     chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, None, _args(id=None))
 
     html = fnHTML.read_text()
-    body = html.split("</style>")[1]                    # the CSS mentions "Patient ID"
+    body = html.split("</style>")[1]                    # the CSS mentions "Subject ID"
     assert "<title>DELTA-SVD QC Report</title>" in html
-    assert "Patient ID" not in body
+    assert "Subject ID" not in body
     assert "None" not in body
     assert "Skeleton mask" in body                      # the rest of the table survives
 
@@ -256,5 +256,15 @@ def test_create_html_with_png_keeps_the_id_row_when_an_id_was_given(tmp_path, ti
     chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, None, _args(id="P01"))
 
     body = fnHTML.read_text().split("</style>")[1]
-    assert "<td class=\"key\">Patient ID</td>" in body
+    assert "<td class=\"key\">Subject ID</td>" in body
     assert "P01" in body
+
+
+def test_create_html_with_png_scopes_hemisphere_metadata_to_skeleton(tmp_path, tiny_png):
+    fnHTML = tmp_path / "report.html"
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+                             _args(hemispheres=True))
+
+    body = fnHTML.read_text().split("</style>")[1]
+    assert "<td class=\"key\">Skeleton hemispheres</td>" in body
+    assert "left and right analysed separately; ROI masks remain unsplit" in body

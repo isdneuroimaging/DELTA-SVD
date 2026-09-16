@@ -24,7 +24,7 @@ DELTA-SVD is distributed as a single container image: everything the pipeline ne
     - **Apptainer** (or legacy **Singularity**) — recommended, especially on HPC clusters. It runs rootless and maps your host identity into the container, so output files come out owned by you.
     - **Docker**, or rootless **Podman** — an optional alternative. Under Docker there is an extra step to get output owned by your host user; see [Usage](usage.md) and [Advanced usage](advanced-usage.md).
 
-No separate Python, FSL, or ANTs installation is required; those are all provided inside the image. The bundled third-party components are redistributed under their respective licenses; see [NOTICE](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/NOTICE) for details and license texts.
+No separate Python, FSL, or ANTs installation is required; those are all provided inside the image. The bundled third-party components are redistributed under their respective licences; see [NOTICE](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/NOTICE) for details and licence texts.
 
 ## Getting the image
 

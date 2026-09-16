@@ -29,7 +29,7 @@ def define_notes(args):
                 f'{bmaskLong} brain mask and the MD and FW image of each timepoint were then taken along the path of estimated transformations, to get a skeletonised version for each of them. '
                 'These transformations introduce interpolations between fore- and background voxels, which can be tracked and, hence, were removed from the skeletonised brain mask to reduce partial volume effects.',
                 f'The skeletonised brain masks were intersected across timepoints and also with {whichSmask} '
-                'The resulting intersection was considered the final white matter skeleton defining the voxels over which the MD and FW summary statistics were calculated to create the final metrics (see table below). '
+                'The resulting intersection was considered the final white matter skeleton defining the voxels over which the MD and FW endpoint metrics were calculated for the results table below. '
                 'For quality checking, this final white matter skeleton was also back projected into the MNI space, into the within-subject template space and into the '
                 'native space of each timepoint (see red overlays shown above).']
       else:
@@ -38,7 +38,7 @@ def define_notes(args):
                 f'{bmaskCross} brain mask and the MD and FW image were then taken along the path of estimated transformations, to get a skeletonised version for each of them. '
                 'These transformations introduce interpolations between fore- and background voxels, which can be tracked and, hence, were removed from the skeletonised brain mask to reduce partial volume effects.',
                 f'The skeletonised brain mask was intersected with {whichSmask} '
-                'The resulting intersection was considered the final white matter skeleton defining the voxels over which the MD and FW summary statistics were calculated to create the final metrics (see table below). '
+                'The resulting intersection was considered the final white matter skeleton defining the voxels over which the MD and FW endpoint metrics were calculated for the results table below. '
                 'For quality checking, this final white matter skeleton was also back projected into the MNI space and into the '
                 'native space of each timepoint (see red overlays shown above).']
       
@@ -95,7 +95,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
     #--- metadata table, sharing the style of the timepoint table below
     meta_rows = []
     if args.id is not None:
-        meta_rows.append(('Patient ID', f'<span class="summary__id">{html.escape(str(args.id))}</span>'))
+        meta_rows.append(('Subject ID', f'<span class="summary__id">{html.escape(str(args.id))}</span>'))
     #--- the release that produced this report; results from different versions
     #    must not be pooled
     version = getattr(args, 'version', None)
@@ -128,7 +128,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
     if args.RmaskMNI is not None:
         meta_rows.append(('ROI mask (MNI)', path_code(args.RmaskMNI)))
     if args.hemispheres:
-        meta_rows.append(('Hemispheres', 'left and right analysed separately'))
+        meta_rows.append(('Skeleton hemispheres', 'left and right analysed separately; ROI masks remain unsplit'))
     if not args.adjustBmaskForFW:
         meta_rows.append(('Brain masks', f'not adjusted, i.e. voxels with 100% free water were not removed {custom_tag("adjusted, i.e. voxels with 100% free water are removed")}'))
     #--- only shown when it leaves the validated 12: it is the one threading
@@ -194,7 +194,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
             df.loc[i,'value'] = int(row['value'])
       df.drop('skeleton', axis=1, inplace=True)
       dfHTML = df.to_html(classes="mystyle", index=True, index_names=False, border=0)
-      dfHTML = '<p class="label">Extracted metrics</p>' + dfHTML
+      dfHTML = '<p class="label">Results table</p>' + dfHTML
 
   if captions is None:
      captions = [''] * len(fnamesPNG)
@@ -210,7 +210,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         images.append(f'{captions[iPng]}<img width=100% src="data:image/png;base64,{base64_image}">')
   images = ''.join(images)
 
-  license='<p class="text">Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the <a href="https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE">LICENSE file</a> at <a href="https://github.com/isdneuroimaging/DELTA-SVD">https://github.com/isdneuroimaging/DELTA-SVD</a></p>'
+  licence='<p class="text">Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the <a href="https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE">LICENSE file</a> at <a href="https://github.com/isdneuroimaging/DELTA-SVD">https://github.com/isdneuroimaging/DELTA-SVD</a></p>'
 
   style='''
   <style>
@@ -273,7 +273,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         color: #c0362c;
     }
 
-    /* Patient ID emphasis (inside the metadata table) */
+    /* Subject ID emphasis (inside the metadata table) */
     .summary__id {
         font-weight: 700;
     }
@@ -403,7 +403,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         font-weight: 700;
     }
 
-    /* Footer / license notice */
+    /* Footer / licence notice */
     .footer .text {
         font-size: 8.5pt;
         color: var(--muted);
@@ -430,7 +430,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
       <section class="images">{images}</section>
       <section class="notes">{notes}</section>
       <section class="metrics">{dfHTML}</section>
-      <section class="footer">{license}</section>
+      <section class="footer">{licence}</section>
     </body>
   </html>
   '''

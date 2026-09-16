@@ -19,7 +19,7 @@ The development and validation of DELTA-SVD will be published:
 > Full citation details will be provided here upon publication.
 
 > [!IMPORTANT]
-> If you use DELTA-SVD, the [license](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE) requires you to both cite the method publication and link to the repository at [https://github.com/isdneuroimaging/DELTA-SVD](https://github.com/isdneuroimaging/DELTA-SVD).
+> If you use DELTA-SVD, the [licence](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE) requires you to both cite the method publication and link to the repository at [https://github.com/isdneuroimaging/DELTA-SVD](https://github.com/isdneuroimaging/DELTA-SVD).
 
 ## Getting started
 

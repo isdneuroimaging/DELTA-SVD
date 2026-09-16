@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Aggregate DELTA-SVD result tables across subjects/patients
+Aggregate DELTA-SVD result tables across subjects
 """
 
 import sys, os, glob, argparse, re
@@ -35,18 +35,18 @@ def plausiblePath(path):
             raise argparse.ArgumentTypeError("File path has to be an existing directory or a filename. If filename, it must end with '.csv' and can be optionally prepended by the path to an existing directory. Please check: %s"%(path))
 
 fnOutDefault = "delta-svd_results_aggregated.csv"
-license = "https://github.com/isdneuroimaging/DELTA-SVD"
+licence = "https://github.com/isdneuroimaging/DELTA-SVD"
 
 def iniParser():
     parser = argparse.ArgumentParser(description=f"DELTA-SVD {__version__}. Aggregate multiple DELTA-SVD result tables into one table. Files with result tables will be globbed in the specified DIRECTORY using the specified FILENAME and DEPTH.",
                                      add_help=False,
-                                     epilog=f'Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the LICENSE file at "{license}"')
+                                     epilog=f'Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "{licence}"')
     group0 = parser.add_argument_group()
     group0.add_argument(dest="directory", metavar='DIRECTORY', type=isDir, help="path to directory containing DELTA-SVD result files (at any depth). Will be used for globbing.")
     group0.add_argument("-f", dest="filename", type=extCSV, default="delta-svd_results.csv", help="name of DELTA-SVD result files (default: %(default)s). Will be used for globbing. Requires extension '.csv'.")
     group0.add_argument("-d", dest="depth", type=int, default=-1, help="depth for globbing (default: %(default)s, which means any depth). If set to '0', only the top-level directory will be searched, making sense only with wildcards ('*') in filename.")
     group0.add_argument("-o", dest="output", metavar="OUTPUT-PATH", type=plausiblePath, default=fnOutDefault, help="path to write aggregated table to (default: %(default)s). If left at default or only a filename is provided, it will be saved into the DIRECTORY provided for globbing. If only a directory is provided, the default output-filename will be used.")
-    group0.add_argument("-s", dest="split", action='store_true', help='split into separate output tables for metrics and debugging information. The output table names will be constructed by appending "_metrics" and "_debugging" respectively.')
+    group0.add_argument("-s", dest="split", action='store_true', help='split into separate output tables for endpoint metrics and QC bookkeeping. The output table names will be constructed by appending "_metrics" and "_debugging" respectively.')
     group0.add_argument("-p", dest="insertPath", action='store_const', const=0, default=-1, help="insert a column 'path' with the path names of input CSV files into the aggregated table. By default, this will only be done, if the 'ID' column is missing in the input CSV files.")
     group0.add_argument("-t", dest="appendDate", choices=['date', 'time', 'datetime'], default=None, help="append output filename with current date, time, or datetime (default: %(default)s), formatted as '*[_YYYY-MM-DD][_HHMMSS].csv'")
     group0.add_argument("-x", dest="overwrite", action='store_true', help="allow overwriting output if existing. By default, already existing output will raise an error. (Be careful not to glob previous aggregation files when repeating aggregation.)")
@@ -64,7 +64,7 @@ if __name__ == "__main__":
         parser.print_usage()
         print(f'\nDELTA-SVD {__version__}\n'
               f'Run "{os.path.basename(__file__)} -h" for detailed help\n'
-              f'Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the LICENSE file at "{license}"\n')
+              f'Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "{licence}"\n')
         parser.exit()
 
     args = parser.parse_args()
@@ -196,7 +196,7 @@ if __name__ == "__main__":
                      "option '-p' to insert a column 'path' with the file path-names as "
                      "additional, unique identifiers.\n")
         if not idsPerFile['first'].is_unique:
-            sys.exit("\nERROR: Patient identifiers in column 'ID' are not all distinct.\n Use "
+            sys.exit("\nERROR: Subject IDs in column 'ID' are not all distinct.\n Use "
                      "option '-p' to insert a column 'path' with the file path-names as "
                      "additional, unique identifiers.\n")
 
@@ -232,8 +232,8 @@ if __name__ == "__main__":
         dfMetric = df[~isDebug]
         dfDebug = df[isDebug].dropna(axis=1, how='all')
         if args.verbose:
-            print(f'\nWriting aggregated metrics table to:\n {fnMetric}')
-            print(f'Writing aggregated debugging table to:\n {fnDebug}\n')
+            print(f'\nWriting aggregated endpoint-metrics table to:\n {fnMetric}')
+            print(f'Writing aggregated QC-bookkeeping table to:\n {fnDebug}\n')
         dfMetric.to_csv(fnMetric, index=False)
         dfDebug.to_csv(fnDebug, index=False)
     else:

@@ -10,7 +10,8 @@ HEADER = "ID,timepoint,skeleton,region,voxels,metric,value\n"
 
 def _rows(msmd="0.00073214", psmd="0.00042100", voxels="118432",
           skel="skel.nii.gz", psmd_name="PSMD"):
-    # a metrics row pair plus the kind of debugging row integrate_masks emits
+    # an endpoint-metrics row pair plus the kind of QC-bookkeeping row
+    # integrate_masks emits
     # (metric 'NA' / value 'NaN', which pandas reads back as missing values).
     # 'skel' and 'psmd_name' model a label rename between two runs.
     return (

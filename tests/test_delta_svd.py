@@ -1808,7 +1808,7 @@ def test_pipeline_rejects_qc_zero_with_qc_step_requested(delta_svd, tmp_path, mo
 
 
 # ---------------------------------------------------------------------------
-# A repeated label makes two time-points share a working folder and their rows:
+# A repeated label makes two timepoints share a working folder and their rows:
 # the second overwrites the first, and the run reports it twice. 'all' is what
 # integrate_masks() calls the aggregated rows, so it is reserved as well.
 
@@ -1926,7 +1926,7 @@ def test_iterations_with_shell_metacharacters_cannot_break_out(delta_svd, tmp_pa
 
 
 # ---------------------------------------------------------------------------
-# "Hemispheric ROI analysis" message should only print when --hemispheres
+# "Hemispheric skeleton analysis" message should only print when --hemispheres
 # was actually passed (regression test: previously guarded by
 # `if args.hemispheres is not None`, which is always true since the default
 # is False, not None).
@@ -1939,7 +1939,7 @@ def test_hemispheres_message_not_printed_by_default(delta_svd, tmp_path, monkeyp
     ])
     with pytest.raises(ValueError):
         delta_svd.pipeline_delta_svd()
-    assert "Hemispheric ROI analysis" not in capsys.readouterr().out
+    assert "Hemispheric skeleton analysis" not in capsys.readouterr().out
 
 
 def test_hemispheres_message_printed_when_flag_set(delta_svd, tmp_path, monkeypatch, capsys):
@@ -1950,7 +1950,7 @@ def test_hemispheres_message_printed_when_flag_set(delta_svd, tmp_path, monkeypa
     ])
     with pytest.raises(ValueError):
         delta_svd.pipeline_delta_svd()
-    assert "Hemispheric ROI analysis" in capsys.readouterr().out
+    assert "Hemispheric skeleton analysis" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

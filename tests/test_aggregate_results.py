@@ -14,12 +14,12 @@ CSV_HEADER = "ID,timepoint,skeleton,region,voxels,metric,value\n"
 CSV_HEADER_NO_ID = "timepoint,skeleton,region,voxels,metric,value\n"
 
 
-def _write_fixture_csv(dirpath, patient_id, value_psmd, value_msmd):
+def _write_fixture_csv(dirpath, subject_id, value_psmd, value_msmd):
     dirpath.mkdir(parents=True, exist_ok=True)
     content = (
         CSV_HEADER
-        + f"{patient_id},TP01,skel.nii.gz,intersection,100,PSMD,{value_psmd}\n"
-        + f"{patient_id},TP01,skel.nii.gz,intersection,100,MSMD,{value_msmd}\n"
+        + f"{subject_id},TP01,skel.nii.gz,intersection,100,PSMD,{value_psmd}\n"
+        + f"{subject_id},TP01,skel.nii.gz,intersection,100,MSMD,{value_msmd}\n"
     )
     (dirpath / "delta-svd_results.csv").write_text(content)
 
@@ -35,16 +35,16 @@ def _write_fixture_csv_without_id(dirpath, value_psmd, value_msmd):
     (dirpath / "delta-svd_results.csv").write_text(content)
 
 
-def _write_fixture_csv_with_debug_row(dirpath, patient_id, value_psmd, value_msmd):
+def _write_fixture_csv_with_debug_row(dirpath, subject_id, value_psmd, value_msmd):
     # a bookkeeping row as written by integrate_masks(): 'NA'/'NaN' sentinels
     # that read_csv coerces to real NaN, which is how the aggregator tells
     # bookkeeping rows apart from metric rows.
     dirpath.mkdir(parents=True, exist_ok=True)
     content = (
         CSV_HEADER
-        + f"{patient_id},TP01,skel.nii.gz,intersection,100,PSMD,{value_psmd}\n"
-        + f"{patient_id},TP01,skel.nii.gz,intersection,100,MSMD,{value_msmd}\n"
-        + f"{patient_id},TP01,skel.nii.gz,LH,40,NA,NaN\n"
+        + f"{subject_id},TP01,skel.nii.gz,intersection,100,PSMD,{value_psmd}\n"
+        + f"{subject_id},TP01,skel.nii.gz,intersection,100,MSMD,{value_msmd}\n"
+        + f"{subject_id},TP01,skel.nii.gz,LH,40,NA,NaN\n"
     )
     (dirpath / "delta-svd_results.csv").write_text(content)
 
@@ -126,8 +126,8 @@ def test_iniparser_defaults(aggregate_results):
 # End-to-end aggregation (subprocess, since the logic is script-level code)
 
 def test_aggregate_globs_and_concatenates_all_result_files(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
-    _write_fixture_csv(tmp_path / "patient2", "P02", "0.0005", "0.0008")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject2", "P02", "0.0005", "0.0008")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out))
@@ -140,8 +140,8 @@ def test_aggregate_globs_and_concatenates_all_result_files(tmp_path):
 
 
 def test_aggregate_split_writes_metrics_and_debugging_files(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
-    _write_fixture_csv(tmp_path / "patient2", "P02", "0.0005", "0.0008")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject2", "P02", "0.0005", "0.0008")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out), "-s")
@@ -152,7 +152,7 @@ def test_aggregate_split_writes_metrics_and_debugging_files(tmp_path):
 
 
 def test_aggregate_split_separates_bookkeeping_rows_from_metrics(tmp_path):
-    _write_fixture_csv_with_debug_row(tmp_path / "patient1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv_with_debug_row(tmp_path / "subject1", "P01", "0.0004", "0.0007")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out), "-s")
@@ -173,7 +173,7 @@ def test_aggregate_split_separates_bookkeeping_rows_from_metrics(tmp_path):
 
 
 def test_aggregate_insert_path_column(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out), "-p")
@@ -190,8 +190,8 @@ def test_aggregate_insert_path_column(tmp_path):
 # contributing no rows must not shift the path assignment of the files after it.
 
 def test_aggregate_insert_path_column_without_id_column(tmp_path):
-    _write_fixture_csv_without_id(tmp_path / "patient1", "0.0004", "0.0007")
-    _write_fixture_csv_without_id(tmp_path / "patient2", "0.0005", "0.0008")
+    _write_fixture_csv_without_id(tmp_path / "subject1", "0.0004", "0.0007")
+    _write_fixture_csv_without_id(tmp_path / "subject2", "0.0005", "0.0008")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out), "-p")
@@ -200,15 +200,15 @@ def test_aggregate_insert_path_column_without_id_column(tmp_path):
     rows = _read_rows(out)
     assert out.read_text().splitlines()[0].split(",")[0] == "path"
     assert [row["path"] for row in rows].count(
-        str(tmp_path / "patient1" / "delta-svd_results.csv")) == 2
+        str(tmp_path / "subject1" / "delta-svd_results.csv")) == 2
     assert [row["path"] for row in rows].count(
-        str(tmp_path / "patient2" / "delta-svd_results.csv")) == 2
+        str(tmp_path / "subject2" / "delta-svd_results.csv")) == 2
 
 
 def test_aggregate_path_column_tracks_source_when_a_csv_has_no_rows(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
-    _write_header_only_csv(tmp_path / "patient2")
-    _write_fixture_csv(tmp_path / "patient3", "P03", "0.0005", "0.0008")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
+    _write_header_only_csv(tmp_path / "subject2")
+    _write_fixture_csv(tmp_path / "subject3", "P03", "0.0005", "0.0008")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out), "-p")
@@ -217,13 +217,13 @@ def test_aggregate_path_column_tracks_source_when_a_csv_has_no_rows(tmp_path):
     rows = _read_rows(out)
     assert len(rows) == 4
     for row in rows:
-        expected = {"P01": "patient1", "P03": "patient3"}[row["ID"]]
+        expected = {"P01": "subject1", "P03": "subject3"}[row["ID"]]
         assert expected in row["path"], row
 
 
 def test_aggregate_excludes_csv_without_data_rows(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
-    _write_header_only_csv(tmp_path / "patient2")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
+    _write_header_only_csv(tmp_path / "subject2")
 
     out = tmp_path / "agg.csv"
     result = _run(str(tmp_path), "-o", str(out))
@@ -234,8 +234,8 @@ def test_aggregate_excludes_csv_without_data_rows(tmp_path):
 
 
 def test_aggregate_errors_when_no_csv_has_data_rows(tmp_path):
-    _write_header_only_csv(tmp_path / "patient1")
-    _write_header_only_csv(tmp_path / "patient2")
+    _write_header_only_csv(tmp_path / "subject1")
+    _write_header_only_csv(tmp_path / "subject2")
 
     result = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
 
@@ -248,8 +248,8 @@ def test_aggregate_errors_when_no_csv_has_data_rows(tmp_path):
 # within each file and distinct between files (both grouped per source file).
 
 def test_aggregate_rejects_ids_that_are_not_distinct_between_files(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
-    _write_fixture_csv(tmp_path / "patient2", "P01", "0.0005", "0.0008")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject2", "P01", "0.0005", "0.0008")
 
     result = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
 
@@ -258,7 +258,7 @@ def test_aggregate_rejects_ids_that_are_not_distinct_between_files(tmp_path):
 
 
 def test_aggregate_rejects_id_varying_within_one_file(tmp_path):
-    dirpath = tmp_path / "patient1"
+    dirpath = tmp_path / "subject1"
     dirpath.mkdir()
     (dirpath / "delta-svd_results.csv").write_text(
         CSV_HEADER
@@ -273,7 +273,7 @@ def test_aggregate_rejects_id_varying_within_one_file(tmp_path):
 
 
 def test_aggregate_overwrite_guard_requires_explicit_flag(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
     out = tmp_path / "agg.csv"
 
     first = _run(str(tmp_path), "-o", str(out))
@@ -287,7 +287,7 @@ def test_aggregate_overwrite_guard_requires_explicit_flag(tmp_path):
 
 
 def test_aggregate_appends_date_suffix_to_output_filename(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
     out_dir = tmp_path / "out"
     out_dir.mkdir()
 
@@ -305,7 +305,7 @@ def test_aggregate_appends_date_suffix_to_output_filename(tmp_path):
 # uses sys.exit() directly rather than delta-svd.py's DeltaSvdError.
 
 def test_aggregate_errors_go_to_stderr_without_a_traceback(tmp_path):
-    _write_fixture_csv(tmp_path / "patient1", "P01", "0.0004", "0.0007")
+    _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
     out = tmp_path / "agg.csv"
     assert _run(str(tmp_path), "-o", str(out)).returncode == 0
 
@@ -324,4 +324,3 @@ def test_aggregate_reports_an_empty_glob_on_stderr(tmp_path):
     assert result.returncode == 1
     assert "No CSV files found" in result.stderr
     assert "'-f'" in result.stderr and "'-d'" in result.stderr
-
