@@ -73,7 +73,9 @@ RUN apt-get update -qq && apt-get install -y -q --no-install-recommends \
         dc=1.07.1* \
         locales=2.39* \
         wget=1.21.4* \
- && useradd --system --no-create-home --shell /usr/sbin/nologin nonroot \
+ && groupadd --system --gid 999 nonroot \
+ && useradd --system --uid 999 --gid 999 \
+        --no-create-home --shell /usr/sbin/nologin nonroot \
  && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
  && dpkg-reconfigure --frontend=noninteractive locales \
  && update-locale LANG="en_US.UTF-8" \
@@ -144,19 +146,20 @@ COPY container/third-party-licenses/ /opt/third-party-licenses/
 WORKDIR /opt/scripts
 COPY container/scripts/ .
 
-## Read by delta_svd_version.py for --version. A file, not an ENV: Apptainer
-## forwards the host environment in, which could then override it.
-COPY VERSION ./VERSION
-
-USER nonroot
-ENTRYPOINT [ "python", "/opt/scripts/delta-svd.py" ]
-
-## Provenance from container/build.sh; Defaults allow a bare build. 'unknown',
-## not a version-shaped default: a bare build still copies the real VERSION
-## above, and a label contradicting it would be worse than an obvious blank.
+## Read by delta_svd_version.py for --version and run-manifest provenance. Files,
+## not ENV variables: Apptainer forwards the host environment in, which could
+## then override an ENV value. Both files and the labels use the same build args.
+## Keep these declarations here, after the expensive installation layers, so a
+## version or source-revision change does not invalidate those cached layers.
 ARG VERSION=unknown
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
+RUN printf '%s\n' "$VERSION" > VERSION \
+ && printf '%s\n' "$VCS_REF" > SOURCE_REVISION
+
+USER 999:999
+ENTRYPOINT [ "python", "/opt/scripts/delta-svd.py" ]
+
 LABEL org.opencontainers.image.version="$VERSION" \
     org.opencontainers.image.revision="$VCS_REF" \
     org.opencontainers.image.created="$BUILD_DATE"

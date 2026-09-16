@@ -37,6 +37,15 @@ def test_sibling_version_file_wins(tmp_path):
     assert delta_svd_version.read_version(str(tmp_path)) == "1.2.3"
 
 
+def test_sibling_source_revision_is_read(tmp_path):
+    (tmp_path / "SOURCE_REVISION").write_text("abc1234\n")
+    assert delta_svd_version.read_source_revision(str(tmp_path)) == "abc1234"
+
+
+def test_source_revision_is_unknown_when_not_embedded(tmp_path):
+    assert delta_svd_version.read_source_revision(str(tmp_path)) == "unknown"
+
+
 def test_falls_back_two_levels_up(tmp_path):
     # the checkout layout: <root>/VERSION with the scripts in <root>/a/b
     (tmp_path / "VERSION").write_text("4.5.6\n")

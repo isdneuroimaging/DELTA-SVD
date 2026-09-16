@@ -9,15 +9,15 @@ Thanks for your interest in DELTA-SVD. This guide covers working on the code and
 
 ### Validation status: read this first
 
-DELTA-SVD is a **clinically and technically validated** tool: its endpoints (MSMD, PSMD, MSFW) were validated as produced by a specific version of this pipeline, and that validation holds only as long as the numbers stay the same.
+DELTA-SVD is a **clinically and technically validated** tool: its whole-skeleton endpoints (MSMD, PSMD, MSFW) were validated as produced by a specific version of this pipeline, and that validation holds only as long as those numbers stay the same.
 
-**Any change that can alter the computed metric values invalidates the validation and requires a new formal validation before release.** This includes:
+**Any change that can alter the validated whole-skeleton endpoint values invalidates the validation and requires a new formal validation before release.** This includes:
 
 - the processing algorithms and their parameters (tensor/free-water fitting, registration, skeletonisation, statistic extraction);
 - the default skeleton mask and other bundled reference data;
 - version changes to the scientific stack that does the maths (FSL, ANTs, and the pinned conda packages such as numpy, scipy, dipy, nibabel).
 
-Changes that provably leave every metric untouched (documentation, packaging, tests, or refactors verified to produce byte-identical output) do not need re-validation. When in doubt, assume a change is metric-affecting and raise it with the maintainers first. This is also why `container/scripts/markvcid_fw_mrn.py` is kept verbatim (see [Conventions](#conventions)).
+Changes that provably leave those endpoints untouched (documentation, packaging, tests, or refactors verified to produce identical standard-run output) do not need re-validation. A correction confined to optional derived rows, such as custom-ROI results, may use a patch version only when the affected inputs and pooling restriction are documented explicitly; it does not make those affected rows interchangeable across the patch. When in doubt, assume a change is endpoint-affecting and raise it with the maintainers first. This is also why `container/scripts/markvcid_fw_mrn.py` is kept verbatim (see [Conventions](#conventions)).
 
 #### External hazards: settings that move the metrics from outside the code
 
@@ -33,7 +33,7 @@ A last-bit difference in the fitted tensors nudges the deformation field, and th
 
 #### Checking whether a change moved the numbers
 
-"Provably untouched" means measured, not assumed: nothing in the test suite checks the metric values. For anything that plausibly reaches the numbers (a regenerated conda lock, an FSL or ANTs version bump, an edit to the fitting, masking or skeletonisation code, a change to the `sed` patches in the `Dockerfile`), build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
+"Provably untouched" means measured, not assumed: nothing in the test suite checks the endpoint values. For anything that plausibly reaches the validated processing path (a regenerated conda lock, an FSL or ANTs version bump, an edit to the fitting, brain/exclusion masking or skeletonisation code, a change to the `sed` patches in the `Dockerfile`), build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
 
 ```bash
 .venv-test/bin/python tools/compare_results.py \
@@ -42,7 +42,7 @@ A last-bit difference in the fitted tensors nudges the deformation field, and th
 
 It runs from the [test virtual environment](#tests), which supplies the numpy and pandas it needs. It compares every metric value and every skeleton voxel count and exits non-zero if anything moved; `--help` covers the rest, including `--ignore-key` for a column that was renamed without the numbers changing.
 
-Everything is compared **exactly**, with no tolerance option: a changed skeleton is a changed result even when the metrics happen to round the same way. A clean run is the evidence that a change is not metric-affecting; any reported difference means re-validation applies.
+Everything is compared **exactly**, with no tolerance option: a changed skeleton is a changed result even when the metrics happen to round the same way. A clean standard run is the evidence that the validated endpoints are not affected. If a change deliberately corrects an optional derived output, also compare a representative affected input and document the expected differences and pooling restriction.
 
 Rules for the runs being compared:
 
@@ -51,7 +51,7 @@ Rules for the runs being compared:
 - **Judge by the longitudinal change (ΔPSMD), not the per-timepoint values.** ΔPSMD is by far the most sensitive readout: a diff that looks negligible per timepoint can still be a large change in the endpoint the pipeline exists to produce.
 
 > [!WARNING]
-> A cross-sectional-only check is not sufficient. The longitudinal path turns arbitrarily small numerical differences into discrete, reportable ones: the skeleton comes from thresholding an interpolated *binary* brain mask at exactly 1, so every boundary voxel sits on a knife edge, and a sub-voxel shift in the deformation re-decides those ties. The cross-sectional path has no such step and can absorb the same change completely.
+> A cross-sectional-only check is not sufficient. Both modes threshold the interpolated, skeletonised brain mask at exactly 1, so every boundary voxel sits on a knife edge. A longitudinal check additionally exercises within-subject template construction and measures the longitudinal change (the pipeline's most sensitive readout), so it remains the required validation path.
 
 ### Repository layout
 
@@ -85,7 +85,7 @@ Expect rebuilding an *older* commit to fail outright rather than merely differ: 
 
 Only exact version tags are published. There is **no `latest` tag**: results from a different `MAJOR.MINOR` version must not be pooled, so no run should be able to pick up a new one by accident.
 
-1. **Bump [`VERSION`](VERSION)** and commit it. Last digit only for a change that provably leaves every metric untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones.
+1. **Bump [`VERSION`](VERSION)** and commit it. Use the last digit only for a change that provably leaves the validated whole-skeleton endpoints untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones. A patch that corrects optional derived rows must carry a compatibility note naming the affected inputs and telling users not to pool those rows across the patch.
 
     Land this through a normal pull request first — `main` is protected, so the bump commit has to be merged (not pushed directly) before it can be tagged in the next step.
 
@@ -162,7 +162,7 @@ There is one deliberate exception, documented in the lock's own header: the four
 
 ## Documentation
 
-The documentation site is built with [Zensical](https://zensical.org/), a static site generator by the [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) team. It reads the standard [`mkdocs.yml`](mkdocs.yml); all content lives in [`docs/`](docs/) as Markdown, which stays readable directly on GitHub. The site is published to GitHub Pages by the [`docs` workflow](.github/workflows/docs.yml) on every push to `main` that touches `docs/`, `overrides/`, `mkdocs.yml`, or the workflow itself. Pull requests touching those same paths run the build without deploying, so a broken link or a stale `nav:` entry fails the strict build on the pull request rather than on `main`.
+The documentation site is built with [Zensical](https://zensical.org/), a static site generator by the [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) team. It reads [`zensical.toml`](zensical.toml); all content lives in [`docs/`](docs/) as Markdown, which stays readable directly on GitHub. The site is published to GitHub Pages by the [`docs` workflow](.github/workflows/docs.yml) on every push to `main` that touches `docs/`, `overrides/`, `zensical.toml`, or the workflow itself. Pull requests touching those same paths run the build without deploying, so a broken link or a stale navigation entry fails the strict build on the pull request rather than on `main`.
 
 ### One-time setup
 
@@ -195,12 +195,12 @@ CI builds with `--strict`, which fails on broken links or nav entries. Run the s
 
 ### Editing content
 
-- Add or edit Markdown files under `docs/`, then register new pages in the `nav:` section of [`mkdocs.yml`](mkdocs.yml) so they appear in the site navigation (and to keep the strict build happy).
+- Add or edit Markdown files under `docs/`, then register new pages in the `nav` array of [`zensical.toml`](zensical.toml) so they appear in the site navigation (and to keep the strict build happy).
 - GitHub-style alerts work as-is: write `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, or `> [!CAUTION]` and they render as native alerts on GitHub and as admonitions on the site.
 
 ### Link previews
 
-Every page carries Open Graph and Twitter card tags, so a link to the site unfurls with a preview image, its page title, and a description instead of a bare URL. The theme emits none of these itself; they come from [`overrides/main.html`](overrides/main.html), which the `theme.custom_dir` setting in [`mkdocs.yml`](mkdocs.yml) layers over the stock templates.
+Every page carries Open Graph and Twitter card tags, so a link to the site unfurls with a preview image, its page title, and a description instead of a bare URL. The theme emits none of these itself; they come from [`overrides/main.html`](overrides/main.html), which the `project.theme.custom_dir` setting in [`zensical.toml`](zensical.toml) layers over the stock templates.
 
 All pages share one preview image, [`docs/assets/og-image.png`](docs/assets/og-image.png). It is committed to the repository, not generated during the build; [`tools/make_og_image.py`](tools/make_og_image.py) renders it (1200×630, the size every major scraper expects) from the pipeline figure on the landing page. Re-run it after changing that figure or the card design, on any Python that has [Pillow](https://pypi.org/project/pillow/) installed, and commit the result:
 

@@ -57,7 +57,7 @@ Only as part of a larger acquisition. DELTA-SVD needs a shell suitable for diffu
 
 ## How do I exclude a region, or restrict the analysis to specific ROIs?
 
-Use an exclusion mask (`--Emask`) to remove a region, for example an acute infarct or a haemorrhage, from the analysis. To report metrics for specific regions instead, supply ROI masks in DWI space (`--Rmask`; integer labels define separate ROIs) or a single ROI mask in MNI space (`--RmaskMNI`). Add `--hemispheres` to also report the skeleton split by left and right hemisphere. See [Restricting the analysis with masks](usage.md#restricting-the-analysis-with-masks).
+Use an exclusion mask (`--Emask`) to remove a region, for example an acute infarct or a haemorrhage, from the analysis. To report metrics for specific regions instead, supply ROI masks in DWI space (`--Rmask`) or a single ROI mask in MNI space (`--RmaskMNI`). Integer labels define separate ROIs, including background; see [Restricting the analysis with masks](usage.md#restricting-the-analysis-with-masks). Add `--hemispheres` to also report skeleton metrics separately for the left and right hemispheres; ROI masks are not split between hemispheres.
 
 ## Do I need a GPU, or to install FSL, ANTs or Python?
 
@@ -73,7 +73,7 @@ That happens because the container runs as its own non-root user. Run it as your
 
 ## How many CPU cores should I request on a cluster?
 
-For cross-sectional runs, **one core** is enough: there is no registration step at all.
+For cross-sectional throughput, **one core per subject** is usually the most efficient allocation. These runs still perform TBSS registration, which is effectively single-threaded here, while additional cores can shorten the tensor and free-water fit when turnaround time matters.
 
 For longitudinal runs, **one core per subject** is usually the most efficient choice: it processes many subjects side by side for the fewest core-hours. If a single subject's turnaround matters instead, **12 to 24 cores** is the sweet spot. Larger allocations help far less than they look like they should, because a substantial part of every run is single-threaded and takes the same time however many cores it has, so those cores sit idle for that whole stretch.
 

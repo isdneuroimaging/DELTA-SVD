@@ -10,11 +10,11 @@ For a longitudinal run it builds a **within-subject template** so that the skele
 
 ## Pipeline at a glance
 
-**Preprocessed DWI (per timepoint)** → **tensor fit → white-matter skeleton projection** → **endpoints table + QC report**
+**Preprocessed DWI (per timepoint)** → **tensor fit → white-matter skeleton projection** → **results table + QC report**
 
 - **Input** — one preprocessed 4D DWI per timepoint, with its gradient table and a brain mask.
 - **Processing** — diffusion-tensor fitting, then skeletonisation and masking; longitudinal runs first build a within-subject template so timepoints share one skeleton.
-- **Output** — a metrics table (`delta-svd_results.csv`) and an HTML quality-control report.
+- **Output** — a results table (`delta-svd_results.csv`) and an HTML quality-control report.
 
 ## Typical input
 
@@ -32,10 +32,11 @@ Pass a single DWI for a **[cross-sectional](usage.md#cross-sectional-single-time
 
 ## Outputs
 
-- **`delta-svd_results.csv`** — the metrics table, reporting three validated endpoints per timepoint and per region:
+- **`delta-svd_results.csv`** — the results table, reporting three validated endpoint metrics per timepoint and per region:
     - **MSMD** — mean skeletonised mean diffusivity; the recommended primary endpoint for most datasets.
     - **PSMD** — peak width of skeletonised mean diffusivity; an established marker of white-matter damage in cSVD.
     - **MSFW** — mean skeletonised free water.
 - **`delta-svd_qc.html`** — a quality-control report with the skeleton and masks overlaid on the data.
+- **`delta-svd_run_manifest.json`** — a machine-readable record of the completed run, including its version, source revision, command, UTC timestamps, processing mode, and outputs.
 
 For guidance on which endpoint to report, see the **[FAQ](faq.md#what-are-msmd-psmd-and-msfw-and-which-should-i-report)**; for the full output detail and QC levels, see **[Usage](usage.md#output)**.

@@ -24,21 +24,21 @@ DELTA-SVD is distributed as a single container image: everything the pipeline ne
     - **Apptainer** (or legacy **Singularity**) — recommended, especially on HPC clusters. It runs rootless and maps your host identity into the container, so output files come out owned by you.
     - **Docker**, or rootless **Podman** — an optional alternative. Under Docker there is an extra step to get output owned by your host user; see [Usage](usage.md) and [Advanced usage](advanced-usage.md).
 
-No separate Python, FSL, or ANTs installation is required; those are all provided inside the image. The bundled third-party components are redistributed under their respective licenses; see [NOTICE](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/NOTICE) for details and license texts.
+No separate Python, FSL, or ANTs installation is required; those are all provided inside the image. The bundled third-party components are redistributed under their respective licences; see [NOTICE](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/NOTICE) for details and licence texts.
 
 ## Getting the image
 
 The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**: results from a different `MAJOR.MINOR` version can't be pooled (see below), so every run has to name the version it uses and none can silently pick up a newer one.
 
 > [!IMPORTANT]
-> **Use one version per project.** Only results produced with the same DELTA-SVD version can be compared or pooled. Choose a version at the start of a project and process all data with it; do not upgrade partway through. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). The exception is bug-fix releases, which differ only in the last (`PATCH`) digit: these are safe to mix within a project, as they do not change results. Any change in the first two numbers can shift the metrics, so results from different `MAJOR.MINOR` versions must not be combined.
+> **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Bug-fix releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. A patch may correct an optional derived output; when it does, the compatibility note below identifies the affected inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined.
 
 ### Apptainer (recommended)
 
 Pull the image and convert it to a local `.sif` file in one step:
 
 ```
-apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.1
+apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.2
 ```
 
 This writes `delta-svd.sif` into the current directory, the file used throughout the [Usage](usage.md) examples. Keep it somewhere stable (or on shared storage on a cluster) and point your runs at it.
@@ -48,7 +48,7 @@ This writes `delta-svd.sif` into the current directory, the file used throughout
 Pull the image into the local daemon's store:
 
 ```
-docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.1
+docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.2
 ```
 
 Replace `docker` with `podman` to use rootless Podman instead.
@@ -64,7 +64,7 @@ apptainer run delta-svd.sif --help
 or, with Docker:
 
 ```
-docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --help
+docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.2 --help
 ```
 
 If you see the DELTA-SVD option help, you are ready to go; continue with [Usage](usage.md).
@@ -74,7 +74,7 @@ If you see the DELTA-SVD option help, you are ready to go; continue with [Usage]
 Every release image is built and pushed by a GitHub Actions workflow that attaches a [Sigstore](https://www.sigstore.dev/)-signed build attestation, verifiable with the [GitHub CLI](https://cli.github.com/) (`gh`, version 2.49 or later):
 
 ```
-gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.1 --owner isdneuroimaging
+gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.2 --owner isdneuroimaging
 ```
 
 A successful verification confirms the image was built by that workflow from the corresponding tagged commit in the [DELTA-SVD repository](https://github.com/isdneuroimaging/DELTA-SVD), not assembled or pushed by hand.
@@ -87,9 +87,10 @@ Because results from a different `MAJOR.MINOR` version must not be pooled, it is
 apptainer run delta-svd.sif --version
 ```
 
-It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --version`).
+It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.2 --version`).
 
-Every run also reports its version in two other places, so results can be traced back after the fact:
+The version is also recorded with the run so results can be traced back after the fact:
 
 - the **first line of the run's console output**, ahead of the command line;
-- the **QC report** (`delta-svd_qc.html`), in the table at the top.
+- the **run manifest** (`delta-svd_run_manifest.json`) for successful runs, which records both the release version and the source revision embedded in the container;
+- the **QC report** (`delta-svd_qc.html`) when QC is enabled, in the table at the top.

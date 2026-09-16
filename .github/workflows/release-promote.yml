@@ -36,6 +36,7 @@ jobs:
       - name: Re-verify labels on the staged digest
         id: labels
         run: |
+          [[ "$SRC" =~ ^ghcr\.io/isdneuroimaging/delta-svd-staging@sha256:[0-9a-f]{64}$ ]] || { echo "::error::expected a staging image reference with a SHA-256 digest"; exit 1; }
           LABELS="$(crane config "$SRC" | jq '.config.Labels')"
           VERSION="$(echo "$LABELS" | jq -r '."org.opencontainers.image.version" // empty')"
           REVISION="$(echo "$LABELS" | jq -r '."org.opencontainers.image.revision" // empty')"

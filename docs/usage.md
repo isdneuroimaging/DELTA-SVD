@@ -25,7 +25,7 @@ A run processes one subject, given one diffusion-weighted image per **timepoint*
 | `--bval` / `--bvec` | no | FSL-format gradient files. If omitted, they are inferred from each DWI path by swapping the extension for `.bval` / `.bvec`. |
 | `--bmask` | no | DWI-space brain mask(s). Binarised on input: values greater than zero become 1; zero and negative values become 0. If omitted, inferred by swapping the DWI extension for `_brainmask.nii.gz`, falling back to `_brainmask.nii` if that file does not exist. |
 | `--tp` | no | Timepoint label(s), which must be unique (`all` is reserved for the rows summarising all timepoints). Default: `TP01`, `TP02`, … in the order given. |
-| `--id` | no | Subject identifier; added as an `ID` column to the results table. Recommended; it makes [aggregation](#aggregating-across-subjects) across subjects clean. |
+| `--id` | no | Subject ID; added as an `ID` column to the results table. Recommended; it makes [aggregation](#aggregating-across-subjects) across subjects clean. |
 | `-o`, `--dirOutput` | no | Output folder. Default: the parent folder of the first `--dwi` image. |
 
 For `--bval`, `--bvec` and `--bmask`, you may give one value (applied to all timepoints) or one per timepoint. When your files follow the naming convention above, you can omit them entirely.
@@ -61,16 +61,63 @@ All masks are optional. Per-timepoint masks are given in DWI space (one per time
 | Option | Description |
 | --- | --- |
 | `--Emask` | Exclusion mask(s): the masked region (e.g. a lesion) is removed from the analysis. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
-| `--Rmask` | ROI mask(s) in DWI space. Integer labels define separate ROIs, each analysed on its own. |
-| `--RmaskMNI` | A single ROI mask in MNI space (may hold several integer labels). |
-| `--hemispheres` | Additionally report skeleton metrics separately for the left and right hemispheres. |
+| `--Rmask` | ROI mask(s) in DWI space. Integer labels define separate ROIs, including background label 0. |
+| `--RmaskMNI` | A single ROI mask in MNI space. Integer labels define separate ROIs, including background label 0. |
+| `--hemispheres` | Additionally report skeleton metrics separately for the left and right hemispheres. ROI masks are not split between hemispheres. |
 
 ## Output
 
 Written to the output folder:
 
-- **`delta-svd_results.csv`** — the metrics table. The validated endpoints are **MSMD** (mean skeletonised MD), **PSMD** (peak width of skeletonised MD) and **MSFW** (mean skeletonised free water), reported per timepoint and per region.
-- **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and the exact command line that produced the run, so results stay traceable; see [Checking which version you have](install.md#checking-which-version-you-have). Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, `0` skips both.
+- **`delta-svd_results.csv`** — the results table. Endpoint metric rows contain the validated endpoints **MSMD** (mean skeletonised MD), **PSMD** (peak width of skeletonised MD) and **MSFW** (mean skeletonised free water), reported per timepoint and per region. The table also contains QC bookkeeping rows describing the analysed voxel sets; these have `metric=NA` and `value=NaN`.
+- **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and all command-line arguments used for the run, including values containing spaces or quotes, so results remain traceable. Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, `0` skips both.
+- **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It uses the versioned schema below and records the same command information as the QC report.
+
+The run manifest is completion and provenance information; it is not required by the aggregation script, which continues to aggregate any matching results CSV.
+
+### Run manifest schema
+
+`manifest_schema_version` is currently `1`. The remaining fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `pipeline` / `pipeline_version` / `source_revision` | Pipeline identity, release version, and source revision embedded in the image. |
+| `subject_id` | Value supplied with `--id`, or `null` when it was omitted. |
+| `processing_mode` | `cross_sectional` for one DWI or `longitudinal` for multiple timepoints. |
+| `command` | Command used for the run, recorded so that every argument can be identified unambiguously. |
+| `started_at` / `completed_at` | UTC RFC 3339 timestamps. |
+| `steps_completed` | Requested processing steps completed before the manifest was written. |
+| `qc_mode` | Numeric `--qc` mode used for the run. |
+| `outputs` | Final result and QC filenames produced by the requested steps; the manifest does not list itself. |
+
+The results table has the following columns:
+
+| Column | Meaning |
+| --- | --- |
+| `ID` | Optional subject ID supplied with `--id`. |
+| `timepoint` | Timepoint label. For bookkeeping rows, `all` may summarise all timepoints. |
+| `skeleton` | Filename of the skeleton mask used for the analysis. |
+| `region` | Skeleton intersection, exclusion-mask variant, ROI, or hemisphere-specific analysis region. |
+| `voxels` | Number of skeleton voxels included in the row. |
+| `metric` | Endpoint name for endpoint metric rows; `NA` for QC bookkeeping rows. |
+| `value` | Endpoint value for endpoint metric rows; `NaN` for QC bookkeeping rows. |
+
+### Region values
+
+The `region` column uses these values:
+
+| Value | Meaning |
+| --- | --- |
+| `total` | Total skeleton-mask voxel count before intersection; QC bookkeeping only. |
+| `intersection` | Voxels shared by the relevant brain masks and skeleton. |
+| `set_difference` | Longitudinal QC count of voxels present at one timepoint but absent from the common intersection. |
+| `intersection_Emask` | Final intersection after applying the exclusion mask. When other analyses are requested, this prefix is retained in combinations such as `intersection_Emask_Rmask-01`, `intersection_Emask_RmaskMNI-01`, and `intersection_Emask_LH`. |
+| `intersection_Rmask-00` | Background/complement of labelled DWI-space ROIs. |
+| `intersection_Rmask-XX` | Individual DWI-space ROI labels, including background `00`. |
+| `intersection_RmaskMNI-XX` | Individual MNI-space ROI labels, including background `00`. |
+| `intersection_LH` / `intersection_RH` | Left/right skeleton regions. With an exclusion mask these become `intersection_Emask_LH` / `intersection_Emask_RH`; ROI-by-hemisphere combinations are never produced. |
+
+Rows with `metric=NA` and `value=NaN` are QC-bookkeeping rows rather than endpoint metrics.
 
 Intermediate files are written under `delta-svd_temp/` and deleted on success; pass `--debug` to keep them.
 
@@ -90,8 +137,8 @@ It searches the given directory recursively for `delta-svd_results.csv` and conc
 | `-f <pattern>` | CSV file name or pattern to search for (default `delta-svd_results.csv`); wildcards are allowed, but the pattern must end in `.csv`. |
 | `-d <n>` | Search depth (default: any depth). |
 | `-o <path>` | Output CSV path (must end in `.csv`), or an existing output directory; a bare filename lands in the search directory. |
-| `-s` | Split output into separate `_metrics` and `_debugging` tables. |
-| `-p` | Add a `path` column identifying each source file (added automatically when the `ID` column is absent). |
+| `-s` | Split output into separate endpoint-metrics (`_metrics`) and QC-bookkeeping (`_debugging`) tables. |
+| `-p` | Add a `path` column identifying each source file (added automatically when the `ID` column is absent). When present, `ID` is the subject ID supplied by the original run. |
 | `-x` | Overwrite an existing output file. |
 | `-t <when>` | Append the current `date`, `time` or `datetime` to the output file name; an alternative to `-x` when repeating an aggregation. |
 | `-q` | Quiet mode. |

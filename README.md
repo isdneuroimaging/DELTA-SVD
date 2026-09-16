@@ -16,19 +16,19 @@ apptainer run delta-svd.sif --dwi <image> --id <subject> [options]
 
 **See the [**documentation**](https://delta-svd.com) for full details on requirements, installation and usage.**
 
-## License
+## Licence
 
 This project's own code is licensed under CC BY-NC-ND 4.0 (non-commercial, no derivatives). See [LICENSE](LICENSE) for details, including attribution requirements.
 
 > [!IMPORTANT]
-> If you use DELTA-SVD, the [license](LICENSE) requires you to both cite the method publication and link to this repository:
+> If you use DELTA-SVD, the [licence](LICENSE) requires you to both cite the method publication and link to this repository:
 >
 > 1. **Publication** — Dewenter A, et al. (manuscript submitted). Full citation details will be provided here upon publication.
 > 2. **Repository** — https://github.com/isdneuroimaging/DELTA-SVD
 
 ## Third-party software
 
-The container image bundles several third-party dependencies, notably FSL and ANTs. FSL is non-commercial-use-only; by using the image you agree to be bound by its license. See [NOTICE](NOTICE) for details and license texts.
+The container image bundles several third-party dependencies, notably FSL and ANTs. FSL is non-commercial-use-only; by using the image you agree to be bound by its licence. See [NOTICE](NOTICE) for details and licence texts.
 
 ## Disclaimer
 

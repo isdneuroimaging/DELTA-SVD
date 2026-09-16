@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing
+import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime
 from os.path import join, exists, dirname, basename
 from shutil import copy2, rmtree
 from pathlib import Path
@@ -144,6 +144,9 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
+ROI_LABEL_DTYPE = 'uint16'
+ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
+
 from dipy.io import read_bvals_bvecs
 from dipy.core.gradients import gradient_table
 import dipy.reconst.dti as dti
@@ -153,7 +156,7 @@ from dipy.reconst.dti import (design_matrix, decompose_tensor,
 from scipy.ndimage import gaussian_filter
 
 from markvcid_fw_mrn import wls_fit_tensor_fw, wls_fit_dti
-from delta_svd_version import __version__
+from delta_svd_version import __version__, __source_revision__
 
 
 class DeltaSvdError(ValueError):
@@ -635,7 +638,7 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1
     para, itkThreads, control = plan_ants_parallelism(len(timepoints), coreBudget, paraOverride, itkThreads)
     mode = 'serial' if para == 1 else 'pexec'
     perCore = para * itkThreads / coreBudget
-    print(f"Template construction: {len(timepoints)} timepoint(s), core budget {coreBudget} "
+    print(f"Template construction: {len(timepoints)} timepoints, core budget {coreBudget} "
           f"-> {para} parallel registration job(s) x {itkThreads} ITK thread(s) per job ({mode} mode)")
     print(f"  {para * itkThreads} thread(s) over {coreBudget} core(s) = {perCore:.2f} per core")
     if perCore > 2:
@@ -692,6 +695,8 @@ def coreg_merge_masks(timepoints = [], masks = [], label=None, dirTemplate = Non
                     img = nii.get_fdata()
                     save_nifti(fnOut, img>0, nii.affine, nii.header, 'uint8')
                 else:
+                    nii = nib.load(fnIn)
+                    validate_roi_labels(nii.get_fdata(), 'ROI mask in DWI space', fnIn)
                     copy_as_nii_gz(fnIn, fnOut)
                 if len(timepoints)>1:
                     fnIn = fnOut
@@ -713,13 +718,14 @@ def coreg_merge_masks(timepoints = [], masks = [], label=None, dirTemplate = Non
     return fnNewMask
 
 def merge_masks(fnMerge, fnOut):
-    print('Merging masks across time-points:\n',fnMerge)
+    print('Merging masks across timepoints:\n',fnMerge)
     img = []
     for fn in fnMerge:
         nii = nib.load(fn)
         img.append(nii.get_fdata())
     img = np.amax(np.stack(img,-1), -1)
-    save_nifti(fnOut, img, nii.affine, nii.header, 'uint8')
+    validate_roi_labels(img, 'ROI mask in DWI space', fnOut)
+    save_nifti(fnOut, img, nii.affine, nii.header, ROI_LABEL_DTYPE)
     
     return fnOut
 
@@ -831,8 +837,8 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
 
         # label-2 version is only used for the QC image
         skelSuffixL2 = skelSuffix + '_Emask-as-label2'
-        pnameSkelIntersExcLabeled = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixL2+'.nii.gz')
-        save_nifti(pnameSkelIntersExcLabeled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
+        pnameSkelIntersExcLabelled = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixL2+'.nii.gz')
+        save_nifti(pnameSkelIntersExcLabelled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
 
         skelSuffix = skelSuffix + '_Emask'
         pnameSkelIntersExc = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'.nii.gz')
@@ -860,11 +866,11 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timept.append(timeptT)
         region.append(skelSuffixT)
 
-        if iFn==0: imgROImerged = np.zeros(imgROI.shape, 'uint8')
+        if iFn==0: imgROImerged = np.zeros(imgROI.shape, ROI_LABEL_DTYPE)
         imgROImerged[imgROI>0] = int(roi)
         if iFn==len(fnROI)-1 and np.count_nonzero(imgROImerged)>0: 
             pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_Rmask.nii.gz')
-            save_nifti(pnameROImerged, imgROImerged, niiROI.affine, niiROI.header, dtype='uint8')
+            save_nifti(pnameROImerged, imgROImerged, niiROI.affine, niiROI.header, dtype=ROI_LABEL_DTYPE)
     # complementary ROI for the background
     if len(fnROI)>0:
         imgROI = maskIntersection.copy()
@@ -885,7 +891,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         niiROI_MNI = nib.load(fnROI_MNI)
         imgROI_MNI = niiROI_MNI.get_fdata()
         #- one file may carry several ROI labels
-        uROI = np.unique(imgROI_MNI.astype('uint8'))
+        uROI = validate_roi_labels(imgROI_MNI, 'ROI mask in MNI space', fnROI_MNI)
         # label 0 is deliberately kept, so the background is analysed as a ROI too
         for iRoi,roi in enumerate(uROI):
             imgROI_MNI_roi = maskIntersection.copy()
@@ -900,12 +906,12 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
             region.append(skelSuffixT)            
 
             #- merged after intersecting with the skeleton, so this differs from the input
-            if iRoi==0: imgROImerged = np.zeros(imgROI_MNI.shape, 'uint8')
+            if iRoi==0: imgROImerged = np.zeros(imgROI_MNI.shape, ROI_LABEL_DTYPE)
             if roi>0:
                 imgROImerged[imgROI_MNI_roi>0] = roi
             if iRoi==len(uROI)-1 and np.count_nonzero(imgROImerged)>0: 
                 pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_RmaskMNI.nii.gz')
-                save_nifti(pnameROImerged, imgROImerged, niiROI_MNI.affine, niiROI_MNI.header, dtype='uint8')
+                save_nifti(pnameROImerged, imgROImerged, niiROI_MNI.affine, niiROI_MNI.header, dtype=ROI_LABEL_DTYPE)
 
     
     if analyseHemispheres:
@@ -963,7 +969,7 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
 
         for mapName, _ in fnNonFA.items():
 
-            print('\nExtracting histogram parameters for:')
+            print('\nCalculating endpoint metrics for:')
             print(f' region    : {roiSuffix}')
             print(f' map       : {mapName}')
 
@@ -973,6 +979,8 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
             print( ' voxels  :',len(skel))
             mean = np.mean(skel) if len(skel)>0 else np.nan
 
+            # Preserve the legacy ncMD/ncFW aliases for callers of this helper.
+            # The current pipeline passes MD/FW, so this has no effect on new runs.
             mT = re.sub(r'^nc','',mapName)
             if mT == 'MD':
                 prcts = np.percentile(skel,[5,95]) if len(skel)>0 else [np.nan]*2
@@ -1064,7 +1072,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
         fnPNG = fnPNG + create_qc_image([fnFA, fnMD], vlim, labels, fnSkeleton, fnBmask, animate = False, addLegends=addLegends)
         captions = captions + [f'Timepoint "{tpB}"','']
 
-    #--- in space of patient template
+    #--- in space of within-subject template
     vlim = []
     labels = []
     fnames = []
@@ -1104,7 +1112,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
     create_html_with_png(fnHTML, fnPNG, captions, None, fnCSV, args)
 
     if args.qc < 2:
-        rmtree(dirQC)
+        safe_rmtree(dirQC, args.dirOutput)
 
 
 ###########################################################################
@@ -1130,17 +1138,41 @@ def binarise_mask(img, label, fname):
     return binary
 
 
+def validate_roi_labels(img, label, fname):
+    """Return sorted ROI labels after enforcing the public label contract."""
+    labels = np.unique(np.asarray(img))
+    invalid = labels[(~np.isfinite(labels)) |
+                     (labels < 0) |
+                     (labels > ROI_LABEL_MAX) |
+                     (labels != np.floor(labels))]
+    if invalid.size:
+        shown = ', '.join(str(value) for value in invalid[:5])
+        if invalid.size > 5:
+            shown += ', ...'
+        raise DeltaSvdError(
+            f"The provided {label} must contain only finite integer labels from 0 through "
+            f"{ROI_LABEL_MAX}:\n  {fname}\n  Unsupported value(s): {shown}")
+    return labels.astype(ROI_LABEL_DTYPE)
+
+
 def copy_as_nii_gz(fnIn, fnOut, dtype=None):
     """Place 'fnIn' at 'fnOut', whose name always ends in '.nii.gz'. A gzipped
     input is copied verbatim; an uncompressed one is re-encoded, because nibabel,
     FSL and ANTs pick the codec from the file *name*. 'dtype' defaults to the
-    input's own, keeping the re-encode faithful."""
+    input's own. With no dtype override, both the raw stored values and NIfTI
+    slope/intercept are retained so the decoded values stay exactly equal."""
     if fnIn.endswith('.nii.gz'):
         copy2(fnIn, fnOut)
     else:
         nii = nib.load(fnIn)
-        save_nifti(fnOut, nii.get_fdata(), nii.affine, nii.header,
-                   nii.get_data_dtype() if dtype is None else dtype)
+        if dtype is None:
+            raw = np.asanyarray(nii.dataobj.get_unscaled())
+            niiNew = nib.Nifti1Image(raw, nii.affine, nii.header)
+            niiNew.set_data_dtype(nii.get_data_dtype())
+            niiNew.header.set_slope_inter(nii.dataobj.slope, nii.dataobj.inter)
+            nib.save(niiNew, fnOut)
+        else:
+            save_nifti(fnOut, nii.get_fdata(), nii.affine, nii.header, dtype)
 
 
 def run_subprocess(cmd, displayStdout, label):
@@ -1168,6 +1200,45 @@ def section_header(text, startPrevious = None):
     print('#'*lengthFrame+'\n')
 
     return time.time()
+
+
+def utc_timestamp(value=None):
+    """Return an RFC 3339 timestamp in UTC, using the manifest's Z form."""
+    if value is None:
+        value = datetime.datetime.now(datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+
+def write_run_manifest(fname, args, startedAt, outputs, completedAt=None):
+    """Write the successful-run manifest atomically beside the final outputs.
+
+    The temporary file is only for protecting the small manifest write itself;
+    pipeline outputs continue to be written in their existing locations.
+    """
+    manifest = {
+        'manifest_schema_version': 1,
+        'pipeline': 'DELTA-SVD',
+        'pipeline_version': __version__,
+        'source_revision': __source_revision__,
+        'subject_id': args.id,
+        'processing_mode': 'longitudinal' if len(args.dwi) > 1 else 'cross_sectional',
+        'command': args.function_call,
+        'started_at': utc_timestamp(startedAt),
+        'completed_at': utc_timestamp(completedAt),
+        'steps_completed': list(args.steps),
+        'qc_mode': args.qc,
+        'outputs': list(outputs),
+    }
+    temporary = fname + '.tmp'
+    try:
+        with open(temporary, 'w') as fp:
+            json.dump(manifest, fp, indent=2)
+            fp.write('\n')
+        os.replace(temporary, fname)
+    except Exception:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        raise
 
 
 NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
@@ -1226,7 +1297,7 @@ def isNIfTI(s, abort=True):
 
 
 def candidate_paths(fn, dwi, anyExtension, inferred=False):
-    """The paths an input given per time-point is looked for at, in order: as
+    """The paths an input given per timepoint is looked for at, in order: as
     given, and relative to the folder of its DWI image; each optionally
     completed with a NIfTI extension.
 
@@ -1254,9 +1325,9 @@ def candidate_paths(fn, dwi, anyExtension, inferred=False):
 
 
 def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
-    """Why a per-time-point input could not be found, and what to do about it.
+    """Why a per-timepoint input could not be found, and what to do about it.
 
-    Names the time-point by its DWI image rather than by an index: the '--tp'
+    Names the timepoint by its DWI image rather than by an index: the '--tp'
     labels are not resolved yet at this point, and the path is what the user has
     to go and look at anyway."""
     paths = candidate_paths(fn, dwi, anyExtension, inferred)
@@ -1285,6 +1356,37 @@ def isCSV(s):
         return s
     else:
         raise argparse.ArgumentTypeError(f"--reprocess filename must end in '.csv'; you provided '{s}'")
+
+def validate_timepoint_labels(labels):
+    reserved = {'template', 'intermediateTemplates', 'TBSS'}
+    for label in labels:
+        if os.path.isabs(label):
+            reason = 'is an absolute path'
+        elif '..' in re.split(r'[\\/]', label):
+            reason = 'contains path traversal'
+        elif '/' in label or '\\' in label:
+            reason = 'contains a path separator'
+        elif label in reserved:
+            reason = 'collides with an internal working directory'
+        elif label in ('', '.'):
+            reason = 'is not a usable directory name'
+        else:
+            continue
+        raise DeltaSvdError(f"Invalid timepoint label given with '--tp': '{label}' {reason}. "
+                            "Use a plain label such as 'TP01' or 'ses-1', not a path or an "
+                            "internal directory name.")
+
+def safe_rmtree(path, parent):
+    pathReal = os.path.realpath(os.path.abspath(path))
+    parentReal = os.path.realpath(os.path.abspath(parent))
+    try:
+        contained = os.path.commonpath([pathReal, parentReal]) == parentReal
+    except ValueError:
+        contained = False
+    if not contained or pathReal == parentReal:
+        raise DeltaSvdError(f"Refusing to recursively delete path outside its intended output "
+                            f"directory: {path}")
+    rmtree(path)
     
 def assertPositiveJobs(s):
     try:
@@ -1364,23 +1466,23 @@ class CustomArgumentParser(argparse.ArgumentParser):
         return super().parse_known_args(args, namespace)
     
 stepsImplemented = ['fwc','template','tbss','tbss_non_fa','extract','qc']
-argparseDescription = f"DELTA-SVD {__version__} ('Diffusion Endpoints for Longitudinal Tracking of white matter Alterations in cerebral Small Vessel Disease') processes multi-directional diffusion MRI data to fully automatically extract clinically and technically validated white matter diffusion metrics. Key steps include diffusion tensor fitting (with and without free water imaging), skeletonization based on the free water-corrected FA (fwc-FA) via FSL's TBSS, and enhanced CSF partial volume masking. The final metrics MSMD, PSMD, and MSFW are computed over the skeleton. For longitudinal data, a within-subject template is created using ANTs."
+argparseDescription = f"DELTA-SVD {__version__} ('Diffusion Endpoints for Longitudinal Tracking of white matter Alterations in cerebral Small Vessel Disease') processes multi-directional diffusion MRI data to fully automatically extract clinically and technically validated white matter diffusion metrics. Key steps include diffusion tensor fitting (with and without free water imaging), skeletonisation based on the free water-corrected FA (fwc-FA) via FSL's TBSS, and enhanced CSF partial volume masking. The final metrics MSMD, PSMD, and MSFW are computed over the skeleton. For longitudinal data, a within-subject template is created using ANTs."
 
 def iniParser():
-    parser = CustomArgumentParser(description=argparseDescription, epilog='Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"')
+    parser = CustomArgumentParser(description=argparseDescription, epilog='Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"')
     parser.add_argument("--version", action='version', version=f'DELTA-SVD {__version__}', help="show the DELTA-SVD version and exit")
     group0 = parser.add_argument_group('input/output data specification')
-    group0.add_argument("--dwi", required=True, metavar='NIfTI', type=isNIfTI, nargs="+", action='extend', help="input path(s) to 4D DWI image(s) in NIfTI format. Number of arguments should correspond to number of time-points.")
+    group0.add_argument("--dwi", required=True, metavar='NIfTI', type=isNIfTI, nargs="+", action='extend', help="input path(s) to 4D DWI image(s) in NIfTI format. Number of arguments should correspond to number of timepoints.")
     group0.add_argument("--bval", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-values in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bval'")
     group0.add_argument("--bvec", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-vectors in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient.  If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bvec'")
     group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
-    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all time-points. Number of arguments should correspond to number of DWI image(s). Labels have to be unique, and 'all' is reserved for the rows summarising all time-points. If argument not provided, time-points are labeled consecutively as TP01, TP02, and so on.")
-    group0.add_argument("--id", metavar='label', type=str, help="optional patient/subject identifier. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple patients/subjects.")
+    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all timepoints. Number of arguments should correspond to number of DWI image(s). Labels must be plain names without path separators or traversal and must not collide with internal working directories. Labels have to be unique, and 'all' is reserved for the rows summarising all timepoints. If argument not provided, timepoints are labelled consecutively as TP01, TP02, and so on.")
+    group0.add_argument("--id", metavar='label', type=str, help="optional subject ID. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple subjects.")
     group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
     group1 = parser.add_argument_group('additional masking')
-    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used for 'exclusive' masking. One per timepoint can be provided, which will be merged in template space. Time-points will be matched by position of provided paths. Skip time-points by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
-    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Each mask can contain more than one integer label corresponding to different ROI, which will be analysed separately. However, masks will be merged in template space and if labels in masks from different time-points disagree, the respectively highest integer label will overwrite the other labels.")
-    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. Can contain integer labels for multiple ROI, which will be analysed separately.")
+    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
+    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
+    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0.")
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
     group2 = parser.add_argument_group('advanced options')
     group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/delta-svd_skeletonmask_v1.nii.gz", help="input path to an alternative skeleton mask. It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
@@ -1389,7 +1491,7 @@ def iniParser():
     group2b.add_argument("--shells", metavar='Integer', type=assertBValue, nargs="+", action='extend', help=f"b-value shell(s) to consider for diffusion tensor fitting, e.g. '--shells 700 1000'. An alternative to '--bRange' for selecting shells individually rather than as one range, which avoids pulling in the shells in between. Each shell is matched with a tolerance of {SHELL_TOL} s/mm2, and a shell that matches no volume in the data is an error. As for '--bRange', volumes with a b-value close to zero (b <= {B0_MAX}) are always included, and each shell has to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2. Mutually exclusive with '--bRange'.")
     group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
     group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."
-    group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of time-points either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
+    group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of timepoints either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
     group2.add_argument("--threads", metavar='cores', type=threadBudget, default='auto', help="number of physical CPU cores DELTA-SVD may use. Two steps are multi-core: the diffusion tensor / free-water fit, and (for longitudinal input only) the within-subject template construction; TBSS and the remaining steps are single-threaded. Defaults to 'auto', which detects the cores available to the process, honouring an HPC scheduler's allocation. It has no effect on the results, only on runtime, so it can be tuned freely.")
     group2.add_argument("--itkThreads", metavar='threads', type=assertPositiveItkThreads, default=ITK_THREADS_DEFAULT, help=argparse.SUPPRESS) #--- "Expert override for the ITK threads used per ANTs registration job. WARNING: this changes the computed metrics -- ITK sums the registration metric per thread, so a different count sums in a different order. Defaults to 12, the value DELTA-SVD was validated at. Results produced with different values must not be compared or pooled."
     group2.add_argument("--iterations", type=str, default='30x30x8', help=argparse.SUPPRESS) #--- "Iterations at each resolution level of the pairwise ANTs registrations during template creation. Must be three levels and specified in the format: 'L1xL2xL3'. Defaults to '30x30x8'."
@@ -1407,12 +1509,13 @@ def iniParser():
 def pipeline_delta_svd():
 
     start_script = time.time()
+    started_at = datetime.datetime.now(datetime.timezone.utc)
     parser = iniParser()
     if len(sys.argv)<2:
         parser.print_usage()
         print(f'\nDELTA-SVD {__version__}\n'
               'Run "delta-svd.py -h" for detailed help\n'
-              'Notice: By using DELTA-SVD, you agree to the license terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"\n')
+              'Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"\n')
         parser.exit()
     else:
         args = parser.parse_args(sys.argv[1::])
@@ -1421,7 +1524,7 @@ def pipeline_delta_svd():
     # Carried on 'args' too, for the QC report to record.
     args.version = __version__
     print(f"DELTA-SVD {__version__}")
-    args.function_call = " ".join([basename(sys.argv[0])]+sys.argv[1::])
+    args.function_call = shlex.join([basename(sys.argv[0])]+sys.argv[1::])
     print("Running: " + args.function_call,'\n')
 
     # Check bval, bvec and bmask files. The brain mask may be '.nii.gz' or '.nii',
@@ -1454,27 +1557,28 @@ def pipeline_delta_svd():
     
     # Check timepoint labels
     if args.tp is None:
-        args.tp = ['TP{:02d}'.format(i+1) for i in range(len(args.dwi))] #-- folders for all time-points
+        args.tp = ['TP{:02d}'.format(i+1) for i in range(len(args.dwi))] #-- folders for all timepoints
     if len(args.tp) != len(args.dwi):
-        raise DeltaSvdError(f"The number of time-point labels given with '--tp' (n={len(args.tp)}) has "
+        raise DeltaSvdError(f"The number of timepoint labels given with '--tp' (n={len(args.tp)}) has "
                             f"to match the number of DWI images (n={len(args.dwi)}).")
+    validate_timepoint_labels(args.tp)
     duplicates = sorted({tp for tp in args.tp if args.tp.count(tp) > 1})
     if duplicates:
-        raise DeltaSvdError(f"Time-point labels given with '--tp' have to be unique. You passed "
+        raise DeltaSvdError(f"Timepoint labels given with '--tp' have to be unique. You passed "
                             f"{', '.join(duplicates)} more than once.")
     if len(args.dwi) > 1 and 'all' in args.tp:
-        raise DeltaSvdError("'all' is reserved as the label for the rows summarising all time-points, "
+        raise DeltaSvdError("'all' is reserved as the label for the rows summarising all timepoints, "
                             "so it cannot be used as a '--tp' label.")
 
-    # Check exclusion and ROI masks. Both are optional and per time-point, with
+    # Check exclusion and ROI masks. Both are optional and per timepoint, with
     # 'NA' skipping one, so a short list is padded rather than rejected.
     maskLabels = {'Emask': 'exclusion mask', 'Rmask': 'ROI mask in DWI space'}
     for attr, label in maskLabels.items():
         masks = getattr(args, attr)
         if len(masks) > len(args.dwi):
             raise DeltaSvdError(f"More {label}s were given with '--{attr}' (n={len(masks)}) than there "
-                                f"are time-points (n={len(args.dwi)}). At most one per time-point is "
-                                f"allowed; enter 'NA' to skip a time-point.")
+                                f"are timepoints (n={len(args.dwi)}). At most one per timepoint is "
+                                f"allowed; enter 'NA' to skip a timepoint.")
     for i,_ in enumerate(args.dwi):
         for attr in maskLabels:
             masks = getattr(args, attr)
@@ -1490,12 +1594,19 @@ def pipeline_delta_svd():
             if fnResolved is None:
                 raise DeltaSvdError(missing_input_message(
                     attr, masks[i], args.dwi[i], True, False,
-                    note=" Enter 'NA' instead of a path to skip this time-point."))
+                    note=" Enter 'NA' instead of a path to skip this timepoint."))
             # assigned back, so that a name resolved by extension or against the
             # DWI folder is the one every later step loads
             masks[i] = fnResolved
 
-    print(f"\nInput contains N={len(args.dwi)} time-points")
+    for fn in args.Rmask:
+        if fn is not None:
+            validate_roi_labels(nib.load(fn).get_fdata(), 'ROI mask in DWI space', fn)
+    if args.RmaskMNI is not None:
+        validate_roi_labels(nib.load(args.RmaskMNI).get_fdata(),
+                            'ROI mask in MNI space', args.RmaskMNI)
+
+    print(f"\nInput contains N={len(args.dwi)} timepoints")
     for i in range(len(args.dwi)):
         print(f'Timepoint {args.tp[i]}:')
         print(f' DWI   :{args.dwi[i]}')
@@ -1511,7 +1622,7 @@ def pipeline_delta_svd():
         print(f'\nAn additional ROI mask in MNI space (RmaskMNI) was provided:\n {args.RmaskMNI}')
 
     if args.hemispheres:
-        print('\nHemispheric ROI analysis will be done as well')
+        print('\nHemispheric skeleton analysis will be done as well')
 
     if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
         print(f'\nUsing the default skeleton mask:\n {args.skeletonMask}')
@@ -1552,7 +1663,7 @@ def pipeline_delta_svd():
             args.debug = True
     
     dirTemp = join(args.dirOutput, 'delta-svd_temp')
-    dirTP = [join(dirTemp, tp) for tp in args.tp] #-- folders for all time-points
+    dirTP = [join(dirTemp, tp) for tp in args.tp] #-- folders for all timepoints
     dirTemplate = join(dirTemp,'template')
     dirTemplateInter = join(dirTemp, 'intermediateTemplates')
     dirTBSS = join(dirTemp,'TBSS')
@@ -1565,9 +1676,12 @@ def pipeline_delta_svd():
     fnSkelRegions = glob.glob(join(dirTBSS, 'stats','*_intersection*'))
     dirQC = join(args.dirOutput, 'delta-svd_qc')
     fnHTML = join(args.dirOutput, 'delta-svd_qc.html')
+    fnManifest = join(args.dirOutput, 'delta-svd_run_manifest.json')
+    fnManifestTemp = fnManifest + '.tmp'
     
     # Check if output exists already
-    outputExisting = [p for p in (dirTemp, fnCSV, dirQC, fnHTML) if os.path.exists(p)]
+    outputExisting = [p for p in (dirTemp, fnCSV, dirQC, fnHTML, fnManifest, fnManifestTemp)
+                      if os.path.exists(p)]
     if outputExisting:
 
         # all steps requested: simply delete everything
@@ -1579,10 +1693,12 @@ def pipeline_delta_svd():
                 raise DeltaSvdError("Output from a previous run exists already:\n"
                                     + '\n'.join(f'   {p}' for p in outputExisting)
                                     + "\n Use option '--reprocess' to reprocess and overwrite it.")
-            if os.path.exists(dirTemp): print(f'Deleting: {dirTemp}'); rmtree(dirTemp)
+            if os.path.exists(dirTemp): print(f'Deleting: {dirTemp}'); safe_rmtree(dirTemp, args.dirOutput)
             if os.path.exists(fnCSV): print(f'Deleting: {fnCSV}'); os.remove(fnCSV)
-            if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); rmtree(dirQC)
+            if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); safe_rmtree(dirQC, args.dirOutput)
             if os.path.exists(fnHTML): print(f'Deleting: {fnHTML}'); os.remove(fnHTML)
+            if os.path.exists(fnManifest): print(f'Deleting: {fnManifest}'); os.remove(fnManifest)
+            if os.path.exists(fnManifestTemp): print(f'Deleting: {fnManifestTemp}'); os.remove(fnManifestTemp)
 
         # otherwise check the output of each step separately
         else:
@@ -1630,8 +1746,21 @@ def pipeline_delta_svd():
                         if exists(fnT): 
                             warnFlag=True
                             print(f"Warning: Deleting for step '{k}' the already existing output: {fnT}")
-                            rmtree(fnT) if os.path.isdir(fnT) else os.remove(fnT)
+                            if os.path.isdir(fnT):
+                                safe_rmtree(fnT, args.dirOutput if k == 'qc' else dirTemp)
+                            else:
+                                os.remove(fnT)
             if not warnFlag: print('No problems detected!')
+
+            # The manifest describes the whole run, so any rerun of selected
+            # steps invalidates it even though it is not one processing step.
+            for fnT in (fnManifest, fnManifestTemp):
+                if os.path.exists(fnT):
+                    if args.reprocess is None:
+                        raise DeltaSvdError(f"Run manifest exists already:\n {fnManifest}\n "
+                                            "Use option '--reprocess' to reprocess and overwrite it.")
+                    print(f'Warning: Deleting the already existing run manifest: {fnT}')
+                    os.remove(fnT)
 
 
     if not os.path.exists(dirTemp):
@@ -1647,7 +1776,7 @@ def pipeline_delta_svd():
     startTime=None
     if 'fwc' in args.steps:
 
-        print("\nTime point(s) will be copied and processed in following folder(s):")
+        print("\nTimepoints will be copied and processed in following folder(s):")
         for i,tp in enumerate(dirTP):
             print(f' {tp}')
 
@@ -1701,7 +1830,7 @@ def pipeline_delta_svd():
     # Run template construction
     if 'template' in args.steps  and  len(dirTP)>1:
         Path(dirTemplate).mkdir(parents=True, exist_ok=True)
-        startTime = section_header('Template construction and co-registration of all images for all time-points', startTime)
+        startTime = section_header('Template construction and co-registration of all images for all timepoints', startTime)
         create_template(timepoints = dirTP, fnCoreg = fnCoreg, dirOut = dirTemplate, coreBudget = CORE_BUDGET, paraOverride = args.para, iterations=args.iterations, numRegistrations=args.numRegistrations, itkThreads=args.itkThreads)
 
     # Run TBSS
@@ -1743,8 +1872,8 @@ def pipeline_delta_svd():
         if Rmask is not None: 
             niiROI = nib.load(Rmask)
             imgROI = niiROI.get_fdata()
-            uROI = np.unique(imgROI)
-            uROI = uROI[uROI>0].astype('uint8')
+            uROI = validate_roi_labels(imgROI, 'ROI mask in DWI space', Rmask)
+            uROI = uROI[uROI>0]
             # one label at a time: the MNI registration does not use nearest-neighbor
             for roi in uROI:
                 imgT = imgROI.copy()
@@ -1774,7 +1903,7 @@ def pipeline_delta_svd():
         # Extract values
         nonFA.pop('bmask')
         for i in range(len(dirTP)):
-            startTime = section_header(f'Extract histogram statistics for {i+1}. timepoint in: {dirTP[i]}', startTime)
+            startTime = section_header(f'Calculate endpoint metrics for {i+1}. timepoint in: {dirTP[i]}', startTime)
             
             dfT = extract_stats(dirTP[i], dirTBSS, nonFA, skelMask = args.skeletonMask)
             dfL.append(dfT)
@@ -1783,14 +1912,14 @@ def pipeline_delta_svd():
         if args.id is not None:
             df.insert(0,'ID',args.id)
 
-        print('\n\nSummary statistics:\n')
+        print('\n\nResults table:\n')
         pd.set_option('display.max_rows', 1000)
         pd.set_option('display.max_columns', 10)
         pd.set_option('display.width', 1000)
         print(df)
 
         df.to_csv(fnCSV, index = False)
-        print(f'\nSummary statistics were saved to:\n{fnCSV}')
+        print(f'\nResults table was saved to:\n{fnCSV}')
 
 
     # Prepare images for QC
@@ -1807,7 +1936,15 @@ def pipeline_delta_svd():
         print(f'Keeping temporary folder: {dirTemp}')
     else:
         print(f'Deleting temporary folder: {dirTemp}')
-        rmtree(dirTemp)
+        safe_rmtree(dirTemp, args.dirOutput)
+
+    outputs = []
+    if 'extract' in args.steps:
+        outputs.append(os.path.basename(fnCSV))
+    if 'qc' in args.steps:
+        outputs.append(os.path.basename(fnHTML))
+    write_run_manifest(fnManifest, args, started_at, outputs)
+    print(f'Run manifest was saved to:\n{fnManifest}')
     
     elapsed = time.time() - start_script
     print('\nTotal duration: {:02.0f}:{:02.0f}\n'.format(elapsed//60, elapsed%60))

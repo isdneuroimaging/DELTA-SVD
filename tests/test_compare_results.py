@@ -10,7 +10,8 @@ HEADER = "ID,timepoint,skeleton,region,voxels,metric,value\n"
 
 def _rows(msmd="0.00073214", psmd="0.00042100", voxels="118432",
           skel="skel.nii.gz", psmd_name="PSMD"):
-    # a metrics row pair plus the kind of debugging row integrate_masks emits
+    # an endpoint-metrics row pair plus the kind of QC-bookkeeping row
+    # integrate_masks emits
     # (metric 'NA' / value 'NaN', which pandas reads back as missing values).
     # 'skel' and 'psmd_name' model a label rename between two runs.
     return (
@@ -72,6 +73,24 @@ def test_single_float32_ulp_metric_change_is_reported(compare_results, tmp_path)
     assert len(diffs) == 1, "a one-ULP move must be reported, not absorbed"
 
 
+def test_round_trip_parser_reports_distinct_serialized_values(compare_results, tmp_path, capsys):
+    # pandas' default parser rounds these adjacent binary64 values to the same
+    # float. The comparison tool promises exact comparison, so loading must not
+    # absorb the serialized distinction before compare() sees it.
+    fnB = _write(tmp_path, "before.csv", _rows(msmd="0.0008"))
+    fnA = _write(tmp_path, "after.csv", _rows(msmd="0.0008000000000000001"))
+
+    assert compare_results.main([str(fnB), str(fnA)]) == 1
+    output = capsys.readouterr().out
+    assert "value changed" in output
+    assert "before 0.0008  after 0.0008000000000000001" in output
+
+
+def test_round_trip_parser_does_not_split_identical_values(compare_results, tmp_path):
+    serialized = _rows(msmd="0.0008000000000000001")
+    assert _compare(compare_results, tmp_path, serialized, serialized) == []
+
+
 def test_changed_voxel_count_is_reported(compare_results, tmp_path):
     diffs = _compare(compare_results, tmp_path, _rows(), _rows(voxels="118429"))
     assert diffs, "a changed voxel count is a changed skeleton"
@@ -79,8 +98,8 @@ def test_changed_voxel_count_is_reported(compare_results, tmp_path):
 
 
 def test_compare_takes_no_tolerance_argument(compare_results, tmp_path):
-    # --rtol was retired: both run modes are bit-reproducible once --threads is
-    # pinned, so a tolerance could only ever hide a real change
+    # --rtol was retired: the pipeline pins the numerically relevant execution
+    # controls, so a tolerance could only ever hide a real change
     with pytest.raises(TypeError):
         _compare(compare_results, tmp_path, _rows(), _rows(), rtol=0.5)
 
