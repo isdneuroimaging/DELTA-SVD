@@ -144,6 +144,9 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 
+ROI_LABEL_DTYPE = 'uint16'
+ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
+
 from dipy.io import read_bvals_bvecs
 from dipy.core.gradients import gradient_table
 import dipy.reconst.dti as dti
@@ -692,6 +695,8 @@ def coreg_merge_masks(timepoints = [], masks = [], label=None, dirTemplate = Non
                     img = nii.get_fdata()
                     save_nifti(fnOut, img>0, nii.affine, nii.header, 'uint8')
                 else:
+                    nii = nib.load(fnIn)
+                    validate_roi_labels(nii.get_fdata(), 'ROI mask in DWI space', fnIn)
                     copy_as_nii_gz(fnIn, fnOut)
                 if len(timepoints)>1:
                     fnIn = fnOut
@@ -719,7 +724,8 @@ def merge_masks(fnMerge, fnOut):
         nii = nib.load(fn)
         img.append(nii.get_fdata())
     img = np.amax(np.stack(img,-1), -1)
-    save_nifti(fnOut, img, nii.affine, nii.header, 'uint8')
+    validate_roi_labels(img, 'ROI mask in DWI space', fnOut)
+    save_nifti(fnOut, img, nii.affine, nii.header, ROI_LABEL_DTYPE)
     
     return fnOut
 
@@ -860,11 +866,11 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timept.append(timeptT)
         region.append(skelSuffixT)
 
-        if iFn==0: imgROImerged = np.zeros(imgROI.shape, 'uint8')
+        if iFn==0: imgROImerged = np.zeros(imgROI.shape, ROI_LABEL_DTYPE)
         imgROImerged[imgROI>0] = int(roi)
         if iFn==len(fnROI)-1 and np.count_nonzero(imgROImerged)>0: 
             pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_Rmask.nii.gz')
-            save_nifti(pnameROImerged, imgROImerged, niiROI.affine, niiROI.header, dtype='uint8')
+            save_nifti(pnameROImerged, imgROImerged, niiROI.affine, niiROI.header, dtype=ROI_LABEL_DTYPE)
     # complementary ROI for the background
     if len(fnROI)>0:
         imgROI = maskIntersection.copy()
@@ -885,7 +891,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         niiROI_MNI = nib.load(fnROI_MNI)
         imgROI_MNI = niiROI_MNI.get_fdata()
         #- one file may carry several ROI labels
-        uROI = np.unique(imgROI_MNI.astype('uint8'))
+        uROI = validate_roi_labels(imgROI_MNI, 'ROI mask in MNI space', fnROI_MNI)
         # label 0 is deliberately kept, so the background is analysed as a ROI too
         for iRoi,roi in enumerate(uROI):
             imgROI_MNI_roi = maskIntersection.copy()
@@ -900,12 +906,12 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
             region.append(skelSuffixT)            
 
             #- merged after intersecting with the skeleton, so this differs from the input
-            if iRoi==0: imgROImerged = np.zeros(imgROI_MNI.shape, 'uint8')
+            if iRoi==0: imgROImerged = np.zeros(imgROI_MNI.shape, ROI_LABEL_DTYPE)
             if roi>0:
                 imgROImerged[imgROI_MNI_roi>0] = roi
             if iRoi==len(uROI)-1 and np.count_nonzero(imgROImerged)>0: 
                 pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_RmaskMNI.nii.gz')
-                save_nifti(pnameROImerged, imgROImerged, niiROI_MNI.affine, niiROI_MNI.header, dtype='uint8')
+                save_nifti(pnameROImerged, imgROImerged, niiROI_MNI.affine, niiROI_MNI.header, dtype=ROI_LABEL_DTYPE)
 
     
     if analyseHemispheres:
@@ -1130,17 +1136,41 @@ def binarise_mask(img, label, fname):
     return binary
 
 
+def validate_roi_labels(img, label, fname):
+    """Return sorted ROI labels after enforcing the public label contract."""
+    labels = np.unique(np.asarray(img))
+    invalid = labels[(~np.isfinite(labels)) |
+                     (labels < 0) |
+                     (labels > ROI_LABEL_MAX) |
+                     (labels != np.floor(labels))]
+    if invalid.size:
+        shown = ', '.join(str(value) for value in invalid[:5])
+        if invalid.size > 5:
+            shown += ', ...'
+        raise DeltaSvdError(
+            f"The provided {label} must contain only finite integer labels from 0 through "
+            f"{ROI_LABEL_MAX}:\n  {fname}\n  Unsupported value(s): {shown}")
+    return labels.astype(ROI_LABEL_DTYPE)
+
+
 def copy_as_nii_gz(fnIn, fnOut, dtype=None):
     """Place 'fnIn' at 'fnOut', whose name always ends in '.nii.gz'. A gzipped
     input is copied verbatim; an uncompressed one is re-encoded, because nibabel,
     FSL and ANTs pick the codec from the file *name*. 'dtype' defaults to the
-    input's own, keeping the re-encode faithful."""
+    input's own. With no dtype override, both the raw stored values and NIfTI
+    slope/intercept are retained so the decoded values stay exactly equal."""
     if fnIn.endswith('.nii.gz'):
         copy2(fnIn, fnOut)
     else:
         nii = nib.load(fnIn)
-        save_nifti(fnOut, nii.get_fdata(), nii.affine, nii.header,
-                   nii.get_data_dtype() if dtype is None else dtype)
+        if dtype is None:
+            raw = np.asanyarray(nii.dataobj.get_unscaled())
+            niiNew = nib.Nifti1Image(raw, nii.affine, nii.header)
+            niiNew.set_data_dtype(nii.get_data_dtype())
+            niiNew.header.set_slope_inter(nii.dataobj.slope, nii.dataobj.inter)
+            nib.save(niiNew, fnOut)
+        else:
+            save_nifti(fnOut, nii.get_fdata(), nii.affine, nii.header, dtype)
 
 
 def run_subprocess(cmd, displayStdout, label):
@@ -1449,8 +1479,8 @@ def iniParser():
     group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
     group1 = parser.add_argument_group('additional masking')
     group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
-    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Each mask can contain more than one integer label corresponding to different ROI, which will be analysed separately. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
-    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. Can contain integer labels for multiple ROI, which will be analysed separately.")
+    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
+    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0.")
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
     group2 = parser.add_argument_group('advanced options')
     group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/delta-svd_skeletonmask_v1.nii.gz", help="input path to an alternative skeleton mask. It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
@@ -1566,6 +1596,13 @@ def pipeline_delta_svd():
             # assigned back, so that a name resolved by extension or against the
             # DWI folder is the one every later step loads
             masks[i] = fnResolved
+
+    for fn in args.Rmask:
+        if fn is not None:
+            validate_roi_labels(nib.load(fn).get_fdata(), 'ROI mask in DWI space', fn)
+    if args.RmaskMNI is not None:
+        validate_roi_labels(nib.load(args.RmaskMNI).get_fdata(),
+                            'ROI mask in MNI space', args.RmaskMNI)
 
     print(f"\nInput contains N={len(args.dwi)} timepoints")
     for i in range(len(args.dwi)):
@@ -1833,8 +1870,8 @@ def pipeline_delta_svd():
         if Rmask is not None: 
             niiROI = nib.load(Rmask)
             imgROI = niiROI.get_fdata()
-            uROI = np.unique(imgROI)
-            uROI = uROI[uROI>0].astype('uint8')
+            uROI = validate_roi_labels(imgROI, 'ROI mask in DWI space', Rmask)
+            uROI = uROI[uROI>0]
             # one label at a time: the MNI registration does not use nearest-neighbor
             for roi in uROI:
                 imgT = imgROI.copy()

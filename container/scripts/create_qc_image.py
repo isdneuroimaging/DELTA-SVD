@@ -101,7 +101,9 @@ def create_qc_image(fnamesBG, vlim, labels=None, fnameMask=None, fnameBmask=None
         images[iImg] = ndimage.zoom(img, 5, order=0)
 
     imagesBG = images[0:nBG]
-    imgMask = np.ma.masked_array(images[nBG].astype(np.uint8), images[nBG]==0) 
+    # Keep label-bearing overlays wider than uint8: valid ROI labels such as
+    # 256 must remain visible rather than wrapping to transparent background.
+    imgMask = np.ma.masked_array(images[nBG], images[nBG]==0)
     imgBmask = [img>=1 for img in images[nBG+1:]] #--- transforms interpolate the masks, so threshold here at the latest
 
 

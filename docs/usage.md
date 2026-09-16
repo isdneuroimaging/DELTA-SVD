@@ -61,8 +61,8 @@ All masks are optional. Per-timepoint masks are given in DWI space (one per time
 | Option | Description |
 | --- | --- |
 | `--Emask` | Exclusion mask(s): the masked region (e.g. a lesion) is removed from the analysis. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
-| `--Rmask` | ROI mask(s) in DWI space. Integer labels define separate ROIs, each analysed on its own. |
-| `--RmaskMNI` | A single ROI mask in MNI space (may hold several integer labels). |
+| `--Rmask` | ROI mask(s) in DWI space. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. |
+| `--RmaskMNI` | A single ROI mask in MNI space. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. |
 | `--hemispheres` | Additionally report skeleton metrics separately for the left and right hemispheres. ROI masks are not split between hemispheres. |
 
 ## Output
@@ -98,8 +98,8 @@ The `region` column uses these values:
 | `set_difference` | Longitudinal QC count of voxels present at one timepoint but absent from the common intersection. |
 | `intersection_Emask` | Final intersection after applying the exclusion mask. |
 | `intersection_Rmask-00` | Background/complement of labelled DWI-space ROIs. |
-| `intersection_Rmask-XX` | Individual DWI-space ROI labels. |
-| `intersection_RmaskMNI-XX` | Individual MNI-space ROI labels, including background `00`. |
+| `intersection_Rmask-XX` | Individual DWI-space ROI labels, including background `00`; labels are formatted with at least two digits and without truncating wider labels. |
+| `intersection_RmaskMNI-XX` | Individual MNI-space ROI labels, including background `00`; labels are formatted with at least two digits and without truncating wider labels. |
 | `intersection_LH` / `intersection_RH` | Left/right skeleton regions; never ROI-by-hemisphere combinations. |
 
 Rows with `metric=NA` and `value=NaN` are QC-bookkeeping rows rather than endpoint metrics.

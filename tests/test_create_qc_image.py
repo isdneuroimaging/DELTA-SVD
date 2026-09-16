@@ -1,4 +1,5 @@
 import matplotlib.image as mpimg
+import matplotlib.axes
 import nibabel as nib
 import numpy as np
 import pytest
@@ -44,3 +45,31 @@ def test_create_qc_image_produces_expected_png_dimensions(tmp_path):
         height, width = img.shape[:2]
         assert height == shape[0] * zoom
         assert width == shape[1] * nSlices * zoom
+
+
+def test_create_qc_image_does_not_wrap_wide_roi_label_to_background(tmp_path, monkeypatch):
+    affine = np.eye(4)
+    shape = (10, 10, 12)
+    background = np.zeros(shape, dtype="float32")
+    mask = np.zeros(shape, dtype="uint16")
+    mask[3:7, 3:7, 3:9] = 256
+    bmask = np.ones(shape, dtype="uint8")
+
+    fnBG = _save(tmp_path, "background.nii.gz", background, affine)
+    fnMask = _save(tmp_path, "roi.nii.gz", mask, affine)
+    fnBmask = _save(tmp_path, "bmask.nii.gz", bmask, affine)
+
+    overlays = []
+    original_imshow = matplotlib.axes.Axes.imshow
+
+    def record_imshow(axis, image, *args, **kwargs):
+        if np.ma.isMaskedArray(image):
+            overlays.append(image.copy())
+        return original_imshow(axis, image, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "imshow", record_imshow)
+    cqi.create_qc_image(
+        [fnBG], [[0, 1]], fnameMask=fnMask, fnameBmask=fnBmask, animate=False)
+
+    assert overlays
+    assert np.any(overlays[0].compressed() == 256)

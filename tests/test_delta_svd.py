@@ -1305,6 +1305,51 @@ def test_integrate_masks_relabels_mni_rois_including_the_background(delta_svd, t
     assert merged.ravel().tolist() == [0, 0, 1, 1, 0, 0]
 
 
+def test_integrate_masks_preserves_wide_mni_labels(delta_svd, tmp_path):
+    kwargs, stats = _tbss_tree(
+        tmp_path,
+        skeleton=[1, 1, 1],
+        bmasks={"TP01": [1, 1, 1]},
+        mni=[0, 255, 256],
+    )
+
+    df = delta_svd.integrate_masks(**kwargs)
+
+    assert list(df["region"][-3:]) == [
+        "intersection_RmaskMNI-00",
+        "intersection_RmaskMNI-255",
+        "intersection_RmaskMNI-256",
+    ]
+    merged = nib.load(str(stats / "skel_intersection_RmaskMNI.nii.gz"))
+    assert merged.get_data_dtype() == np.dtype("uint16")
+    assert merged.get_fdata().ravel().tolist() == [0, 255, 256]
+
+
+def test_integrate_and_extract_preserve_wide_dwi_labels(delta_svd, tmp_path):
+    kwargs, stats = _tbss_tree(
+        tmp_path,
+        skeleton=[1, 1, 1],
+        bmasks={"TP01": [1, 1, 1]},
+        rois={"255": [0, 1, 0], "256": [0, 0, 1]},
+    )
+
+    df = delta_svd.integrate_masks(**kwargs)
+    assert list(df["region"][-3:]) == [
+        "intersection_Rmask-00", "intersection_Rmask-255", "intersection_Rmask-256",
+    ]
+    merged = nib.load(str(stats / "skel_intersection_Rmask.nii.gz"))
+    assert merged.get_data_dtype() == np.dtype("uint16")
+    assert merged.get_fdata().ravel().tolist() == [0, 255, 256]
+
+    nib.save(nib.Nifti1Image(_vol([1.0, 2.0, 3.0]), np.eye(4)),
+             str(stats / "all_TP01_MD_skeletonised.nii.gz"))
+    extracted = delta_svd.extract_stats(
+        dirTP=str(tmp_path / "TP01"), dirTBSS=str(tmp_path / "TBSS"),
+        fnNonFA={"MD": "unused"}, skelMask=str(tmp_path / "skel.nii.gz"),
+    )
+    assert {"intersection_Rmask-255", "intersection_Rmask-256"} <= set(extracted["region"])
+
+
 def test_integrate_masks_splits_hemispheres_along_the_first_axis(delta_svd, tmp_path):
     # Optional per-hemisphere analysis. The split is a plain index cut at
     # shape[0] // 2 with no image-orientation check, and 'LH' is the half that
@@ -1726,7 +1771,7 @@ def test_coreg_merge_masks_normalises_uncompressed_input_to_nii_gz(delta_svd, tm
     tp_dir = tmp_path / "TP01"
     tp_dir.mkdir()
     src = tmp_path / "roi.nii"
-    img = np.array([[[0, 2], [0, 1]]], dtype="uint8")
+    img = np.array([[[0, 256], [0, 255]]], dtype="uint16")
     nib.save(nib.Nifti1Image(img, np.eye(4)), str(src))
 
     fnOut = delta_svd.coreg_merge_masks(
@@ -1737,6 +1782,27 @@ def test_coreg_merge_masks_normalises_uncompressed_input_to_nii_gz(delta_svd, tm
     assert fnOut.endswith(".nii.gz")
     expected = (img > 0) if binarise else img
     assert np.array_equal(nib.load(fnOut).get_fdata(), expected.astype(float))
+    if not binarise:
+        assert nib.load(fnOut).get_data_dtype() == img.dtype
+
+
+def test_dwi_and_mni_paths_reject_the_same_invalid_roi_labels(delta_svd, tmp_path):
+    invalid = np.array([0, 1.5], dtype=float).reshape(2, 1, 1)
+    dwi_roi = tmp_path / "dwi-roi.nii.gz"
+    nib.save(nib.Nifti1Image(invalid, np.eye(4)), str(dwi_roi))
+    tp_dir = tmp_path / "TP01"
+    tp_dir.mkdir()
+
+    with pytest.raises(delta_svd.DeltaSvdError, match="finite integer labels from 0 through 65535"):
+        delta_svd.coreg_merge_masks(
+            timepoints=[str(tp_dir)], masks=[str(dwi_roi)], label="mask_test",
+            dirTemplate=str(tmp_path), binarise=False,
+        )
+
+    kwargs, _ = _tbss_tree(
+        tmp_path / "mni", skeleton=[1, 1], bmasks={"TP01": [1, 1]}, mni=[0, 1.5])
+    with pytest.raises(delta_svd.DeltaSvdError, match="finite integer labels from 0 through 65535"):
+        delta_svd.integrate_masks(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1765,6 +1831,55 @@ def test_copy_as_nii_gz_reencodes_uncompressed_input(delta_svd, tmp_path):
     assert dst.read_bytes()[:2] == b"\x1f\x8b"          # really gzipped
     assert np.array_equal(nib.load(str(dst)).get_fdata(), img.astype(float))
     assert nib.load(str(dst)).get_data_dtype() == img.dtype  # dtype preserved by default
+
+
+def test_copy_as_nii_gz_preserves_scaled_integer_values(delta_svd, tmp_path):
+    raw = np.array([0, 100], dtype="int8").reshape(2, 1, 1)
+    src = tmp_path / "scaled.nii"
+    image = nib.Nifti1Image(raw, np.eye(4))
+    image.header.set_slope_inter(2, 0)
+    nib.save(image, str(src))
+    dst = tmp_path / "scaled.nii.gz"
+
+    delta_svd.copy_as_nii_gz(str(src), str(dst))
+
+    copied = nib.load(str(dst))
+    assert copied.get_data_dtype() == raw.dtype
+    assert copied.dataobj.slope == 2
+    assert copied.get_fdata().ravel().tolist() == [0, 200]
+
+
+def test_scaled_compressed_and_uncompressed_inputs_remain_equivalent(delta_svd, tmp_path):
+    raw = np.array([0, 100], dtype="int8").reshape(2, 1, 1)
+    plain = tmp_path / "plain.nii"
+    compressed = tmp_path / "compressed.nii.gz"
+    for path in (plain, compressed):
+        image = nib.Nifti1Image(raw, np.eye(4))
+        image.header.set_slope_inter(2, 0)
+        nib.save(image, str(path))
+
+    normalised_plain = tmp_path / "normalised-plain.nii.gz"
+    normalised_compressed = tmp_path / "normalised-compressed.nii.gz"
+    delta_svd.copy_as_nii_gz(str(plain), str(normalised_plain))
+    delta_svd.copy_as_nii_gz(str(compressed), str(normalised_compressed))
+
+    plain_values = nib.load(str(normalised_plain)).get_fdata()
+    compressed_values = nib.load(str(normalised_compressed)).get_fdata()
+    assert np.array_equal(plain_values, compressed_values)
+    assert plain_values.ravel().tolist() == [0, 200]
+
+
+def test_validate_roi_labels_accepts_documented_boundaries(delta_svd):
+    labels = delta_svd.validate_roi_labels(
+        np.array([0, 255, 256, 65535], dtype=float), "ROI mask", "roi.nii.gz")
+    assert labels.dtype == np.dtype("uint16")
+    assert labels.tolist() == [0, 255, 256, 65535]
+
+
+@pytest.mark.parametrize("invalid", [-1, 0.5, 65536, np.nan, np.inf])
+def test_validate_roi_labels_rejects_unsupported_values(delta_svd, invalid):
+    with pytest.raises(delta_svd.DeltaSvdError, match="finite integer labels from 0 through 65535"):
+        delta_svd.validate_roi_labels(np.array([0, invalid]), "ROI mask", "roi.nii.gz")
 
 
 # ---------------------------------------------------------------------------
@@ -2332,6 +2447,8 @@ def test_mask_given_without_extension_is_resolved_for_later_steps(delta_svd, tmp
     for fn in [dwi, skel, mask, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
                tmp_path / "sub01_brainmask.nii"]:
         fn.touch()
+    if attr == "Rmask":
+        nib.save(nib.Nifti1Image(np.zeros((1, 1, 1), dtype="uint8"), np.eye(4)), str(mask))
 
     out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
         "--dwi", str(dwi), "--" + attr, "lesion", "--skeletonMask", str(skel),
