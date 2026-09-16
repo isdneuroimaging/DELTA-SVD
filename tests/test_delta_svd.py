@@ -3,6 +3,7 @@ import datetime
 import io
 import json
 import os
+import shlex
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -1955,6 +1956,22 @@ def test_pipeline_rejects_noncontiguous_steps(delta_svd, tmp_path, monkeypatch):
     ])
     with pytest.raises(ValueError, match="have to be contiguous"):
         delta_svd.pipeline_delta_svd()
+
+
+def test_pipeline_records_unambiguous_function_call(
+        delta_svd, tmp_path, monkeypatch, capsys):
+    dwi, skel = _minimal_pipeline_inputs(tmp_path)
+    argv = [
+        "delta-svd.py", "--dwi", str(dwi), "--skeletonMask", str(skel),
+        "--id", "subject '01'", "--steps", "fwc", "extract",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(ValueError, match="have to be contiguous"):
+        delta_svd.pipeline_delta_svd()
+
+    command = capsys.readouterr().out.split("Running: ", 1)[1].splitlines()[0]
+    assert shlex.split(command) == argv
 
 
 def test_pipeline_rejects_qc_zero_with_qc_step_requested(delta_svd, tmp_path, monkeypatch):

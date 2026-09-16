@@ -14,12 +14,12 @@ CSV_HEADER = "ID,timepoint,skeleton,region,voxels,metric,value\n"
 CSV_HEADER_NO_ID = "timepoint,skeleton,region,voxels,metric,value\n"
 
 
-def _write_fixture_csv(dirpath, subject_id, value_psmd, value_msmd):
+def _write_fixture_csv(dirpath, subject_id, value_psmd, value_msmd, timepoint="TP01"):
     dirpath.mkdir(parents=True, exist_ok=True)
     content = (
         CSV_HEADER
-        + f"{subject_id},TP01,skel.nii.gz,intersection,100,PSMD,{value_psmd}\n"
-        + f"{subject_id},TP01,skel.nii.gz,intersection,100,MSMD,{value_msmd}\n"
+        + f"{subject_id},{timepoint},skel.nii.gz,intersection,100,PSMD,{value_psmd}\n"
+        + f"{subject_id},{timepoint},skel.nii.gz,intersection,100,MSMD,{value_msmd}\n"
     )
     (dirpath / "delta-svd_results.csv").write_text(content)
 
@@ -137,6 +137,21 @@ def test_aggregate_globs_and_concatenates_all_result_files(tmp_path):
     assert "P01" in content
     assert "P02" in content
     assert content.count("PSMD") == 2
+
+
+@pytest.mark.parametrize("extra_args", [(), ("-p",)])
+def test_aggregate_preserves_literal_identifiers(tmp_path, extra_args):
+    _write_fixture_csv(tmp_path / "subject1", "001", "0.0004", "0.0007", "NA")
+    _write_fixture_csv(tmp_path / "subject2", "1", "0.0005", "0.0008", "01")
+    _write_fixture_csv(tmp_path / "subject3", "N/A", "0.0006", "0.0009", "NULL")
+
+    out = tmp_path / "agg.csv"
+    result = _run(str(tmp_path), "-o", str(out), *extra_args)
+
+    assert result.returncode == 0, result.stderr
+    rows = _read_rows(out)
+    assert {row["ID"] for row in rows} == {"001", "1", "N/A"}
+    assert {row["timepoint"] for row in rows} == {"NA", "01", "NULL"}
 
 
 def test_aggregate_split_writes_metrics_and_debugging_files(tmp_path):

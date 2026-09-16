@@ -1522,7 +1522,7 @@ def pipeline_delta_svd():
     # Carried on 'args' too, for the QC report to record.
     args.version = __version__
     print(f"DELTA-SVD {__version__}")
-    args.function_call = " ".join([basename(sys.argv[0])]+sys.argv[1::])
+    args.function_call = shlex.join([basename(sys.argv[0])]+sys.argv[1::])
     print("Running: " + args.function_call,'\n')
 
     # Check bval, bvec and bmask files. The brain mask may be '.nii.gz' or '.nii',

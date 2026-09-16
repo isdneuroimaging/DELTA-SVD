@@ -144,7 +144,7 @@ if __name__ == "__main__":
     fnamesOk = list()
     for file in fnames:
         try:
-            dfT = pd.read_csv(file)
+            dfT = pd.read_csv(file, converters={'ID': str, 'timepoint': str})
         except Exception:
             print('WARNING: Excluding file due to reading error:', file)
             continue
