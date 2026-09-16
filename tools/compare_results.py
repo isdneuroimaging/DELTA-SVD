@@ -69,7 +69,10 @@ def iniParser():
 def read_results(path):
     """Read a results table, failing loudly if it is not one."""
     try:
-        df = pd.read_csv(path)
+        # The default high-speed converter can round distinct decimal strings to
+        # the same float. Round-trip conversion preserves every distinction that
+        # is representable in the binary64 values compared below.
+        df = pd.read_csv(path, float_precision='round_trip')
     except Exception as err:
         raise ValueError(f"cannot read '{path}': {err}") from err
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
@@ -98,7 +101,7 @@ def _format_number(x):
     if pd.isna(x):
         return 'NaN'
     x = float(x)
-    return f'{int(x)}' if x.is_integer() else f'{x:.10g}'
+    return f'{int(x)}' if x.is_integer() else repr(x)
 
 
 def _describe_row_changes(before, after, keys):
@@ -122,10 +125,10 @@ def compare(dfBefore, dfAfter, ignore_keys=()):
     position, so a reordered table is not reported as a difference. Ignoring a key
     column weakens that: rows it no longer separates keep their file order.
 
-    Everything is compared exactly. Both run modes are bit-for-bit reproducible
-    for a fixed image, and longitudinal runs are too once '--threads'/'--para' are
-    pinned, so any difference at all is a real one - and the differences that
-    matter here can be as small as one float32 ULP (see CONTRIBUTING.md)."""
+    Everything is compared exactly. For a fixed image, '--threads' and '--para'
+    affect only scheduling; registration's numerically relevant thread count is
+    the hidden '--itkThreads', which must remain at its validated default. Thus a
+    difference can be as small as one float32 ULP (see CONTRIBUTING.md)."""
     keys = key_columns(dfBefore, dfAfter, ignore_keys)
     if not keys:
         if ignore_keys:
