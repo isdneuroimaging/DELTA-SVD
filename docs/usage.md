@@ -71,6 +71,9 @@ Written to the output folder:
 
 - **`delta-svd_results.csv`** — the results table. Endpoint metric rows contain the validated endpoints **MSMD** (mean skeletonised MD), **PSMD** (peak width of skeletonised MD) and **MSFW** (mean skeletonised free water), reported per timepoint and per region. The table also contains QC bookkeeping rows describing the analysed voxel sets; these have `metric=NA` and `value=NaN`.
 - **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and the exact command line that produced the run, so results stay traceable; see [Checking which version you have](install.md#checking-which-version-you-have). Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, `0` skips both.
+- **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It records the subject ID, processing mode, command, UTC timestamps, pipeline version, source revision, completed steps, QC mode, and output filenames.
+
+The run manifest is completion and provenance information; it is not required by the aggregation script, which continues to aggregate any matching results CSV.
 
 The results table has the following columns:
 

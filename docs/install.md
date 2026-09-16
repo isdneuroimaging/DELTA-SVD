@@ -89,7 +89,8 @@ apptainer run delta-svd.sif --version
 
 It prints `DELTA-SVD <version>` and exits. The same works for the aggregator (`apptainer exec delta-svd.sif delta-svd_aggregate_results.py --version`) and under Docker (`docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.1 --version`).
 
-Every run also reports its version in two other places, so results can be traced back after the fact:
+The version is also recorded with the run so results can be traced back after the fact:
 
 - the **first line of the run's console output**, ahead of the command line;
-- the **QC report** (`delta-svd_qc.html`), in the table at the top.
+- the **run manifest** (`delta-svd_run_manifest.json`) for successful runs, which records both the release version and the source revision embedded in the container;
+- the **QC report** (`delta-svd_qc.html`) when QC is enabled, in the table at the top.

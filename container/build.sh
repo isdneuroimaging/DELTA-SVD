@@ -6,8 +6,9 @@
 # timestamp (org.opencontainers.image.created) as build args so every image can
 # be traced back to the exact source it was built from.
 #
-# The version is read from the repo-root VERSION file (single source of truth,
-# also stamped into org.opencontainers.image.version).
+# The version is read from the repo-root VERSION file (single source of truth).
+# Docker writes it and the Git revision into runtime metadata files and stamps
+# the same values into the corresponding OCI labels.
 #
 # Usage:
 #   container/build.sh [IMAGE[:TAG]] [extra docker build args...]

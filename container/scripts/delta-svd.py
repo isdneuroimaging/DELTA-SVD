@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing
+import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime
 from os.path import join, exists, dirname, basename
 from shutil import copy2, rmtree
 from pathlib import Path
@@ -153,7 +153,7 @@ from dipy.reconst.dti import (design_matrix, decompose_tensor,
 from scipy.ndimage import gaussian_filter
 
 from markvcid_fw_mrn import wls_fit_tensor_fw, wls_fit_dti
-from delta_svd_version import __version__
+from delta_svd_version import __version__, __source_revision__
 
 
 class DeltaSvdError(ValueError):
@@ -1170,6 +1170,45 @@ def section_header(text, startPrevious = None):
     return time.time()
 
 
+def utc_timestamp(value=None):
+    """Return an RFC 3339 timestamp in UTC, using the manifest's Z form."""
+    if value is None:
+        value = datetime.datetime.now(datetime.timezone.utc)
+    return value.astimezone(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+
+def write_run_manifest(fname, args, startedAt, outputs, completedAt=None):
+    """Write the successful-run manifest atomically beside the final outputs.
+
+    The temporary file is only for protecting the small manifest write itself;
+    pipeline outputs continue to be written in their existing locations.
+    """
+    manifest = {
+        'manifest_schema_version': 1,
+        'pipeline': 'DELTA-SVD',
+        'pipeline_version': __version__,
+        'source_revision': __source_revision__,
+        'subject_id': args.id,
+        'processing_mode': 'longitudinal' if len(args.dwi) > 1 else 'cross_sectional',
+        'command': args.function_call,
+        'started_at': utc_timestamp(startedAt),
+        'completed_at': utc_timestamp(completedAt),
+        'steps_completed': list(args.steps),
+        'qc_mode': args.qc,
+        'outputs': list(outputs),
+    }
+    temporary = fname + '.tmp'
+    try:
+        with open(temporary, 'w') as fp:
+            json.dump(manifest, fp, indent=2)
+            fp.write('\n')
+        os.replace(temporary, fname)
+    except Exception:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+        raise
+
+
 NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
 
 
@@ -1407,6 +1446,7 @@ def iniParser():
 def pipeline_delta_svd():
 
     start_script = time.time()
+    started_at = datetime.datetime.now(datetime.timezone.utc)
     parser = iniParser()
     if len(sys.argv)<2:
         parser.print_usage()
@@ -1565,9 +1605,12 @@ def pipeline_delta_svd():
     fnSkelRegions = glob.glob(join(dirTBSS, 'stats','*_intersection*'))
     dirQC = join(args.dirOutput, 'delta-svd_qc')
     fnHTML = join(args.dirOutput, 'delta-svd_qc.html')
+    fnManifest = join(args.dirOutput, 'delta-svd_run_manifest.json')
+    fnManifestTemp = fnManifest + '.tmp'
     
     # Check if output exists already
-    outputExisting = [p for p in (dirTemp, fnCSV, dirQC, fnHTML) if os.path.exists(p)]
+    outputExisting = [p for p in (dirTemp, fnCSV, dirQC, fnHTML, fnManifest, fnManifestTemp)
+                      if os.path.exists(p)]
     if outputExisting:
 
         # all steps requested: simply delete everything
@@ -1583,6 +1626,8 @@ def pipeline_delta_svd():
             if os.path.exists(fnCSV): print(f'Deleting: {fnCSV}'); os.remove(fnCSV)
             if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); rmtree(dirQC)
             if os.path.exists(fnHTML): print(f'Deleting: {fnHTML}'); os.remove(fnHTML)
+            if os.path.exists(fnManifest): print(f'Deleting: {fnManifest}'); os.remove(fnManifest)
+            if os.path.exists(fnManifestTemp): print(f'Deleting: {fnManifestTemp}'); os.remove(fnManifestTemp)
 
         # otherwise check the output of each step separately
         else:
@@ -1632,6 +1677,16 @@ def pipeline_delta_svd():
                             print(f"Warning: Deleting for step '{k}' the already existing output: {fnT}")
                             rmtree(fnT) if os.path.isdir(fnT) else os.remove(fnT)
             if not warnFlag: print('No problems detected!')
+
+            # The manifest describes the whole run, so any rerun of selected
+            # steps invalidates it even though it is not one processing step.
+            for fnT in (fnManifest, fnManifestTemp):
+                if os.path.exists(fnT):
+                    if args.reprocess is None:
+                        raise DeltaSvdError(f"Run manifest exists already:\n {fnManifest}\n "
+                                            "Use option '--reprocess' to reprocess and overwrite it.")
+                    print(f'Warning: Deleting the already existing run manifest: {fnT}')
+                    os.remove(fnT)
 
 
     if not os.path.exists(dirTemp):
@@ -1808,6 +1863,14 @@ def pipeline_delta_svd():
     else:
         print(f'Deleting temporary folder: {dirTemp}')
         rmtree(dirTemp)
+
+    outputs = []
+    if 'extract' in args.steps:
+        outputs.append(os.path.basename(fnCSV))
+    if 'qc' in args.steps:
+        outputs.append(os.path.basename(fnHTML))
+    write_run_manifest(fnManifest, args, started_at, outputs)
+    print(f'Run manifest was saved to:\n{fnManifest}')
     
     elapsed = time.time() - start_script
     print('\nTotal duration: {:02.0f}:{:02.0f}\n'.format(elapsed//60, elapsed%60))

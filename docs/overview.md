@@ -37,5 +37,6 @@ Pass a single DWI for a **[cross-sectional](usage.md#cross-sectional-single-time
     - **PSMD** — peak width of skeletonised mean diffusivity; an established marker of white-matter damage in cSVD.
     - **MSFW** — mean skeletonised free water.
 - **`delta-svd_qc.html`** — a quality-control report with the skeleton and masks overlaid on the data.
+- **`delta-svd_run_manifest.json`** — a machine-readable record of the completed run, including its version, source revision, command, UTC timestamps, processing mode, and outputs.
 
 For guidance on which endpoint to report, see the **[FAQ](faq.md#what-are-msmd-psmd-and-msfw-and-which-should-i-report)**; for the full output detail and QC levels, see **[Usage](usage.md#output)**.

@@ -144,19 +144,20 @@ COPY container/third-party-licenses/ /opt/third-party-licenses/
 WORKDIR /opt/scripts
 COPY container/scripts/ .
 
-## Read by delta_svd_version.py for --version. A file, not an ENV: Apptainer
-## forwards the host environment in, which could then override it.
-COPY VERSION ./VERSION
+## Read by delta_svd_version.py for --version and run-manifest provenance. Files,
+## not ENV variables: Apptainer forwards the host environment in, which could
+## then override an ENV value. Both files and the labels use the same build args.
+## Keep these declarations here, after the expensive installation layers, so a
+## version or source-revision change does not invalidate those cached layers.
+ARG VERSION=unknown
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+RUN printf '%s\n' "$VERSION" > VERSION \
+ && printf '%s\n' "$VCS_REF" > SOURCE_REVISION
 
 USER nonroot
 ENTRYPOINT [ "python", "/opt/scripts/delta-svd.py" ]
 
-## Provenance from container/build.sh; Defaults allow a bare build. 'unknown',
-## not a version-shaped default: a bare build still copies the real VERSION
-## above, and a label contradicting it would be worse than an obvious blank.
-ARG VERSION=unknown
-ARG VCS_REF=unknown
-ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.version="$VERSION" \
     org.opencontainers.image.revision="$VCS_REF" \
     org.opencontainers.image.created="$BUILD_DATE"

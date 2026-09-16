@@ -1,7 +1,10 @@
 import argparse
+import datetime
 import io
+import json
 import os
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import nibabel as nib
@@ -10,6 +13,48 @@ import pytest
 from dipy.core.gradients import gradient_table
 from dipy.reconst.dti import decompose_tensor, design_matrix, from_lower_triangular
 import dipy.reconst.dti as dti
+
+
+def test_utc_timestamp_uses_rfc3339_z_suffix(delta_svd):
+    value = datetime.datetime(2026, 9, 16, 10, 15, 22,
+                              tzinfo=datetime.timezone.utc)
+    assert delta_svd.utc_timestamp(value) == "2026-09-16T10:15:22Z"
+
+
+def test_run_manifest_records_run_details_and_outputs(delta_svd, tmp_path, monkeypatch):
+    args = SimpleNamespace(
+        id="sub-01",
+        dwi=["ses-1.nii.gz", "ses-2.nii.gz"],
+        function_call="delta-svd.py --dwi ses-1.nii.gz ses-2.nii.gz",
+        steps=["fwc", "template", "extract"],
+        qc=0,
+    )
+    monkeypatch.setattr(delta_svd, "__source_revision__", "abc1234")
+    started = datetime.datetime(2026, 9, 16, 10, 15, 22,
+                                tzinfo=datetime.timezone.utc)
+    completed = datetime.datetime(2026, 9, 16, 10, 47, 3,
+                                  tzinfo=datetime.timezone.utc)
+    manifest = tmp_path / "delta-svd_run_manifest.json"
+
+    delta_svd.write_run_manifest(
+        str(manifest), args, started, ["delta-svd_results.csv"], completed)
+
+    data = json.loads(manifest.read_text())
+    assert data == {
+        "manifest_schema_version": 1,
+        "pipeline": "DELTA-SVD",
+        "pipeline_version": delta_svd.__version__,
+        "source_revision": "abc1234",
+        "subject_id": "sub-01",
+        "processing_mode": "longitudinal",
+        "command": args.function_call,
+        "started_at": "2026-09-16T10:15:22Z",
+        "completed_at": "2026-09-16T10:47:03Z",
+        "steps_completed": ["fwc", "template", "extract"],
+        "qc_mode": 0,
+        "outputs": ["delta-svd_results.csv"],
+    }
+    assert not (tmp_path / "delta-svd_run_manifest.json.tmp").exists()
 
 
 # ---------------------------------------------------------------------------
