@@ -6,12 +6,12 @@ icon: lucide/sliders-horizontal
 
 ## CPU usage and threading
 
-Two steps use more than one core:
+Two parts of the pipeline use more than one core:
 
-- the **diffusion tensor and free-water fit**, spread across worker processes;
+- the **diffusion tensor and free-water fit**, spread across worker processes in both cross-sectional and longitudinal runs;
 - the **within-subject template construction**, which runs only for longitudinal input (more than one timepoint) and registers the timepoints in parallel.
 
-TBSS and the remaining steps are single-threaded, and a cross-sectional run performs no registration at all.
+Every run also performs TBSS registration. That registration and the remaining steps are effectively single-threaded here; cross-sectional runs omit only the additional within-subject template construction.
 
 `--threads` sets how many physical CPU cores DELTA-SVD may use:
 
@@ -34,7 +34,7 @@ Work is spread across the available cores automatically; you do not need to tune
 
 ## Reproducibility
 
-Registration divides its similarity metric across threads and sums the parts, so the thread count changes the order of that summation and with it the last bits of the result. That would normally be negligible, but the white matter skeleton is derived by thresholding an interpolated mask, which turns those last bits into whole voxels moving in or out of the skeleton, enough to shift the longitudinal metrics measurably.
+Longitudinal ANTs registration divides its similarity metric across threads and sums the parts, so the thread count changes the order of that summation and with it the last bits of the result. That would normally be negligible, but the white matter skeleton is derived by thresholding an interpolated mask, which turns those last bits into whole voxels moving in or out of the skeleton, enough to shift the longitudinal metrics measurably.
 
 DELTA-SVD therefore fixes the registration thread count at the value the method was validated with, instead of deriving it from the cores available. This is why `--threads` and `--para` affect only runtime and memory: they decide how many registrations run at once, never how each one is computed.
 
@@ -46,7 +46,7 @@ Because only the two steps above are multi-core (and one of them only for longit
 
 ### Cross-sectional runs
 
-Allocate **one core**. There is no registration step, and nothing to gain from more.
+For throughput, allocate **one core per subject** and run subjects side by side. Cross-sectional runs still perform TBSS registration, but it is effectively single-threaded; additional cores only shorten the tensor and free-water fit, so use more when turnaround time matters rather than for the best core-hour efficiency.
 
 ### Longitudinal runs
 

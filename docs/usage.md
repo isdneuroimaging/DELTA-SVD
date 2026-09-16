@@ -70,10 +70,25 @@ All masks are optional. Per-timepoint masks are given in DWI space (one per time
 Written to the output folder:
 
 - **`delta-svd_results.csv`** — the results table. Endpoint metric rows contain the validated endpoints **MSMD** (mean skeletonised MD), **PSMD** (peak width of skeletonised MD) and **MSFW** (mean skeletonised free water), reported per timepoint and per region. The table also contains QC bookkeeping rows describing the analysed voxel sets; these have `metric=NA` and `value=NaN`.
-- **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and the exact command line that produced the run, so results stay traceable; see [Checking which version you have](install.md#checking-which-version-you-have). Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, `0` skips both.
-- **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It records the subject ID, processing mode, command, UTC timestamps, pipeline version, source revision, completed steps, QC mode, and output filenames.
+- **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and all command-line arguments used for the run, including values containing spaces or quotes, so results remain traceable. Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, `0` skips both.
+- **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It uses the versioned schema below and records the same command information as the QC report.
 
 The run manifest is completion and provenance information; it is not required by the aggregation script, which continues to aggregate any matching results CSV.
+
+### Run manifest schema
+
+`manifest_schema_version` is currently `1`. The remaining fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `pipeline` / `pipeline_version` / `source_revision` | Pipeline identity, release version, and source revision embedded in the image. |
+| `subject_id` | Value supplied with `--id`, or `null` when it was omitted. |
+| `processing_mode` | `cross_sectional` for one DWI or `longitudinal` for multiple timepoints. |
+| `command` | Command used for the run, recorded so that every argument can be identified unambiguously. |
+| `started_at` / `completed_at` | UTC RFC 3339 timestamps. |
+| `steps_completed` | Requested processing steps completed before the manifest was written. |
+| `qc_mode` | Numeric `--qc` mode used for the run. |
+| `outputs` | Final result and QC filenames produced by the requested steps; the manifest does not list itself. |
 
 The results table has the following columns:
 
@@ -96,11 +111,11 @@ The `region` column uses these values:
 | `total` | Total skeleton-mask voxel count before intersection; QC bookkeeping only. |
 | `intersection` | Voxels shared by the relevant brain masks and skeleton. |
 | `set_difference` | Longitudinal QC count of voxels present at one timepoint but absent from the common intersection. |
-| `intersection_Emask` | Final intersection after applying the exclusion mask. |
+| `intersection_Emask` | Final intersection after applying the exclusion mask. When other analyses are requested, this prefix is retained in combinations such as `intersection_Emask_Rmask-01`, `intersection_Emask_RmaskMNI-01`, and `intersection_Emask_LH`. |
 | `intersection_Rmask-00` | Background/complement of labelled DWI-space ROIs. |
 | `intersection_Rmask-XX` | Individual DWI-space ROI labels, including background `00`; labels are formatted with at least two digits and without truncating wider labels. |
 | `intersection_RmaskMNI-XX` | Individual MNI-space ROI labels, including background `00`; labels are formatted with at least two digits and without truncating wider labels. |
-| `intersection_LH` / `intersection_RH` | Left/right skeleton regions; never ROI-by-hemisphere combinations. |
+| `intersection_LH` / `intersection_RH` | Left/right skeleton regions. With an exclusion mask these become `intersection_Emask_LH` / `intersection_Emask_RH`; ROI-by-hemisphere combinations are never produced. |
 
 Rows with `metric=NA` and `value=NaN` are QC-bookkeeping rows rather than endpoint metrics.
 

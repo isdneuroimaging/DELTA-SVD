@@ -979,6 +979,8 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
             print( ' voxels  :',len(skel))
             mean = np.mean(skel) if len(skel)>0 else np.nan
 
+            # Preserve the legacy ncMD/ncFW aliases for callers of this helper.
+            # The current pipeline passes MD/FW, so this has no effect on new runs.
             mT = re.sub(r'^nc','',mapName)
             if mT == 'MD':
                 prcts = np.percentile(skel,[5,95]) if len(skel)>0 else [np.nan]*2

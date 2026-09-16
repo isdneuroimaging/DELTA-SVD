@@ -51,7 +51,7 @@ Rules for the runs being compared:
 - **Judge by the longitudinal change (ΔPSMD), not the per-timepoint values.** ΔPSMD is by far the most sensitive readout: a diff that looks negligible per timepoint can still be a large change in the endpoint the pipeline exists to produce.
 
 > [!WARNING]
-> A cross-sectional-only check is not sufficient. The longitudinal path turns arbitrarily small numerical differences into discrete, reportable ones: the skeleton comes from thresholding an interpolated *binary* brain mask at exactly 1, so every boundary voxel sits on a knife edge, and a sub-voxel shift in the deformation re-decides those ties. The cross-sectional path has no such step and can absorb the same change completely.
+> A cross-sectional-only check is not sufficient. Both modes threshold the interpolated, skeletonised brain mask at exactly 1, so every boundary voxel sits on a knife edge. A longitudinal check additionally exercises within-subject template construction and measures the longitudinal change (the pipeline's most sensitive readout), so it remains the required validation path.
 
 ### Repository layout
 
@@ -162,7 +162,7 @@ There is one deliberate exception, documented in the lock's own header: the four
 
 ## Documentation
 
-The documentation site is built with [Zensical](https://zensical.org/), a static site generator by the [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) team. It reads the standard [`mkdocs.yml`](mkdocs.yml); all content lives in [`docs/`](docs/) as Markdown, which stays readable directly on GitHub. The site is published to GitHub Pages by the [`docs` workflow](.github/workflows/docs.yml) on every push to `main` that touches `docs/`, `overrides/`, `mkdocs.yml`, or the workflow itself. Pull requests touching those same paths run the build without deploying, so a broken link or a stale `nav:` entry fails the strict build on the pull request rather than on `main`.
+The documentation site is built with [Zensical](https://zensical.org/), a static site generator by the [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) team. It reads [`zensical.toml`](zensical.toml); all content lives in [`docs/`](docs/) as Markdown, which stays readable directly on GitHub. The site is published to GitHub Pages by the [`docs` workflow](.github/workflows/docs.yml) on every push to `main` that touches `docs/`, `overrides/`, `zensical.toml`, or the workflow itself. Pull requests touching those same paths run the build without deploying, so a broken link or a stale navigation entry fails the strict build on the pull request rather than on `main`.
 
 ### One-time setup
 
@@ -195,12 +195,12 @@ CI builds with `--strict`, which fails on broken links or nav entries. Run the s
 
 ### Editing content
 
-- Add or edit Markdown files under `docs/`, then register new pages in the `nav:` section of [`mkdocs.yml`](mkdocs.yml) so they appear in the site navigation (and to keep the strict build happy).
+- Add or edit Markdown files under `docs/`, then register new pages in the `nav` array of [`zensical.toml`](zensical.toml) so they appear in the site navigation (and to keep the strict build happy).
 - GitHub-style alerts work as-is: write `> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, or `> [!CAUTION]` and they render as native alerts on GitHub and as admonitions on the site.
 
 ### Link previews
 
-Every page carries Open Graph and Twitter card tags, so a link to the site unfurls with a preview image, its page title, and a description instead of a bare URL. The theme emits none of these itself; they come from [`overrides/main.html`](overrides/main.html), which the `theme.custom_dir` setting in [`mkdocs.yml`](mkdocs.yml) layers over the stock templates.
+Every page carries Open Graph and Twitter card tags, so a link to the site unfurls with a preview image, its page title, and a description instead of a bare URL. The theme emits none of these itself; they come from [`overrides/main.html`](overrides/main.html), which the `project.theme.custom_dir` setting in [`zensical.toml`](zensical.toml) layers over the stock templates.
 
 All pages share one preview image, [`docs/assets/og-image.png`](docs/assets/og-image.png). It is committed to the repository, not generated during the build; [`tools/make_og_image.py`](tools/make_og_image.py) renders it (1200×630, the size every major scraper expects) from the pipeline figure on the landing page. Re-run it after changing that figure or the card design, on any Python that has [Pillow](https://pypi.org/project/pillow/) installed, and commit the result:
 

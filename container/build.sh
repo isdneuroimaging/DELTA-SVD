@@ -16,7 +16,7 @@
 # Examples:
 #   container/build.sh                          # -> delta-svd:<VERSION>
 #   container/build.sh delta-svd:dev
-#   container/build.sh ghcr.io/isdneuroimaging/delta-svd:1.0.0 --no-cache
+#   container/build.sh ghcr.io/isdneuroimaging/delta-svd:<version> --no-cache
 #
 set -euo pipefail
 
