@@ -1104,7 +1104,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
     create_html_with_png(fnHTML, fnPNG, captions, None, fnCSV, args)
 
     if args.qc < 2:
-        rmtree(dirQC)
+        safe_rmtree(dirQC, args.dirOutput)
 
 
 ###########################################################################
@@ -1324,6 +1324,37 @@ def isCSV(s):
         return s
     else:
         raise argparse.ArgumentTypeError(f"--reprocess filename must end in '.csv'; you provided '{s}'")
+
+def validate_timepoint_labels(labels):
+    reserved = {'template', 'intermediateTemplates', 'TBSS'}
+    for label in labels:
+        if os.path.isabs(label):
+            reason = 'is an absolute path'
+        elif '..' in re.split(r'[\\/]', label):
+            reason = 'contains path traversal'
+        elif '/' in label or '\\' in label:
+            reason = 'contains a path separator'
+        elif label in reserved:
+            reason = 'collides with an internal working directory'
+        elif label in ('', '.'):
+            reason = 'is not a usable directory name'
+        else:
+            continue
+        raise DeltaSvdError(f"Invalid timepoint label given with '--tp': '{label}' {reason}. "
+                            "Use a plain label such as 'TP01' or 'ses-1', not a path or an "
+                            "internal directory name.")
+
+def safe_rmtree(path, parent):
+    pathReal = os.path.realpath(os.path.abspath(path))
+    parentReal = os.path.realpath(os.path.abspath(parent))
+    try:
+        contained = os.path.commonpath([pathReal, parentReal]) == parentReal
+    except ValueError:
+        contained = False
+    if not contained or pathReal == parentReal:
+        raise DeltaSvdError(f"Refusing to recursively delete path outside its intended output "
+                            f"directory: {path}")
+    rmtree(path)
     
 def assertPositiveJobs(s):
     try:
@@ -1413,7 +1444,7 @@ def iniParser():
     group0.add_argument("--bval", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-values in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bval'")
     group0.add_argument("--bvec", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-vectors in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient.  If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bvec'")
     group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
-    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all timepoints. Number of arguments should correspond to number of DWI image(s). Labels have to be unique, and 'all' is reserved for the rows summarising all timepoints. If argument not provided, timepoints are labelled consecutively as TP01, TP02, and so on.")
+    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all timepoints. Number of arguments should correspond to number of DWI image(s). Labels must be plain names without path separators or traversal and must not collide with internal working directories. Labels have to be unique, and 'all' is reserved for the rows summarising all timepoints. If argument not provided, timepoints are labelled consecutively as TP01, TP02, and so on.")
     group0.add_argument("--id", metavar='label', type=str, help="optional subject ID. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple subjects.")
     group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
     group1 = parser.add_argument_group('additional masking')
@@ -1498,6 +1529,7 @@ def pipeline_delta_svd():
     if len(args.tp) != len(args.dwi):
         raise DeltaSvdError(f"The number of timepoint labels given with '--tp' (n={len(args.tp)}) has "
                             f"to match the number of DWI images (n={len(args.dwi)}).")
+    validate_timepoint_labels(args.tp)
     duplicates = sorted({tp for tp in args.tp if args.tp.count(tp) > 1})
     if duplicates:
         raise DeltaSvdError(f"Timepoint labels given with '--tp' have to be unique. You passed "
@@ -1622,9 +1654,9 @@ def pipeline_delta_svd():
                 raise DeltaSvdError("Output from a previous run exists already:\n"
                                     + '\n'.join(f'   {p}' for p in outputExisting)
                                     + "\n Use option '--reprocess' to reprocess and overwrite it.")
-            if os.path.exists(dirTemp): print(f'Deleting: {dirTemp}'); rmtree(dirTemp)
+            if os.path.exists(dirTemp): print(f'Deleting: {dirTemp}'); safe_rmtree(dirTemp, args.dirOutput)
             if os.path.exists(fnCSV): print(f'Deleting: {fnCSV}'); os.remove(fnCSV)
-            if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); rmtree(dirQC)
+            if os.path.exists(dirQC): print(f'Deleting: {dirQC}'); safe_rmtree(dirQC, args.dirOutput)
             if os.path.exists(fnHTML): print(f'Deleting: {fnHTML}'); os.remove(fnHTML)
             if os.path.exists(fnManifest): print(f'Deleting: {fnManifest}'); os.remove(fnManifest)
             if os.path.exists(fnManifestTemp): print(f'Deleting: {fnManifestTemp}'); os.remove(fnManifestTemp)
@@ -1675,7 +1707,10 @@ def pipeline_delta_svd():
                         if exists(fnT): 
                             warnFlag=True
                             print(f"Warning: Deleting for step '{k}' the already existing output: {fnT}")
-                            rmtree(fnT) if os.path.isdir(fnT) else os.remove(fnT)
+                            if os.path.isdir(fnT):
+                                safe_rmtree(fnT, args.dirOutput if k == 'qc' else dirTemp)
+                            else:
+                                os.remove(fnT)
             if not warnFlag: print('No problems detected!')
 
             # The manifest describes the whole run, so any rerun of selected
@@ -1862,7 +1897,7 @@ def pipeline_delta_svd():
         print(f'Keeping temporary folder: {dirTemp}')
     else:
         print(f'Deleting temporary folder: {dirTemp}')
-        rmtree(dirTemp)
+        safe_rmtree(dirTemp, args.dirOutput)
 
     outputs = []
     if 'extract' in args.steps:

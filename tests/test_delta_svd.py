@@ -1887,6 +1887,81 @@ def test_pipeline_rejects_all_as_a_longitudinal_timepoint_label(delta_svd, tmp_p
         delta_svd.pipeline_delta_svd()
 
 
+@pytest.mark.parametrize(
+    ("label", "message"),
+    [("../other", "path traversal"), ("visit/one", "path separator"),
+     (r"visit\one", "path separator"), ("template", "internal working directory"),
+     ("intermediateTemplates", "internal working directory"),
+     ("TBSS", "internal working directory")],
+)
+def test_rejects_unsafe_timepoint_labels(delta_svd, label, message):
+    with pytest.raises(ValueError, match=message):
+        delta_svd.validate_timepoint_labels([label])
+
+
+@pytest.mark.parametrize("kind", ["absolute", "traversal"])
+def test_unsafe_reprocessing_leaves_unrelated_files_untouched(
+        delta_svd, tmp_path, monkeypatch, kind):
+    dwi, skel = _minimal_pipeline_inputs(tmp_path)
+    output = tmp_path / "output"
+    (output / "delta-svd_temp").mkdir(parents=True)
+    unrelated = (tmp_path if kind == "absolute" else output) / "other"
+    unrelated.mkdir()
+    sentinel = unrelated / "keep.txt"
+    sentinel.write_text("untouched")
+    label = str(unrelated) if kind == "absolute" else "../other"
+    monkeypatch.setattr(sys, "argv", _argv(
+        [dwi], skel, "--tp", label, "--dirOutput", str(output),
+        "--steps", "fwc", "--reprocess"))
+
+    with pytest.raises(ValueError, match="absolute path|path traversal"):
+        delta_svd.pipeline_delta_svd()
+
+    assert sentinel.read_text() == "untouched"
+
+
+@pytest.mark.parametrize("label", ["TP01", "ses-1", "visit.1", "visit one"])
+def test_accepts_plain_timepoint_labels(delta_svd, label):
+    delta_svd.validate_timepoint_labels([label])
+
+
+def test_valid_timepoint_reprocessing_only_replaces_its_working_directory(
+        delta_svd, tmp_path, monkeypatch):
+    dwi, skel = _minimal_pipeline_inputs(tmp_path)
+    output = tmp_path / "output"
+    timepoint = output / "delta-svd_temp" / "V1"
+    timepoint.mkdir(parents=True)
+    stale = timepoint / "stale.txt"
+    stale.touch()
+    sentinel = output / "keep.txt"
+    sentinel.write_text("untouched")
+    monkeypatch.setattr(sys, "argv", _argv(
+        [dwi], skel, "--tp", "V1", "--dirOutput", str(output),
+        "--steps", "fwc", "--reprocess"))
+    monkeypatch.setattr(delta_svd, "filter_b_values",
+                        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("stop")))
+
+    with pytest.raises(RuntimeError, match="stop"):
+        delta_svd.pipeline_delta_svd()
+
+    assert timepoint.is_dir() and not stale.exists()
+    assert sentinel.read_text() == "untouched"
+
+
+def test_recursive_delete_requires_containment(delta_svd, tmp_path):
+    allowed = tmp_path / "output"
+    unrelated = tmp_path / "other"
+    allowed.mkdir()
+    unrelated.mkdir()
+    sentinel = unrelated / "keep.txt"
+    sentinel.touch()
+
+    with pytest.raises(ValueError, match="Refusing to recursively delete"):
+        delta_svd.safe_rmtree(str(unrelated), str(allowed))
+
+    assert sentinel.exists()
+
+
 def test_pipeline_accepts_distinct_timepoint_labels(delta_svd, tmp_path, monkeypatch):
     # a well-formed run must get through, as far as the step check further down
     dwi, dwi2, skel = _two_timepoint_inputs(tmp_path)
