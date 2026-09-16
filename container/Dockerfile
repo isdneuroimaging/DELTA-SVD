@@ -73,7 +73,9 @@ RUN apt-get update -qq && apt-get install -y -q --no-install-recommends \
         dc=1.07.1* \
         locales=2.39* \
         wget=1.21.4* \
- && useradd --system --no-create-home --shell /usr/sbin/nologin nonroot \
+ && groupadd --system --gid 999 nonroot \
+ && useradd --system --uid 999 --gid 999 \
+        --no-create-home --shell /usr/sbin/nologin nonroot \
  && sed -i -e 's/# en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen \
  && dpkg-reconfigure --frontend=noninteractive locales \
  && update-locale LANG="en_US.UTF-8" \
@@ -155,7 +157,7 @@ ARG BUILD_DATE=unknown
 RUN printf '%s\n' "$VERSION" > VERSION \
  && printf '%s\n' "$VCS_REF" > SOURCE_REVISION
 
-USER nonroot
+USER 999:999
 ENTRYPOINT [ "python", "/opt/scripts/delta-svd.py" ]
 
 LABEL org.opencontainers.image.version="$VERSION" \
