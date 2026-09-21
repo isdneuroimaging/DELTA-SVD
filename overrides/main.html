@@ -1,10 +1,21 @@
 {% extends "base.html" %}
 
-{% block title %}
-  {% if page.is_homepage %}
-    {{ config.site_name }}
+{#
+  zensical's base.html block is named 'htmltitle' (not 'title', as in
+  mkdocs-material) and concatenates page title + site_name unconditionally,
+  which doubles "DELTA-SVD - DELTA-SVD" when a page's title equals the site
+  name (e.g. the landing page, whose title comes from its "# DELTA-SVD" H1).
+#}
+{% block htmltitle %}
+  {% if page.meta and page.meta.title %}
+    {% set page_title = page.meta.title %}
+  {% elif page.title %}
+    {% set page_title = page.title | striptags %}
+  {% endif %}
+  {% if page_title and page_title != config.site_name %}
+    <title>{{ page_title }} - {{ config.site_name }}</title>
   {% else %}
-    {{ super() }}
+    <title>{{ config.site_name }}</title>
   {% endif %}
 {% endblock %}
 
