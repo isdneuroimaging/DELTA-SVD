@@ -1,8 +1,5 @@
 # Security Policy
 
-> [!WARNING]
-> **Research use only, not a medical device.** DELTA-SVD is intended solely for research. It is not a medical device, has not been reviewed or approved by any regulatory authority, and must not be used for clinical diagnosis, treatment, or other medical decisions. The software is provided "as is", without warranty of any kind; to the fullest extent permitted by law, the authors accept no liability for any damages arising from its use.
-
 ## Supported versions
 
 Only the most recently published release is supported: security fixes land on `main` and go out in the next release, and older release lines are not maintained separately, so upgrading is the only way to get a fix.

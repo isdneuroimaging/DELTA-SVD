@@ -15,13 +15,7 @@ We try to respond where we can, but cannot commit to any particular response tim
 
 ## Which version am I running?
 
-Ask the image directly:
-
-```
-apptainer run delta-svd.sif --version
-```
-
-Every run also names its version on the **first line of its console output** and in the table at the top of the **QC report** (`delta-svd_qc.html`), so a finished analysis can be traced back to the version that produced it. This matters because results from different `MAJOR.MINOR` versions must not be compared or pooled; see [Installation](install.md#checking-which-version-you-have).
+Ask the image directly with `apptainer run delta-svd.sif --version`, or check a finished run's console output, QC report, or run manifest. See [Checking which version you have](install.md#checking-which-version-you-have) for details.
 
 ## What are MSMD, PSMD and MSFW, and which should I report?
 
@@ -45,7 +39,7 @@ Because of these methodological differences, the PSMD values produced by DELTA-S
 
 ## Can I use multi-shell data?
 
-**Yes.** DELTA-SVD fits the tensor on b-values around b = 1000 s/mm² (default range 800–1200, together with the b ≈ 0 volumes) and selects the appropriate shell(s) from your data automatically, so multi-shell acquisitions are fine. If you need a different selection, `--bRange` sets the limits and `--shells` names the shells individually. On multi-shell data `--shells` is the safer choice, because it does not pull in the shells lying between the ones you want. The b ≈ 0 volumes are always kept either way. See [Data requirements](requirements.md) and [Selecting the b-values](advanced-usage.md#selecting-the-b-values).
+**Yes.** DELTA-SVD automatically selects the appropriate shell(s) around b = 1000 s/mm² from your data; `--bRange` or `--shells` can override the selection. See [Selecting the b-values](advanced-usage.md#selecting-the-b-values).
 
 ## Can I use my b = 2000 data?
 
@@ -73,11 +67,7 @@ That happens because the container runs as its own non-root user. Run it as your
 
 ## How many CPU cores should I request on a cluster?
 
-For cross-sectional throughput, **one core per subject** is usually the most efficient allocation. These runs still perform TBSS registration, which is effectively single-threaded here, while additional cores can shorten the tensor and free-water fit when turnaround time matters.
-
-For longitudinal runs, **one core per subject** is usually the most efficient choice: it processes many subjects side by side for the fewest core-hours. If a single subject's turnaround matters instead, **12 to 24 cores** is the sweet spot. Larger allocations help far less than they look like they should, because a substantial part of every run is single-threaded and takes the same time however many cores it has, so those cores sit idle for that whole stretch.
-
-See [Running on an HPC cluster](advanced-usage.md#running-on-an-hpc-cluster).
+For throughput (the usual case), **one core per subject**, run side by side. For a single subject's turnaround time on longitudinal data, 12–24 cores is the sweet spot; larger allocations help little, since much of the run is single-threaded. See [Running on an HPC cluster](advanced-usage.md#running-on-an-hpc-cluster).
 
 ## The pipeline refuses to overwrite existing output. What do I do?
 

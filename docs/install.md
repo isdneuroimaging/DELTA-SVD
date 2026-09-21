@@ -28,10 +28,10 @@ No separate Python, FSL, or ANTs installation is required; those are all provide
 
 ## Getting the image
 
-The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**: results from a different `MAJOR.MINOR` version can't be pooled (see below), so every run has to name the version it uses and none can silently pick up a newer one.
+The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**, so every run has to name the version it uses.
 
 > [!IMPORTANT]
-> **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Bug-fix releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. A patch may correct an optional derived output; when it does, the compatibility note below identifies the affected inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined.
+> **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Bug-fix releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined.
 
 ### Apptainer (recommended)
 

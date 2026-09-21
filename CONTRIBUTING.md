@@ -25,7 +25,7 @@ Three quantities shift the endpoints without any source change, because they alt
 
 | Hazard | Why it moves the numbers | Pinned as |
 | --- | --- | --- |
-| **ITK threads per registration job** | ITK sums the registration metric per thread, so the count sets the summation order | `ITK_THREADS_DEFAULT = 12` in `delta-svd.py`, overridable only via the hidden `--itkThreads` |
+| **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta-svd.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
 | **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `ENV OPENBLAS_CORETYPE=Haswell` in the `Dockerfile` |
 
@@ -81,9 +81,9 @@ container/build.sh delta-svd:dev   # custom tag; extra args pass through to dock
 
 Releases are built and staged by CI ([`release-build.yml`](.github/workflows/release-build.yml)), validated by hand against the staged image, then published by a second CI workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) that copies the validated manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` without a human having checked the exact digest first.
 
-Expect rebuilding an *older* commit to fail outright rather than merely differ: the `apt` pins resolve against the live Ubuntu archive, and `ca-certificates`' version is itself a date, so the pin stops matching as soon as the archive moves on. **The pushed image digest, not the source tree, is the artefact of record for a release.** Recover an old release by pulling its digest, not by rebuilding its tag.
+Rebuilding an *older* commit will fail outright, not just differ: the `apt` pins resolve against the live Ubuntu archive, and `ca-certificates`' version is itself a date, so the pin stops matching once the archive moves on. **The pushed image digest, not the source tree, is the artefact of record for a release** — recover an old release by pulling its digest, not by rebuilding its tag.
 
-Only exact version tags are published. There is **no `latest` tag**: results from a different `MAJOR.MINOR` version must not be pooled, so no run should be able to pick up a new one by accident.
+Only exact version tags are published; there is **no `latest` tag**, so no run can pick up a new version by accident (see [Validation status](#validation-status-read-this-first)).
 
 1. **Bump [`VERSION`](VERSION)** and commit it. Use the last digit only for a change that provably leaves the validated whole-skeleton endpoints untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones. A patch that corrects optional derived rows must carry a compatibility note naming the affected inputs and telling users not to pool those rows across the patch.
 
