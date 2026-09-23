@@ -94,7 +94,7 @@ Only exact version tags are published; there is **no `latest` tag**, so no run c
     - [`CITATION.cff`](CITATION.cff) — its `version:` field, which GitHub renders in "Cite this repository";
     - [`docs/install.md`](docs/install.md) — the image tag in the `apptainer pull` / `docker pull` / verification commands, which otherwise keeps handing users the *previous* image.
 
-    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `release-build.yml` stamps the OCI label the same way `build.sh` does for a local build, and the `Dockerfile` copies the file next to the scripts, which is what `--version` reports.
+    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `build.sh` (which `release-build.yml` also calls) passes it to the `Dockerfile` as the `VERSION` build argument, which both stamps the OCI label and writes the file next to the scripts that `--version` reports. The file itself is never copied into the image, so a plain `docker build` without that argument reports `unknown`.
 
 2. **Tag the release commit and push the tag.** This triggers `release-build.yml`, which checks the tag against `VERSION`, builds the image (same semantics as a local `build.sh` run), and pushes it — attested via `actions/attest-build-provenance` — to a public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`, tagged by commit SHA only so it can never be mistaken for a release.
 

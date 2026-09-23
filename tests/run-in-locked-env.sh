@@ -40,5 +40,19 @@ exec docker run --rm --platform linux/amd64 -v "${REPO_ROOT}:/repo:ro" ubuntu:no
     conda tos accept --override-channels \
         --channel https://repo.anaconda.com/pkgs/main --channel https://repo.anaconda.com/pkgs/r
     conda install -y -p /opt/conda --file /repo/container/conda-explicit-linux-64.txt
-    conda install -y -p /opt/conda -c conda-forge pytest
+    # pytest via pip, not conda: a conda install re-solves the environment and can
+    # move locked packages. Abort if anything conda manages changed anyway. conda
+    # cannot see pip overwriting one of its packages (e.g. pytest pulling a newer
+    # "packaging"), so pip freeze is checked too: every line it printed before must
+    # still be there.
+    conda list -p /opt/conda --explicit > /tmp/lock-before.txt
+    python -m pip freeze | sort > /tmp/pip-before.txt
+    python -m pip install -q --no-cache-dir pytest
+    conda list -p /opt/conda --explicit > /tmp/lock-after.txt
+    python -m pip freeze | sort > /tmp/pip-after.txt
+    diff /tmp/lock-before.txt /tmp/lock-after.txt \
+        || { echo "installing pytest changed the locked conda environment" >&2; exit 1; }
+    CHANGED="$(comm -23 /tmp/pip-before.txt /tmp/pip-after.txt)"
+    [ -z "$CHANGED" ] || { printf "installing pytest replaced locked packages:\n%s\n" "$CHANGED" >&2; exit 1; }
+    echo "Locked environment unchanged by the pytest install."
     cd /repo && python -m pytest tests -q -p no:cacheprovider "$@"' _ "$@"

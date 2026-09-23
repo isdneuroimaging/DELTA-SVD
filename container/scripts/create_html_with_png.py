@@ -181,7 +181,9 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
       fnCSV = df
   if fnCSV is not None:
     if os.path.exists(fnCSV):
-        df = pd.read_csv(fnCSV)
+        # keep IDs/timepoints like '007' or '01' as written; ID is absent without --id,
+        # which read_csv tolerates
+        df = pd.read_csv(fnCSV, converters={'ID': str, 'timepoint': str})
     else:
         df = None
   if df is None:

@@ -15,6 +15,7 @@ on:
 permissions:
   contents: write
   packages: write
+  attestations: read
 
 jobs:
   promote:
@@ -42,8 +43,25 @@ jobs:
           REVISION="$(echo "$LABELS" | jq -r '."org.opencontainers.image.revision" // empty')"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad or missing version label: '$VERSION'"; exit 1; }
           [[ -n "$REVISION" && "$REVISION" != "unknown" && "$REVISION" != *-dirty ]] || { echo "::error::bad, unknown, or dirty revision label: '$REVISION'"; exit 1; }
+          # A clean revision is not enough: after a "delete tag, fix, re-tag" loop the
+          # pre-fix digest still carries the same version. The tag as it stands now
+          # must point at the commit this image was built from (the commits endpoint
+          # dereferences annotated tags).
+          TAG_SHA="$(gh api "repos/isdneuroimaging/delta-svd/commits/v${VERSION}" --jq .sha)" || { echo "::error::cannot resolve tag v${VERSION} on the remote"; exit 1; }
+          [[ "$TAG_SHA" == "$REVISION" ]] || { echo "::error::tag v${VERSION} points at ${TAG_SHA}, but the image was built from ${REVISION}"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "digest=${SRC#*@}" >> "$GITHUB_OUTPUT"
+
+      # Labels are self-declared; the provenance attestation is not. Pinned to the
+      # release-build.yml signer and to the labelled revision. The signer path is
+      # case-sensitive and must match the repository's canonical name.
+      - name: Verify build provenance
+        run: |
+          gh attestation verify "oci://$SRC" \
+            --repo isdneuroimaging/delta-svd \
+            --signer-workflow isdneuroimaging/DELTA-SVD/.github/workflows/release-build.yml \
+            --source-digest "${{ steps.labels.outputs.revision }}"
 
       - name: Copy manifest to the production package
         run: crane copy "$SRC" "ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}"
