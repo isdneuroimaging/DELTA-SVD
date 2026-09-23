@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime
+import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime, contextlib
 from os.path import join, exists, dirname, basename
 from shutil import copy2, rmtree
 from pathlib import Path
+
+from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
+                                 BRANGE_TOL, SHELL_TOL, MIN_DIRECTIONS, RECOMMENDED_DIRECTIONS)
 
 
 def detect_physical_cores():
@@ -54,13 +57,8 @@ def resolve_thread_budget(argv):
         return detect_physical_cores()              # the full parser reports the error later
 
 
-# ITK threads per registration job. This is the one threading quantity that
-# reaches the metric values: ITK sums the registration metric and its gradient
-# per thread, so a different count sums them in a different order and the last
-# bits move. The skeleton amplifies that from there -- 1 thread instead of 12
-# shifts delta-PSMD by ~23% on the reference subject. 12 is the value the method
-# was validated at; see CONTRIBUTING.md before changing it.
-ITK_THREADS_DEFAULT = 12
+# ITK_THREADS_DEFAULT (delta_svd_constants) is the one threading quantity that
+# reaches the metric values; see the comment there.
 
 # How far the template step may oversubscribe the core budget, as a fraction:
 # 3/2 = 1.5 threads per core. Measured faster than an exactly-fitting plan, and
@@ -146,9 +144,9 @@ import pandas as pd
 
 ROI_LABEL_DTYPE = 'uint16'
 ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
-# Doubles as the reference for the FMRIB58 1 mm grid the TBSS outputs are on
-# (see check_mni_grid), with GRID_AFFINE_ATOL absorbing float32 header round-off.
-SKELETON_MASK_DEFAULT = "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
+# SKELETON_MASK_DEFAULT (delta_svd_constants) doubles as the reference for the
+# FMRIB58 1 mm grid the TBSS outputs are on (see check_mni_grid), with
+# GRID_AFFINE_ATOL absorbing float32 header round-off.
 GRID_AFFINE_ATOL = 1e-4
 
 from dipy.io import read_bvals_bvecs
@@ -274,14 +272,8 @@ def write_bval_or_bvec(arrStr, fname):
 #    selection the user asks for.
 B0_MAX = 5
 
-#--- Scanners report b-values that deviate from the nominal shell (rounding, and
-#    cross-terms with the imaging gradients), so a requested limit is met with a
-#    tolerance. A range carries slack in its endpoints already, so it only needs
-#    enough to absorb rounding; a shell is a point, where the tolerance is the
-#    whole acceptance window, so it gets more. Neither can merge adjacent shells,
-#    which sit at least 100 s/mm2 apart in practice.
-BRANGE_TOL = 5
-SHELL_TOL = 25
+#--- BRANGE_TOL and SHELL_TOL, the tolerances a requested b-value limit is met
+#    with, are in delta_svd_constants.
 
 #--- The window the diffusion-tensor model is valid in. Below the floor the
 #    signal is contaminated by perfusion (IVIM), above the ceiling by
@@ -309,9 +301,8 @@ BVAL_MAX = 1800
 #    fails on its own: the bi-tensor fit solves with a pseudo-inverse, which
 #    returns a minimum-norm solution for a degenerate gradient table instead of
 #    raising, so an unchecked run produces plausible-looking numbers.
+#    MIN_DIRECTIONS and RECOMMENDED_DIRECTIONS are in delta_svd_constants.
 DESIGN_MATRIX_RANK = 7
-MIN_DIRECTIONS = 12
-RECOMMENDED_DIRECTIONS = 20
 
 #--- Two gradient directions count as one below an angle of ~2.6 degrees. Even a
 #    128-direction scheme separates its directions by more than 10 degrees, so
@@ -370,7 +361,7 @@ def filter_b_values(fn_data = 'data.nii.gz',
                 fn_bval = 'file.bval',
                 fn_bvec = 'file.bvec',
                 out_dir = None,
-                bIntervals = ((800-BRANGE_TOL, 1200+BRANGE_TOL),)):
+                bIntervals = ((BRANGE_DEFAULT[0]-BRANGE_TOL, BRANGE_DEFAULT[1]+BRANGE_TOL),)):
 
     accepted = ', '.join(f'[{lo:g}, {hi:g}]' for lo, hi in bIntervals)
     print("Filtering DWI data according to b-values:")
@@ -751,20 +742,18 @@ def run_tbss(fnameFAt = None, dirTBSS = None):
     
     copy2(fnameFAt, join(dirTBSS, basename(fnameFAt)))
 
-    dirBase = os.getcwd()
-    os.chdir(dirTBSS)
-    cmd = f'tbss_1_preproc {shlex.quote(basename(fnameFAt))}'
-    run_subprocess(cmd, True, 'tbss_1_preproc')
-    cmd = 'tbss_2_reg -T'
-    run_subprocess(cmd, True, 'tbss_2_reg')
-    cmd = 'tbss_3_postreg -T'
-    run_subprocess(cmd, True, 'tbss_3_postreg')
-    cmd = 'tbss_4_prestats 0.2'
-    run_subprocess(cmd, True, 'tbss_4_prestats')
-    os.chdir(dirBase)
+    with contextlib.chdir(dirTBSS):
+        cmd = f'tbss_1_preproc {shlex.quote(basename(fnameFAt))}'
+        run_subprocess(cmd, True, 'tbss_1_preproc')
+        cmd = 'tbss_2_reg -T'
+        run_subprocess(cmd, True, 'tbss_2_reg')
+        cmd = 'tbss_3_postreg -T'
+        run_subprocess(cmd, True, 'tbss_3_postreg')
+        cmd = 'tbss_4_prestats 0.2'
+        run_subprocess(cmd, True, 'tbss_4_prestats')
 
     
-def batch_tbss_non_fa(dirTP = None, dirTBSS = None, fnNonFA = []):
+def batch_tbss_non_fa(dirTP = None, dirTBSS = None, fnNonFA = None):
     
     fnameFAt = glob.glob(join(dirTBSS, 'FA', '*_FA.nii.gz'))
     fnameFAt = re.sub(r'_FA\.nii\.gz','.nii.gz',basename(fnameFAt[0]))
@@ -781,17 +770,14 @@ def run_tbss_non_fa(fn = None, label=None, dirTBSS = None, fnameFAt = None):
     if fnameFAt is None:
         fnameFAt = glob.glob(join(dirTBSS, 'FA', '*_FA.nii.gz'))
         fnameFAt = re.sub(r'_FA\.nii\.gz','.nii.gz',basename(fnameFAt[0]))
-    
-    dirBase = os.getcwd()
 
     dirTBSS_nonFA = join(dirTBSS, label)
     Path(dirTBSS_nonFA).mkdir(exist_ok=True)
     copy_as_nii_gz(fn, join(dirTBSS_nonFA, fnameFAt))
 
-    os.chdir(dirTBSS)
-    cmd = f"tbss_non_FA {shlex.quote(label)}"
-    run_subprocess(cmd, True, 'tbss_non_FA')
-    os.chdir(dirBase)
+    with contextlib.chdir(dirTBSS):
+        cmd = f"tbss_non_FA {shlex.quote(label)}"
+        run_subprocess(cmd, True, 'tbss_non_FA')
 
 
 def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = None, analyseHemispheres = False):
@@ -963,7 +949,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
     )
     return df
 
-def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
+def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None):
     
     skelBase = re.sub(r'\.nii(\.gz)?$','', basename(skelMask))
     skelMaskInters = join(dirTBSS, 'stats', skelBase+'_intersection_Emask.nii.gz')
@@ -999,16 +985,13 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
             print( ' voxels  :',len(skel))
             mean = np.mean(skel) if len(skel)>0 else np.nan
 
-            # Preserve the legacy ncMD/ncFW aliases for callers of this helper.
-            # The current pipeline passes MD/FW, so this has no effect on new runs.
-            mT = re.sub(r'^nc','',mapName)
-            if mT == 'MD':
+            if mapName == 'MD':
                 prcts = np.percentile(skel,[5,95]) if len(skel)>0 else [np.nan]*2
                 pw = prcts[1] - prcts[0]
-                metrics = ['PSMD', 'MS'+mT]
+                metrics = ['PSMD', 'MS'+mapName]
                 values = [pw, mean]
             else:
-                metrics = ['MS'+mT]
+                metrics = ['MS'+mapName]
                 values = [mean]
             dd.append(pd.DataFrame(
                 {'timepoint': [tpB]*len(metrics),
@@ -1043,13 +1026,11 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
         fnameFAt = "FA-for-tbss-long"
     else:
         fnameFAt = "fwc_wls_dti_FA_05"
-    dirBase = os.getcwd()
 
     for fn in fnROI:
-        os.chdir(join(dirTBSS,'stats'))
-        cmd = f'tbss_deproject {shlex.quote(basename(fn))} 2 -n'
-        run_subprocess(cmd, True, 'tbss_deproject')
-        os.chdir(dirBase)
+        with contextlib.chdir(join(dirTBSS,'stats')):
+            cmd = f'tbss_deproject {shlex.quote(basename(fn))} 2 -n'
+            run_subprocess(cmd, True, 'tbss_deproject')
         fnBase = basename(fn)
         fnDeprojectedTemplateSpace = join(dirTBSS, 'FA', fnameFAt+'_FA_'+fnBase)
             
@@ -1532,7 +1513,7 @@ def iniParser():
     group2 = parser.add_argument_group('advanced options')
     group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default=SKELETON_MASK_DEFAULT, help="input path to an alternative skeleton mask. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default mask). It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
     group2b = group2.add_mutually_exclusive_group()
-    group2b.add_argument("--bRange", metavar='Integer', type=assertBValue, default = [800, 1200], nargs=2, help=f"range of b-values to consider for diffusion tensor fitting, given as the lower and upper limit of the non-zero shell(s) to include. Defaults to range [800,1200]. The limits are met with a tolerance of {BRANGE_TOL} s/mm2, so that shells the scanner reports slightly off their nominal value are not discarded. Volumes with a b-value close to zero (b <= {B0_MAX}) are always included and are not affected by this option. Both limits have to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2, outside of which the diffusion tensor model is not valid. Mutually exclusive with '--shells'.")
+    group2b.add_argument("--bRange", metavar='Integer', type=assertBValue, default = list(BRANGE_DEFAULT), nargs=2, help=f"range of b-values to consider for diffusion tensor fitting, given as the lower and upper limit of the non-zero shell(s) to include. Defaults to range [{BRANGE_DEFAULT[0]},{BRANGE_DEFAULT[1]}]. The limits are met with a tolerance of {BRANGE_TOL} s/mm2, so that shells the scanner reports slightly off their nominal value are not discarded. Volumes with a b-value close to zero (b <= {B0_MAX}) are always included and are not affected by this option. Both limits have to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2, outside of which the diffusion tensor model is not valid. Mutually exclusive with '--shells'.")
     group2b.add_argument("--shells", metavar='Integer', type=assertBValue, nargs="+", action='extend', help=f"b-value shell(s) to consider for diffusion tensor fitting, e.g. '--shells 700 1000'. An alternative to '--bRange' for selecting shells individually rather than as one range, which avoids pulling in the shells in between. Each shell is matched with a tolerance of {SHELL_TOL} s/mm2, and a shell that matches no volume in the data is an error. As for '--bRange', volumes with a b-value close to zero (b <= {B0_MAX}) are always included, and each shell has to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2. Mutually exclusive with '--bRange'.")
     group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
     group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."

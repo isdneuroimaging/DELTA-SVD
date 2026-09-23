@@ -25,7 +25,7 @@ Three quantities shift the endpoints without any source change, because they alt
 
 | Hazard | Why it moves the numbers | Pinned as |
 | --- | --- | --- |
-| **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta-svd.py`, overridable only via the hidden `--itkThreads` |
+| **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
 | **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `ENV OPENBLAS_CORETYPE=Haswell` in the `Dockerfile` |
 

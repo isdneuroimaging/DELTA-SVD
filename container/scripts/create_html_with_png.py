@@ -5,6 +5,12 @@ import base64, os, datetime, html
 import pandas as pd
 import numpy as np
 
+from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
+                                 BRANGE_TOL, SHELL_TOL, RECOMMENDED_DIRECTIONS)
+
+SKELETON_MASK_DEFAULT_NAME = os.path.basename(SKELETON_MASK_DEFAULT)
+BRANGE_DEFAULT_HTML = f'{BRANGE_DEFAULT[0]}&ndash;{BRANGE_DEFAULT[1]} s/mm&sup2;'
+
 def define_notes(args):
   if args is None:
       notes = ''
@@ -17,8 +23,8 @@ def define_notes(args):
           bmaskLong  = 'The'
           bmaskCross = 'The'
 
-      if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
-          whichSmask = 'the default white matter skeleton mask "delta-svd_skeletonmask_v1.nii.gz", designed to exclude regions with frequent partial volume effects.'
+      if args.skeletonMask == SKELETON_MASK_DEFAULT:
+          whichSmask = f'the default white matter skeleton mask "{SKELETON_MASK_DEFAULT_NAME}", designed to exclude regions with frequent partial volume effects.'
       else:
           whichSmask = 'a custom (provided by the user) white matter skeleton mask.'
 
@@ -45,7 +51,7 @@ def define_notes(args):
       notes = '<br>'.join(notes)
       notes = f'<p class="text">{notes}</p>'
 
-      if not args.adjustBmaskForFW or args.skeletonMask != "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
+      if not args.adjustBmaskForFW or args.skeletonMask != SKELETON_MASK_DEFAULT:
         notes += '<p class="textbold">Please note that the above described behaviour deviates from the default behaviour, due to the options chosen by the user.</p>'
         
   return notes
@@ -101,27 +107,28 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
     version = getattr(args, 'version', None)
     if version:
         meta_rows.append(('DELTA-SVD version', f'<code>{html.escape(str(version))}</code>'))
-    if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
+    if args.skeletonMask == SKELETON_MASK_DEFAULT:
         meta_rows.append(('Skeleton mask', f'{path_code(os.path.basename(args.skeletonMask))} <span class="tag">default</span>'))
     else:
-        meta_rows.append(('Skeleton mask', f'{path_code(args.skeletonMask)} {custom_tag("delta-svd_skeletonmask_v1.nii.gz (white matter skeleton excluding regions with frequent partial volume effects)")}'))
+        meta_rows.append(('Skeleton mask', f'{path_code(args.skeletonMask)} {custom_tag(f"{SKELETON_MASK_DEFAULT_NAME} (white matter skeleton excluding regions with frequent partial volume effects)")}'))
     shells = getattr(args, 'shells', None)
     if shells:
         meta_rows.append(('b-value shells',
-                          f'{", ".join(str(s) for s in shells)} s/mm&sup2; (&plusmn;25) '
-                          + custom_tag("range 800&ndash;1200 s/mm&sup2;")))
-    elif list(args.bRange) != [800, 1200]:
-        meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; (&plusmn;5) {custom_tag("800&ndash;1200 s/mm&sup2;")}'))
+                          f'{", ".join(str(s) for s in shells)} s/mm&sup2; (&plusmn;{SHELL_TOL}) '
+                          + custom_tag(f"range {BRANGE_DEFAULT_HTML}")))
+    elif list(args.bRange) != list(BRANGE_DEFAULT):
+        meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; (&plusmn;{BRANGE_TOL}) {custom_tag(BRANGE_DEFAULT_HTML)}'))
     #--- the angular sampling the tensor and free-water fits had to work with;
-    #    below 20 it qualifies every metric in the report, and a warning printed
-    #    to a log that is not kept would not travel with the results
+    #    below RECOMMENDED_DIRECTIONS it qualifies every metric in the report,
+    #    and a warning printed to a log that is not kept would not travel with
+    #    the results
     nDirections = getattr(args, 'nDirections', None)
     if nDirections:
         shown = (str(nDirections[0]) if len(set(nDirections)) == 1
                  else ', '.join(f'{n} ({tp})' for n, tp in zip(nDirections, args.tp)))
-        caution = ('' if min(nDirections) >= 20 else
+        caution = ('' if min(nDirections) >= RECOMMENDED_DIRECTIONS else
                    ' <span class="tag tag--alt tag--tip" tabindex="0" data-default="Below the '
-                   'recommended minimum of 20: the free-water fraction and hence the reported '
+                   f'recommended minimum of {RECOMMENDED_DIRECTIONS}: the free-water fraction and hence the reported '
                    'metrics are noisy. Do not pool with results from data with more '
                    'directions.">few</span>')
         meta_rows.append(('Diffusion directions', f'{shown}{caution}'))
@@ -131,13 +138,14 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         meta_rows.append(('Skeleton hemispheres', 'left and right analysed separately; ROI masks remain unsplit'))
     if not args.adjustBmaskForFW:
         meta_rows.append(('Brain masks', f'not adjusted, i.e. voxels with 100% free water were not removed {custom_tag("adjusted, i.e. voxels with 100% free water are removed")}'))
-    #--- only shown when it leaves the validated 12: it is the one threading
-    #    setting that changes the metrics, so a deviation belongs beside them
+    #--- only shown when it leaves the validated ITK_THREADS_DEFAULT: it is the
+    #    one threading setting that changes the metrics, so a deviation belongs
+    #    beside them
     itkThreads = getattr(args, 'itkThreads', None)
-    if n_tp > 1 and itkThreads is not None and itkThreads != 12:
+    if n_tp > 1 and itkThreads is not None and itkThreads != ITK_THREADS_DEFAULT:
         meta_rows.append(('ITK threads',
                           f'{itkThreads} per registration job '
-                          + custom_tag('12 (the validated value; results from different '
+                          + custom_tag(f'{ITK_THREADS_DEFAULT} (the validated value; results from different '
                                        'values must not be pooled)')))
     meta_body = ''.join(f'<tr><td class="key">{k}</td><td>{v}</td></tr>' for k, v in meta_rows)
     meta_table = ('<table class="meta-table">'
@@ -350,17 +358,6 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         margin: 2px 0 12px;
     }
     .images p { margin: 6px 0 3px; }
-
-    .row:after {
-        content: "";
-        display: table;
-        clear: both;
-    }
-    .column {
-        float: left;
-        width: 100px;
-        padding: 10px;
-    }
 
     /* Tables (metadata + inputs + metrics all share one style) */
     .meta-table, .inputs, .mystyle {
