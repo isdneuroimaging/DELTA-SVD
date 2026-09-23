@@ -96,7 +96,7 @@ Apptainer and rootless Podman map your host identity into the container, so they
 | `--debug` | Keep the `delta-svd_temp/` folder of intermediate files instead of deleting it. |
 | `--bRange LO HI` | b-value range used for tensor fitting (default `800 1200`). See [Selecting the b-values](#selecting-the-b-values) below. |
 | `--shells B [B ...]` | b-value shells used for tensor fitting, selected individually instead of as a range. Mutually exclusive with `--bRange`. |
-| `--skeletonMask <NIfTI>` | Use an alternative skeleton mask instead of the validated default. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
+| `--skeletonMask <NIfTI>` | Use an alternative skeleton mask instead of the validated default. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default mask); otherwise DELTA-SVD stops before processing. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
 | `--para <n>` | Number of ANTs registration jobs run at once during longitudinal template construction. Derived from the `--threads` budget by default and capped at the number of timepoints. Peak memory scales with it, so `--para 1` is the lowest-memory setting. |
 
 ## Selecting the b-values

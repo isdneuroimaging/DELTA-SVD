@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime
@@ -146,6 +146,10 @@ import pandas as pd
 
 ROI_LABEL_DTYPE = 'uint16'
 ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
+# Doubles as the reference for the FMRIB58 1 mm grid the TBSS outputs are on
+# (see check_mni_grid), with GRID_AFFINE_ATOL absorbing float32 header round-off.
+SKELETON_MASK_DEFAULT = "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
+GRID_AFFINE_ATOL = 1e-4
 
 from dipy.io import read_bvals_bvecs
 from dipy.core.gradients import gradient_table
@@ -544,10 +548,13 @@ def free_water_correction(fn_data = 'data.nii.gz',
     nii = nib.load(fn_data)
     niim = nib.load(fn_mask)
     data = nii.get_fdata()
-    # Same conversion the vendored fits do internally, just done before the call:
-    # from numpy 2.0 their np.array(mask, dtype=bool, copy=False) raises on a
-    # float mask, because copy=False came to mean "never copy".
-    mask = niim.get_fdata().astype(bool)
+    # Thresholded like binarise_mask() everywhere else, so negative and NaN voxels
+    # are not brain; identical to the old astype(bool) on binary and non-negative
+    # masks. Done before the call because, from numpy 2.0, the vendored fits'
+    # np.array(mask, dtype=bool, copy=False) raises on a float mask, copy=False
+    # having come to mean "never copy". binarise_mask() itself is not called here,
+    # so its NOTE is printed once, when the brain mask is written further down.
+    mask = niim.get_fdata() > 0
     bvals, bvecs = read_bvals_bvecs(fn_bval, fn_bvec)
     print(f'bvals = \n{bvals}\n')
 
@@ -575,6 +582,16 @@ def free_water_correction(fn_data = 'data.nii.gz',
     print('Fitting two-tensor model, for tissue and free water')
     S0 = np.mean(data[..., gtab.b0s_mask], axis=-1)
     pCSF = (MD0 > 0.002)
+    if not pCSF.any():
+        # np.mean() of nothing is NaN, which would silently turn mdreg and with it
+        # every free-water estimate into NaN.
+        raise DeltaSvdError(f"No voxel inside the brain mask has a mean diffusivity above 0.002 mm2/s "
+                            f"in the single-tensor fit, so the CSF reference value needed to "
+                            f"regularise the free-water fit cannot be estimated.\n"
+                            f"  DWI       : {fn_data}\n  brain mask: {fn_mask}\n"
+                            f" The brain mask has to include some CSF (e.g. the ventricles), so "
+                            f"check that it is not eroded or empty and that it matches the DWI "
+                            f"image. Also check that the b-values are given in s/mm2.")
     mCSF = np.mean(MD0[pCSF])    
     mdreg1 = 0.002*mCSF/0.0025
     mdreg = np.min([mdreg,mdreg1])
@@ -915,6 +932,9 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
 
     
     if analyseHemispheres:
+        # Splitting at the middle of the first array axis assumes the storage of the
+        # FMRIB58 1 mm grid (LAS, midline at the centre). That holds for a custom
+        # skeleton mask too: check_mni_grid() rejects any mask off that grid up front.
         sh = maskIntersection.shape
         for hemi,bounds in zip(['LH', 'RH'],[[0,sh[0]//2],[sh[0]//2,sh[0]+1]]):
             maskHemi = maskIntersection.copy()
@@ -965,7 +985,7 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = [], skelMask = None):
         niiROI = nib.load(fnR)
         roi = niiROI.get_fdata()
         roiBase = re.sub(r'\.nii(\.gz)?$','', basename(fnR))
-        roiSuffix = re.sub(skelBase+'_','', roiBase)
+        roiSuffix = roiBase.removeprefix(skelBase+'_')
 
         for mapName, _ in fnNonFA.items():
 
@@ -1136,6 +1156,31 @@ def binarise_mask(img, label, fname):
               f"  {fname}\n"
               f"  Binarising it (values greater than zero become 1; zero and negative values become 0) for processing.")
     return binary
+
+
+def check_mni_grid(fname, label, reference=None):
+    """Raise unless 'fname' has the shape and affine of 'reference' (by default the
+    default skeleton mask), i.e. of the FMRIB58 1 mm grid the TBSS outputs are on.
+    Only the headers are read."""
+    if reference is None:
+        reference = SKELETON_MASK_DEFAULT
+    if fname == reference:
+        return
+    img, ref = nib.load(fname), nib.load(reference)
+    if img.shape != ref.shape:
+        raise DeltaSvdError(f"The provided {label} does not have the image dimensions of the FMRIB58 "
+                            f"1 mm MNI grid the analysis is done on:\n  {fname}\n"
+                            f"  Dimensions: {img.shape}, expected: {ref.shape}\n"
+                            f" Please resample it to this grid, e.g. using '{reference}' "
+                            f"or FSL's FMRIB58_FA_1mm as the reference image.")
+    if not np.allclose(img.affine, ref.affine, atol=GRID_AFFINE_ATOL):
+        raise DeltaSvdError(f"The provided {label} has the image dimensions of the FMRIB58 1 mm MNI "
+                            f"grid the analysis is done on, but not its voxel-to-world mapping "
+                            f"(affine), so its voxels would not line up with the skeleton:\n"
+                            f"  {fname}\n  Affine:\n{np.array2string(img.affine, precision=4)}\n"
+                            f"  Expected:\n{np.array2string(ref.affine, precision=4)}\n"
+                            f" Please resample it to this grid, e.g. using '{reference}' "
+                            f"or FSL's FMRIB58_FA_1mm as the reference image.")
 
 
 def validate_roi_labels(img, label, fname):
@@ -1482,10 +1527,10 @@ def iniParser():
     group1 = parser.add_argument_group('additional masking')
     group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
     group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
-    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0.")
+    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default skeleton mask). Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0.")
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
     group2 = parser.add_argument_group('advanced options')
-    group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default="/opt/scripts/delta-svd_skeletonmask_v1.nii.gz", help="input path to an alternative skeleton mask. It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
+    group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default=SKELETON_MASK_DEFAULT, help="input path to an alternative skeleton mask. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default mask). It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
     group2b = group2.add_mutually_exclusive_group()
     group2b.add_argument("--bRange", metavar='Integer', type=assertBValue, default = [800, 1200], nargs=2, help=f"range of b-values to consider for diffusion tensor fitting, given as the lower and upper limit of the non-zero shell(s) to include. Defaults to range [800,1200]. The limits are met with a tolerance of {BRANGE_TOL} s/mm2, so that shells the scanner reports slightly off their nominal value are not discarded. Volumes with a b-value close to zero (b <= {B0_MAX}) are always included and are not affected by this option. Both limits have to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2, outside of which the diffusion tensor model is not valid. Mutually exclusive with '--shells'.")
     group2b.add_argument("--shells", metavar='Integer', type=assertBValue, nargs="+", action='extend', help=f"b-value shell(s) to consider for diffusion tensor fitting, e.g. '--shells 700 1000'. An alternative to '--bRange' for selecting shells individually rather than as one range, which avoids pulling in the shells in between. Each shell is matched with a tolerance of {SHELL_TOL} s/mm2, and a shell that matches no volume in the data is an error. As for '--bRange', volumes with a b-value close to zero (b <= {B0_MAX}) are always included, and each shell has to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2. Mutually exclusive with '--bRange'.")
@@ -1624,7 +1669,7 @@ def pipeline_delta_svd():
     if args.hemispheres:
         print('\nHemispheric skeleton analysis will be done as well')
 
-    if args.skeletonMask == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz":
+    if args.skeletonMask == SKELETON_MASK_DEFAULT:
         print(f'\nUsing the default skeleton mask:\n {args.skeletonMask}')
     else:
         print(f'\nUsing a non-default skeleton mask provided as input:\n {args.skeletonMask}')
@@ -1661,6 +1706,14 @@ def pipeline_delta_svd():
         if 'extract' not in args.steps and not args.debug:
             print("NOTE: Given that the final 'extract' step is not selected, we assume that you want to keep intermediate/temporary output and switch on the option '--debug' for you!")
             args.debug = True
+
+    # Done here rather than with the other input checks above so that the cheaper
+    # checks fail first, but still before any output is touched or processed: a
+    # wrong shape would otherwise crash hours in, a different affine silently
+    # misalign the skeleton. No-op for the default skeleton mask.
+    check_mni_grid(args.skeletonMask, 'skeleton mask')
+    if args.RmaskMNI is not None:
+        check_mni_grid(args.RmaskMNI, 'ROI mask in MNI space')
     
     dirTemp = join(args.dirOutput, 'delta-svd_temp')
     dirTP = [join(dirTemp, tp) for tp in args.tp] #-- folders for all timepoints

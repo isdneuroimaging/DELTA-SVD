@@ -2070,6 +2070,8 @@ def test_valid_timepoint_reprocessing_only_replaces_its_working_directory(
     monkeypatch.setattr(sys, "argv", _argv(
         [dwi], skel, "--tp", "V1", "--dirOutput", str(output),
         "--steps", "fwc", "--reprocess"))
+    # the touched skeleton mask is no NIfTI; the grid check has its own tests
+    monkeypatch.setattr(delta_svd, "check_mni_grid", lambda *args, **kwargs: None)
     monkeypatch.setattr(delta_svd, "filter_b_values",
                         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("stop")))
 
@@ -2504,3 +2506,161 @@ def test_wrong_number_of_bvec_files_names_that_option(delta_svd, tmp_path, monke
     ])
     with pytest.raises(ValueError, match=r"option '--bvec'"):
         delta_svd.pipeline_delta_svd()
+
+
+# ---------------------------------------------------------------------------
+# free_water_correction(): the fit mask is thresholded like binarise_mask(), and
+# a mask without any CSF-like voxel is an error rather than a NaN mdreg.
+
+def _fw_inputs(tmp_path, gtab_bits, fFree, mask):
+    _, bvals, bvecs = gtab_bits
+    data = np.stack([_two_compartment_signal(bvals, bvecs, f) for f in fFree]).reshape(len(fFree), 1, 1, -1)
+    nib.save(nib.Nifti1Image(data, np.eye(4)), str(tmp_path / "dwi.nii.gz"))
+    nib.save(nib.Nifti1Image(_vol(mask), np.eye(4)), str(tmp_path / "mask.nii.gz"))
+    np.savetxt(tmp_path / "dwi.bval", bvals[None], fmt="%g")
+    np.savetxt(tmp_path / "dwi.bvec", bvecs.T, fmt="%g")
+    return dict(fn_data=str(tmp_path / "dwi.nii.gz"), fn_mask=str(tmp_path / "mask.nii.gz"),
+                fn_bval=str(tmp_path / "dwi.bval"), fn_bvec=str(tmp_path / "dwi.bvec"),
+                out_dir=str(tmp_path), smooth=False)
+
+
+class _StopFit(Exception):
+    pass
+
+
+def _fit_mask(delta_svd, tmp_path, _fw_gtab, monkeypatch, mask):
+    """The mask free_water_correction() hands to the first (single-tensor) fit."""
+    seen = {}
+
+    def fake_fit(fit, data, voxelArgs, kwargs, nproc):
+        seen["mask"] = voxelArgs["mask"]
+        raise _StopFit
+
+    monkeypatch.setattr(delta_svd, "fit_voxelwise", fake_fit)
+    with pytest.raises(_StopFit):
+        delta_svd.free_water_correction(**_fw_inputs(tmp_path, _fw_gtab, [0.0] * len(mask), mask))
+    return seen["mask"].ravel()
+
+
+def test_free_water_fit_mask_excludes_negative_and_nan_voxels(delta_svd, tmp_path, _fw_gtab, monkeypatch):
+    mask = _fit_mask(delta_svd, tmp_path, _fw_gtab, monkeypatch, [-1, 0, 0.5, np.nan])
+    assert mask.dtype == bool
+    assert mask.tolist() == [False, False, True, False]
+
+
+@pytest.mark.parametrize("values", [[0, 1, 1, 0], [0, 0.2, 0.5, 1], [0, 255, 0, 3]])
+def test_free_water_fit_mask_unchanged_for_binary_and_non_negative_masks(
+        delta_svd, tmp_path, _fw_gtab, monkeypatch, values):
+    mask = _fit_mask(delta_svd, tmp_path, _fw_gtab, monkeypatch, values)
+    assert np.array_equal(mask, np.asarray(values, dtype=float).astype(bool))
+
+
+def test_free_water_correction_rejects_a_mask_without_csf(delta_svd, tmp_path, _fw_gtab):
+    # tissue only (MD 0.8e-3), so no voxel exceeds the 0.002 CSF threshold
+    kwargs = _fw_inputs(tmp_path, _fw_gtab, [0.0, 0.1, 0.2], [1, 1, 1])
+    with pytest.raises(delta_svd.DeltaSvdError, match="mean diffusivity above 0.002") as excinfo:
+        delta_svd.free_water_correction(**kwargs)
+    assert kwargs["fn_mask"] in str(excinfo.value)
+    # raised before the second fit, so none of its output exists
+    assert (tmp_path / "wls_dti_MD.nii.gz").exists()
+    assert not (tmp_path / "fwc_wls_dti_FA.nii.gz").exists()
+
+
+# ---------------------------------------------------------------------------
+# extract_stats(): the skeleton mask name is stripped from the ROI name as a
+# literal prefix, not as a regular expression.
+
+@pytest.mark.parametrize("skelBase", ["my+skel", "sk[el", "skel.v1"])
+def test_extract_stats_strips_the_skeleton_name_literally(delta_svd, tmp_path, skelBase):
+    stats_dir = tmp_path / "TBSS" / "stats"
+    stats_dir.mkdir(parents=True)
+    affine = np.eye(4)
+    nib.save(nib.Nifti1Image(_vol([1, 1, 1, 1]), affine),
+             str(stats_dir / f"{skelBase}_intersection.nii.gz"))
+    nib.save(nib.Nifti1Image(_vol([1, 1, 0, 0]), affine),
+             str(stats_dir / f"{skelBase}_intersection_LH.nii.gz"))
+    for m in ["FW", "MD"]:
+        nib.save(nib.Nifti1Image(_vol([1e-3, 2e-3, 3e-3, 4e-3]), affine),
+                 str(stats_dir / f"all_TP01_{m}_skeletonised.nii.gz"))
+
+    df = delta_svd.extract_stats(dirTP="/some/path/TP01", dirTBSS=str(tmp_path / "TBSS"),
+                                 fnNonFA={"FW": "unused", "MD": "unused"},
+                                 skelMask=f"/somewhere/{skelBase}.nii.gz")
+
+    assert set(df["region"]) == {"intersection", "intersection_LH"}
+
+
+# ---------------------------------------------------------------------------
+# check_mni_grid(): a custom skeleton / MNI ROI mask has to be on the grid of
+# the default skeleton mask (FMRIB58 1 mm, LAS). The reference is a stand-in
+# with the real mask's header, since '/opt/scripts' only exists in the image.
+
+_MNI_AFFINE = np.array([[-1., 0, 0, 90], [0, 1, 0, -126], [0, 0, 1, -72], [0, 0, 0, 1]])
+_MNI_SHAPE = (182, 218, 182)
+
+
+def _save_grid(path, shape=_MNI_SHAPE, affine=_MNI_AFFINE):
+    nib.save(nib.Nifti1Image(np.zeros(shape, dtype="uint8"), affine), str(path))
+    return str(path)
+
+
+@pytest.fixture
+def _mni_reference(delta_svd, tmp_path, monkeypatch):
+    ref = _save_grid(tmp_path / "reference.nii.gz")
+    monkeypatch.setattr(delta_svd, "SKELETON_MASK_DEFAULT", ref)
+    return ref
+
+
+def test_mni_reference_matches_the_shipped_skeleton_mask():
+    from conftest import CONTAINER_FILES
+    img = nib.load(str(CONTAINER_FILES / "delta-svd_skeletonmask_v1.nii.gz"))
+    assert img.shape == _MNI_SHAPE
+    assert np.allclose(img.affine, _MNI_AFFINE)
+
+
+def test_check_mni_grid_accepts_a_matching_grid(delta_svd, tmp_path, _mni_reference):
+    affine = _MNI_AFFINE.copy()
+    affine[0, 3] += 1e-6                          # float32 header round-off
+    delta_svd.check_mni_grid(_save_grid(tmp_path / "mask.nii.gz", affine=affine), "skeleton mask")
+
+
+def test_check_mni_grid_is_a_no_op_for_the_default_mask(delta_svd, tmp_path, monkeypatch):
+    # the default path is never even opened
+    missing = str(tmp_path / "not-there.nii.gz")
+    monkeypatch.setattr(delta_svd, "SKELETON_MASK_DEFAULT", missing)
+    delta_svd.check_mni_grid(missing, "skeleton mask")
+
+
+def test_check_mni_grid_rejects_a_flipped_x_axis(delta_svd, tmp_path, _mni_reference):
+    affine = _MNI_AFFINE.copy()
+    affine[0, 0], affine[0, 3] = 1, -91           # RAS storage of the same space
+    fn = _save_grid(tmp_path / "mask.nii.gz", affine=affine)
+    with pytest.raises(delta_svd.DeltaSvdError, match="affine") as excinfo:
+        delta_svd.check_mni_grid(fn, "skeleton mask")
+    assert fn in str(excinfo.value)
+
+
+def test_check_mni_grid_rejects_a_wrong_shape(delta_svd, tmp_path, _mni_reference):
+    fn = _save_grid(tmp_path / "mask.nii.gz", shape=(91, 109, 91))
+    with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions") as excinfo:
+        delta_svd.check_mni_grid(fn, "ROI mask in MNI space")
+    assert "ROI mask in MNI space" in str(excinfo.value)
+    assert fn in str(excinfo.value)
+
+
+@pytest.mark.parametrize("option", ["--skeletonMask", "--RmaskMNI"])
+def test_pipeline_rejects_an_off_grid_mask_before_processing(
+        delta_svd, tmp_path, monkeypatch, _mni_reference, option):
+    dwi, skel = _minimal_pipeline_inputs(tmp_path)
+    skel = _save_grid(skel)
+    offGrid = _save_grid(tmp_path / "off.nii.gz", shape=(91, 109, 91))
+    argv = ["delta-svd.py", "--dwi", str(dwi), "--skeletonMask", skel]
+    if option == "--skeletonMask":
+        argv[-1] = offGrid
+    else:
+        argv += ["--RmaskMNI", offGrid]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions"):
+        delta_svd.pipeline_delta_svd()
+    assert not (tmp_path / "delta-svd_temp").exists()

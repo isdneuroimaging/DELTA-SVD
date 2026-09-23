@@ -62,7 +62,7 @@ All masks are optional. Per-timepoint masks are given in DWI space (one per time
 | --- | --- |
 | `--Emask` | Exclusion mask(s): the masked region (e.g. a lesion) is removed from the analysis. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
 | `--Rmask` | ROI mask(s) in DWI space. Integer labels define separate ROIs, including background label 0. |
-| `--RmaskMNI` | A single ROI mask in MNI space. Integer labels define separate ROIs, including background label 0. |
+| `--RmaskMNI` | A single ROI mask in MNI space, on the FMRIB58 1 mm grid (same image dimensions and affine as the default skeleton mask); otherwise DELTA-SVD stops before processing. Integer labels define separate ROIs, including background label 0. |
 | `--hemispheres` | Additionally report skeleton metrics separately for the left and right hemispheres. ROI masks are not split between hemispheres. |
 
 ## Output
