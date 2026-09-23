@@ -118,10 +118,8 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
                           + custom_tag(f"range {BRANGE_DEFAULT_HTML}")))
     elif list(args.bRange) != list(BRANGE_DEFAULT):
         meta_rows.append(('b-value range', f'{args.bRange[0]}&ndash;{args.bRange[1]} s/mm&sup2; (&plusmn;{BRANGE_TOL}) {custom_tag(BRANGE_DEFAULT_HTML)}'))
-    #--- the angular sampling the tensor and free-water fits had to work with;
-    #    below RECOMMENDED_DIRECTIONS it qualifies every metric in the report,
-    #    and a warning printed to a log that is not kept would not travel with
-    #    the results
+    #--- below RECOMMENDED_DIRECTIONS it qualifies every metric, so it belongs
+    #    in the report, not only in a log that may not be kept
     nDirections = getattr(args, 'nDirections', None)
     if nDirections:
         shown = (str(nDirections[0]) if len(set(nDirections)) == 1
@@ -138,9 +136,8 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
         meta_rows.append(('Skeleton hemispheres', 'left and right analysed separately; ROI masks remain unsplit'))
     if not args.adjustBmaskForFW:
         meta_rows.append(('Brain masks', f'not adjusted, i.e. voxels with 100% free water were not removed {custom_tag("adjusted, i.e. voxels with 100% free water are removed")}'))
-    #--- only shown when it leaves the validated ITK_THREADS_DEFAULT: it is the
-    #    one threading setting that changes the metrics, so a deviation belongs
-    #    beside them
+    #--- only shown when it deviates from ITK_THREADS_DEFAULT, the one threading
+    #    setting that changes the metrics
     itkThreads = getattr(args, 'itkThreads', None)
     if n_tp > 1 and itkThreads is not None and itkThreads != ITK_THREADS_DEFAULT:
         meta_rows.append(('ITK threads',
@@ -189,8 +186,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
       fnCSV = df
   if fnCSV is not None:
     if os.path.exists(fnCSV):
-        # keep IDs/timepoints like '007' or '01' as written; ID is absent without --id,
-        # which read_csv tolerates
+        # keep '007' / '01' as written; a missing ID column (no --id) is fine
         df = pd.read_csv(fnCSV, converters={'ID': str, 'timepoint': str})
     else:
         df = None

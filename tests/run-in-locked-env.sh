@@ -40,11 +40,8 @@ exec docker run --rm --platform linux/amd64 -v "${REPO_ROOT}:/repo:ro" ubuntu:no
     conda tos accept --override-channels \
         --channel https://repo.anaconda.com/pkgs/main --channel https://repo.anaconda.com/pkgs/r
     conda install -y -p /opt/conda --file /repo/container/conda-explicit-linux-64.txt
-    # pytest via pip, not conda: a conda install re-solves the environment and can
-    # move locked packages. Abort if anything conda manages changed anyway. conda
-    # cannot see pip overwriting one of its packages (e.g. pytest pulling a newer
-    # "packaging"), so pip freeze is checked too: every line it printed before must
-    # still be there.
+    # pytest via pip: a conda install re-solves and can move locked packages. Both
+    # conda's and pip's view are checked, as conda misses pip replacing a package.
     conda list -p /opt/conda --explicit > /tmp/lock-before.txt
     python -m pip freeze | sort > /tmp/pip-before.txt
     python -m pip install -q --no-cache-dir pytest

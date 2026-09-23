@@ -2,9 +2,8 @@ import create_html_with_png as chp
 import delta_svd_constants as c
 
 
-# The literal values these constants replaced. Changing any of them changes the
-# pipeline's output or the report, so a change has to be deliberate: update the
-# pin here in the same commit.
+# Changing any of these changes the output or the report: update the pin
+# deliberately, in the same commit.
 def test_constants_pinned_to_their_validated_values():
     assert c.SKELETON_MASK_DEFAULT == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
     assert c.ITK_THREADS_DEFAULT == 12

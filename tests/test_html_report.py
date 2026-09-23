@@ -271,8 +271,7 @@ def test_create_html_with_png_scopes_hemisphere_metadata_to_skeleton(tmp_path, t
 
 
 def test_create_html_with_png_keeps_leading_zeros_in_csv_id_and_timepoint(tmp_path, tiny_png):
-    # the per-subject CSV is read back from disk; without converters read_csv
-    # turned '007' / '01' into 7 / 1
+    # read_csv without converters turned '007' / '01' into 7 / 1
     fnHTML = tmp_path / "report.html"
     fnCSV = tmp_path / "report.csv"
     pd.DataFrame({

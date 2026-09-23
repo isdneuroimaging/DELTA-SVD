@@ -57,9 +57,6 @@ def resolve_thread_budget(argv):
         return detect_physical_cores()              # the full parser reports the error later
 
 
-# ITK_THREADS_DEFAULT (delta_svd_constants) is the one threading quantity that
-# reaches the metric values; see the comment there.
-
 # How far the template step may oversubscribe the core budget, as a fraction:
 # 3/2 = 1.5 threads per core. Measured faster than an exactly-fitting plan, and
 # without numerical consequence, so this is purely a throughput choice.
@@ -144,9 +141,7 @@ import pandas as pd
 
 ROI_LABEL_DTYPE = 'uint16'
 ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
-# SKELETON_MASK_DEFAULT (delta_svd_constants) doubles as the reference for the
-# FMRIB58 1 mm grid the TBSS outputs are on (see check_mni_grid), with
-# GRID_AFFINE_ATOL absorbing float32 header round-off.
+# absorbs float32 header round-off in check_mni_grid()
 GRID_AFFINE_ATOL = 1e-4
 
 from dipy.io import read_bvals_bvecs
@@ -272,9 +267,6 @@ def write_bval_or_bvec(arrStr, fname):
 #    selection the user asks for.
 B0_MAX = 5
 
-#--- BRANGE_TOL and SHELL_TOL, the tolerances a requested b-value limit is met
-#    with, are in delta_svd_constants.
-
 #--- The window the diffusion-tensor model is valid in. Below the floor the
 #    signal is contaminated by perfusion (IVIM), above the ceiling by
 #    non-Gaussian diffusion; a tensor fitted outside it is not interpretable, so
@@ -301,7 +293,6 @@ BVAL_MAX = 1800
 #    fails on its own: the bi-tensor fit solves with a pseudo-inverse, which
 #    returns a minimum-norm solution for a degenerate gradient table instead of
 #    raising, so an unchecked run produces plausible-looking numbers.
-#    MIN_DIRECTIONS and RECOMMENDED_DIRECTIONS are in delta_svd_constants.
 DESIGN_MATRIX_RANK = 7
 
 #--- Two gradient directions count as one below an angle of ~2.6 degrees. Even a
@@ -539,12 +530,9 @@ def free_water_correction(fn_data = 'data.nii.gz',
     nii = nib.load(fn_data)
     niim = nib.load(fn_mask)
     data = nii.get_fdata()
-    # Thresholded like binarise_mask() everywhere else, so negative and NaN voxels
-    # are not brain; identical to the old astype(bool) on binary and non-negative
-    # masks. Done before the call because, from numpy 2.0, the vendored fits'
-    # np.array(mask, dtype=bool, copy=False) raises on a float mask, copy=False
-    # having come to mean "never copy". binarise_mask() itself is not called here,
-    # so its NOTE is printed once, when the brain mask is written further down.
+    # Thresholded like binarise_mask() (negative/NaN is not brain), but without its
+    # NOTE, which is printed once later. Done here because from numpy 2.0 the
+    # vendored fits' np.array(mask, dtype=bool, copy=False) raises on a float mask.
     mask = niim.get_fdata() > 0
     bvals, bvecs = read_bvals_bvecs(fn_bval, fn_bvec)
     print(f'bvals = \n{bvals}\n')
@@ -574,8 +562,7 @@ def free_water_correction(fn_data = 'data.nii.gz',
     S0 = np.mean(data[..., gtab.b0s_mask], axis=-1)
     pCSF = (MD0 > 0.002)
     if not pCSF.any():
-        # np.mean() of nothing is NaN, which would silently turn mdreg and with it
-        # every free-water estimate into NaN.
+        # np.mean() of nothing is NaN, which would silently NaN every FW estimate
         raise DeltaSvdError(f"No voxel inside the brain mask has a mean diffusivity above 0.002 mm2/s "
                             f"in the single-tensor fit, so the CSF reference value needed to "
                             f"regularise the free-water fit cannot be estimated.\n"
@@ -918,9 +905,8 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
 
     
     if analyseHemispheres:
-        # Splitting at the middle of the first array axis assumes the storage of the
-        # FMRIB58 1 mm grid (LAS, midline at the centre). That holds for a custom
-        # skeleton mask too: check_mni_grid() rejects any mask off that grid up front.
+        # Splitting the first axis in half assumes the FMRIB58 1 mm grid (LAS, midline
+        # centred); check_mni_grid() enforces it for custom masks too.
         sh = maskIntersection.shape
         for hemi,bounds in zip(['LH', 'RH'],[[0,sh[0]//2],[sh[0]//2,sh[0]+1]]):
             maskHemi = maskIntersection.copy()
@@ -1140,9 +1126,8 @@ def binarise_mask(img, label, fname):
 
 
 def check_mni_grid(fname, label, reference=None):
-    """Raise unless 'fname' has the shape and affine of 'reference' (by default the
-    default skeleton mask), i.e. of the FMRIB58 1 mm grid the TBSS outputs are on.
-    Only the headers are read."""
+    """Raise unless 'fname' has the shape and affine of 'reference' (default: the
+    default skeleton mask, i.e. the FMRIB58 1 mm grid). Reads headers only."""
     if reference is None:
         reference = SKELETON_MASK_DEFAULT
     if fname == reference:
@@ -1688,10 +1673,8 @@ def pipeline_delta_svd():
             print("NOTE: Given that the final 'extract' step is not selected, we assume that you want to keep intermediate/temporary output and switch on the option '--debug' for you!")
             args.debug = True
 
-    # Done here rather than with the other input checks above so that the cheaper
-    # checks fail first, but still before any output is touched or processed: a
-    # wrong shape would otherwise crash hours in, a different affine silently
-    # misalign the skeleton. No-op for the default skeleton mask.
+    # After the cheaper checks, before any output is touched: a wrong shape would
+    # crash hours in, a wrong affine silently misalign the skeleton.
     check_mni_grid(args.skeletonMask, 'skeleton mask')
     if args.RmaskMNI is not None:
         check_mni_grid(args.RmaskMNI, 'ROI mask in MNI space')

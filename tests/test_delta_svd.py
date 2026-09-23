@@ -2509,8 +2509,7 @@ def test_wrong_number_of_bvec_files_names_that_option(delta_svd, tmp_path, monke
 
 
 # ---------------------------------------------------------------------------
-# free_water_correction(): the fit mask is thresholded like binarise_mask(), and
-# a mask without any CSF-like voxel is an error rather than a NaN mdreg.
+# free_water_correction(): fit mask thresholding and the no-CSF error.
 
 def _fw_inputs(tmp_path, gtab_bits, fFree, mask):
     _, bvals, bvecs = gtab_bits
@@ -2567,8 +2566,7 @@ def test_free_water_correction_rejects_a_mask_without_csf(delta_svd, tmp_path, _
 
 
 # ---------------------------------------------------------------------------
-# extract_stats(): the skeleton mask name is stripped from the ROI name as a
-# literal prefix, not as a regular expression.
+# extract_stats(): the skeleton name is stripped as a literal prefix, not a regex.
 
 @pytest.mark.parametrize("skelBase", ["my+skel", "sk[el", "skel.v1"])
 def test_extract_stats_strips_the_skeleton_name_literally(delta_svd, tmp_path, skelBase):
@@ -2591,9 +2589,8 @@ def test_extract_stats_strips_the_skeleton_name_literally(delta_svd, tmp_path, s
 
 
 # ---------------------------------------------------------------------------
-# check_mni_grid(): a custom skeleton / MNI ROI mask has to be on the grid of
-# the default skeleton mask (FMRIB58 1 mm, LAS). The reference is a stand-in
-# with the real mask's header, since '/opt/scripts' only exists in the image.
+# check_mni_grid(). The reference is a stand-in with the shipped mask's header,
+# since '/opt/scripts' only exists in the image.
 
 _MNI_AFFINE = np.array([[-1., 0, 0, 90], [0, 1, 0, -126], [0, 0, 1, -72], [0, 0, 0, 1]])
 _MNI_SHAPE = (182, 218, 182)
