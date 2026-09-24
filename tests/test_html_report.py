@@ -268,3 +268,24 @@ def test_create_html_with_png_scopes_hemisphere_metadata_to_skeleton(tmp_path, t
     body = fnHTML.read_text().split("</style>")[1]
     assert "<td class=\"key\">Skeleton hemispheres</td>" in body
     assert "left and right analysed separately; ROI masks remain unsplit" in body
+
+
+def test_create_html_with_png_keeps_leading_zeros_in_csv_id_and_timepoint(tmp_path, tiny_png):
+    # read_csv without converters turned '007' / '01' into 7 / 1
+    fnHTML = tmp_path / "report.html"
+    fnCSV = tmp_path / "report.csv"
+    pd.DataFrame({
+        "ID": ["007"] * 2,
+        "timepoint": ["01"] * 2,
+        "skeleton": ["skel.nii.gz"] * 2,
+        "region": ["intersection"] * 2,
+        "voxels": [100, 100],
+        "metric": ["PSMD", "MSMD"],
+        "value": [0.00045, 0.0007],
+    }).to_csv(fnCSV, index=False)
+
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, str(fnCSV))
+
+    table = fnHTML.read_text().split("Results table")[1]
+    assert "<td>007</td>" in table
+    assert "<td>01</td>" in table

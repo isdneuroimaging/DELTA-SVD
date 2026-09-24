@@ -28,6 +28,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.14"]
     runs-on: ubuntu-latest
+    # The suite finishes in under a minute; anything longer is a hung test
+    # (seen once on 3.14 with an unpinned dependency), not slow work. Fail
+    # fast instead of holding the runner for the 6-hour default.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

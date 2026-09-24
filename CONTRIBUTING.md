@@ -25,7 +25,7 @@ Three quantities shift the endpoints without any source change, because they alt
 
 | Hazard | Why it moves the numbers | Pinned as |
 | --- | --- | --- |
-| **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta-svd.py`, overridable only via the hidden `--itkThreads` |
+| **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
 | **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `ENV OPENBLAS_CORETYPE=Haswell` in the `Dockerfile` |
 
@@ -94,7 +94,7 @@ Only exact version tags are published; there is **no `latest` tag**, so no run c
     - [`CITATION.cff`](CITATION.cff) — its `version:` field, which GitHub renders in "Cite this repository";
     - [`docs/install.md`](docs/install.md) — the image tag in the `apptainer pull` / `docker pull` / verification commands, which otherwise keeps handing users the *previous* image.
 
-    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `release-build.yml` stamps the OCI label the same way `build.sh` does for a local build, and the `Dockerfile` copies the file next to the scripts, which is what `--version` reports.
+    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `build.sh` (which `release-build.yml` also calls) passes it to the `Dockerfile` as the `VERSION` build argument, which both stamps the OCI label and writes the file next to the scripts that `--version` reports. The file itself is never copied into the image, so a plain `docker build` without that argument reports `unknown`.
 
 2. **Tag the release commit and push the tag.** This triggers `release-build.yml`, which checks the tag against `VERSION`, builds the image (same semantics as a local `build.sh` run), and pushes it — attested via `actions/attest-build-provenance` — to a public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`, tagged by commit SHA only so it can never be mistaken for a release.
 
