@@ -2,12 +2,80 @@
 # -*- coding: utf-8 -*-
 
 import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime, contextlib
+import importlib.util
 from os.path import join, exists, dirname, basename
 from shutil import copy2, rmtree
 from pathlib import Path
 
 from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
-                                 BRANGE_TOL, SHELL_TOL, MIN_DIRECTIONS, RECOMMENDED_DIRECTIONS)
+                                 BRANGE_TOL, SHELL_TOL, MIN_DIRECTIONS, RECOMMENDED_DIRECTIONS,
+                                 IMAGE_SCRIPT_DIR, IMAGE_ENVIRONMENT)
+
+
+def running_in_image(scriptPath=None):
+    """True when this is the copy of the script installed in the image."""
+    if scriptPath is None:
+        scriptPath = __file__
+    return dirname(os.path.realpath(scriptPath)) == IMAGE_SCRIPT_DIR
+
+
+def fsl_sub_config(fsldir):
+    """The fsl_sub configuration the image resolves to by itself, i.e. with no
+    FSLSUB_CONF and no ~/.fsl_sub.yml (as under Docker, where the image user has
+    no home): the first non-empty file of fsl_sub's own search path after those
+    two. Located without importing fsl_sub. None if neither exists."""
+    candidates = [join(fsldir, 'etc', 'fslconf', 'fsl_sub.yml')]
+    spec = importlib.util.find_spec('fsl_sub')
+    if spec is not None and spec.submodule_search_locations:
+        candidates.append(join(list(spec.submodule_search_locations)[0],
+                               'plugins', 'fsl_sub_shell.yml'))
+    for p in candidates:
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return p
+    return None
+
+
+def pin_image_environment(environ, fslSubConfig=fsl_sub_config):
+    """Give 'environ' the image's own settings, whatever came in from the host.
+
+    Apptainer passes the host environment through and lets it override the
+    image's ENV values (see IMAGE_ENVIRONMENT), and it mounts the host's home.
+    Left alone, that runs the host's FSL (FSLDIR: the TBSS scripts call
+    $FSLDIR/bin/...) or ANTs (ANTSPATH: the template script calls
+    ${ANTSPATH}/antsRegistration), another BLAS kernel (OPENBLAS_CORETYPE), the
+    host's Python packages (PYTHONPATH, ~/.local), or the host's fsl_sub
+    configuration (FSLSUB_*, ~/.fsl_sub.yml). Every one of these changes the
+    metrics or breaks the run, so they are assigned or removed here rather than
+    defaulted. Also inherited by every FSL and ANTs subprocess."""
+    for name in [n for n in environ if n.startswith(('PYTHON', 'FSLSUB_'))]:
+        del environ[name]
+    environ.update(IMAGE_ENVIRONMENT)
+    # set explicitly, as it is searched before ~/.fsl_sub.yml
+    conf = fslSubConfig(environ['FSLDIR'])
+    if conf is not None:
+        environ['FSLSUB_CONF'] = conf
+
+
+def isolated_interpreter_argv(flags, argv, script):
+    """The command re-running 'script' as 'python -E -s -u', or None when the
+    interpreter already ignores PYTHON* variables and the user site-packages.
+    Otherwise numpy and the rest could be imported from the host's PYTHONPATH or
+    ~/.local instead of the image. -u stands in for PYTHONUNBUFFERED, which -E
+    ignores."""
+    if flags.ignore_environment and flags.no_user_site:
+        return None
+    return [sys.executable, '-E', '-s', '-u', script] + list(argv)
+
+
+# Before anything else reads the environment or imports a third-party package.
+# The Dockerfile ENTRYPOINT already starts Python with -E -s -u; the re-exec
+# covers the script being started any other way inside the image.
+if running_in_image():
+    pin_image_environment(os.environ)
+    if __name__ == '__main__':
+        _argv = isolated_interpreter_argv(sys.flags, sys.argv[1:], os.path.realpath(__file__))
+        if _argv is not None:
+            os.execv(sys.executable, _argv)
 
 
 def detect_physical_cores():

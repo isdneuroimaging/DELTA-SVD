@@ -38,6 +38,8 @@ Longitudinal ANTs registration divides its similarity metric across threads and 
 
 DELTA-SVD therefore fixes the registration thread count at the value the method was validated with, instead of deriving it from the cores available. This is why `--threads` and `--para` affect only runtime and memory: they decide how many registrations run at once, never how each one is computed.
 
+Settings from your own environment cannot change the results either. Apptainer passes the host's environment variables into the container, so an `FSLDIR`, `ANTSPATH`, `OPENBLAS_CORETYPE` or `PYTHONPATH` set on the host (for example by a local FSL installation or an HPC module) would otherwise select the host's FSL, ANTs, BLAS kernel or Python packages. DELTA-SVD resets these to the image's own values when it starts, and ignores Python packages in your home directory (`~/.local`).
+
 `--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it**: results produced with a different value cannot be compared with, or pooled with, results produced at the default — unlike a DELTA-SVD `PATCH` version, there is no safe value to deviate to; only the default is validated.
 
 ## Running on an HPC cluster

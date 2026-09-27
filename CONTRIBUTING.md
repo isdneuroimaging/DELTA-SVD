@@ -27,9 +27,11 @@ Three quantities shift the endpoints without any source change, because they alt
 | --- | --- | --- |
 | **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
-| **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `ENV OPENBLAS_CORETYPE=Haswell` in the `Dockerfile` |
+| **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `OPENBLAS_CORETYPE=Haswell` in `IMAGE_ENVIRONMENT` (`delta_svd_constants.py`), mirrored as `ENV` in the `Dockerfile` |
 
 A last-bit difference in the fitted tensors nudges the deformation field, and the skeleton (thresholding an *interpolated binary* mask at exactly 1) converts that into whole voxels entering or leaving — nothing absorbs it, so it reaches the metrics. If the reference subject ever moves without an obvious cause, check these three before suspecting the code.
+
+The image's tool selection is pinned the same way. Apptainer passes the host environment in and lets it override the image's `ENV` values, so `delta-svd.py` assigns everything in `IMAGE_ENVIRONMENT` (`FSLDIR`, `ANTSPATH`, `OPENBLAS_CORETYPE`, ...) itself when it runs in the image, drops host `PYTHON*` and `FSLSUB_*` variables, and runs Python with `-E -s` so neither `PYTHONPATH` nor `~/.local` can supply packages. Otherwise a host FSL, ANTs, BLAS kernel or numpy could do the processing. A test keeps `IMAGE_ENVIRONMENT` and the `Dockerfile` `ENV` in step.
 
 #### Checking whether a change moved the numbers
 

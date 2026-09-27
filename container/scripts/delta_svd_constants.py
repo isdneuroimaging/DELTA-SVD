@@ -24,6 +24,27 @@ BRANGE_DEFAULT = (800, 1200)
 BRANGE_TOL = 5
 SHELL_TOL = 25
 
+#--- Where the image installs the pipeline scripts; running from here is what
+#    identifies a run inside the image.
+IMAGE_SCRIPT_DIR = "/opt/scripts"
+
+#--- Environment the image's FSL, ANTs and BLAS are selected by. The Dockerfile
+#    sets the same values as ENV (a test keeps the two in step), but Apptainer
+#    turns each ENV into 'export VAR="${VAR:-value}"', so a value set on the host
+#    wins there. delta-svd.py therefore assigns these outright when it runs in
+#    the image: a host FSLDIR or ANTSPATH would otherwise run the host's FSL or
+#    ANTs, and a host OPENBLAS_CORETYPE another BLAS kernel, all of which change
+#    the metrics. PYTHONNOUSERSITE keeps the Python subprocesses (e.g. fsl_sub)
+#    off the host's ~/.local, which Apptainer mounts.
+IMAGE_ENVIRONMENT = {
+    "FSLDIR": "/opt/conda",
+    "FSLOUTPUTTYPE": "NIFTI_GZ",
+    "ANTSPATH": "/opt/ants-2.4.3/bin",
+    "OPENBLAS_CORETYPE": "Haswell",
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONNOUSERSITE": "1",
+}
+
 #--- Fewer unique directions than the minimum are refused, fewer than the
 #    recommended count warned about; see DESIGN_MATRIX_RANK in delta-svd.py.
 MIN_DIRECTIONS = 12
