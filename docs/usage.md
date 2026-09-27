@@ -24,9 +24,9 @@ A run processes one subject, given one diffusion-weighted image per **timepoint*
 | `--dwi` | **yes** | Path(s) to 4D, preprocessed DWI NIfTI image(s), one per timepoint. Passing more than one triggers longitudinal processing. |
 | `--bval` / `--bvec` | no | FSL-format gradient files. If omitted, they are inferred from each DWI path by swapping the extension for `.bval` / `.bvec`. |
 | `--bmask` | no | DWI-space brain mask(s). Binarised on input: values greater than zero become 1; zero and negative values become 0. If omitted, inferred by swapping the DWI extension for `_brainmask.nii.gz`, falling back to `_brainmask.nii` if that file does not exist. |
-| `--tp` | no | Timepoint label(s), which must be unique (`all` is reserved for the rows summarising all timepoints). Default: `TP01`, `TP02`, … in the order given. |
+| `--tp` | no | Timepoint label(s), which must be unique and contain no spaces (`all` is reserved for the rows summarising all timepoints). Default: `TP01`, `TP02`, … in the order given. |
 | `--id` | no | Subject ID; added as an `ID` column to the results table. Recommended; it makes [aggregation](#aggregating-across-subjects) across subjects clean. |
-| `-o`, `--dirOutput` | no | Output folder. Default: the parent folder of the first `--dwi` image. |
+| `-o`, `--dirOutput` | no | Output folder. Default: the parent folder of the first `--dwi` image. For longitudinal input its path must not contain spaces, which the ANTs template construction cannot handle. |
 
 For `--bval`, `--bvec` and `--bmask`, you may give one value (applied to all timepoints) or one per timepoint. When your files follow the naming convention above, you can omit them entirely.
 
@@ -58,7 +58,7 @@ apptainer run delta-svd.sif \
 
 ## Restricting the analysis with masks
 
-All masks are optional. Per-timepoint masks are given in DWI space (one per timepoint, in the same order as `--dwi`; write `NA` to skip a timepoint) and are merged in template space.
+All masks are optional. Per-timepoint masks are given in DWI space (one per timepoint, in the same order as `--dwi`; write `NA` to skip a timepoint) and are merged in template space. Like the brain mask, they have to be on the grid of their DWI image (same dimensions and affine); DELTA-SVD stops before processing otherwise.
 
 | Option | Description |
 | --- | --- |
