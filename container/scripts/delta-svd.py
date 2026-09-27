@@ -44,13 +44,19 @@ def pin_image_environment(environ, fslSubConfig=fsl_sub_config):
     $FSLDIR/bin/...) or ANTs (ANTSPATH: the template script calls
     ${ANTSPATH}/antsRegistration), another BLAS kernel (OPENBLAS_CORETYPE), the
     host's Python packages (PYTHONPATH, ~/.local), or the host's fsl_sub
-    configuration (FSLSUB_*, ~/.fsl_sub.yml). Every one of these changes the
-    metrics or breaks the run, so they are assigned or removed here rather than
-    defaulted. Also inherited by every FSL and ANTs subprocess."""
+    settings (FSLSUB_*). Every one of these changes the metrics or breaks the
+    run, so they are assigned or removed here rather than defaulted. Also
+    inherited by every FSL and ANTs subprocess.
+
+    Not covered: a ~/.fsl_sub.yml in the mounted home. fsl_sub merges it over
+    whatever configuration it loads, FSLSUB_CONF included. It can only change
+    how jobs are launched, not what they compute; asking for a cluster
+    scheduler, for which the image has no plugin, makes fsl_sub fail."""
     for name in [n for n in environ if n.startswith(('PYTHON', 'FSLSUB_'))]:
         del environ[name]
     environ.update(IMAGE_ENVIRONMENT)
-    # set explicitly, as it is searched before ~/.fsl_sub.yml
+    # the file fsl_sub would find by itself, named explicitly so a host value
+    # cannot select another one
     conf = fslSubConfig(environ['FSLDIR'])
     if conf is not None:
         environ['FSLSUB_CONF'] = conf
