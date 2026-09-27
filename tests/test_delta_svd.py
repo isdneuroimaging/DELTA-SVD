@@ -825,6 +825,61 @@ def test_filter_b_values_drops_volumes_outside_brange(delta_svd, tmp_path):
     assert kept[0, 0, 0].tolist() == list(range(21))
 
 
+# selected_volumes_float32() replaces get_fdata()[..., sel] in filter_b_values()
+# to keep the whole image out of float64. It must produce the same float32
+# values bit for bit, scaled input included: a last-bit change here reaches the
+# metrics (see CONTRIBUTING.md).
+
+def _stored_image(path, dtype, rng, shape=(3, 4, 5, 7)):
+    data = rng.normal(800, 300, shape)
+    img = nib.Nifti1Image(data, np.eye(4))
+    img.set_data_dtype(dtype)               # int types: nibabel picks a slope/inter
+    nib.save(img, str(path))
+    return nib.load(str(path))
+
+
+@pytest.mark.parametrize("dtype, ext", [
+    ("float32", ".nii.gz"), ("float64", ".nii.gz"), ("int16", ".nii.gz"),
+    ("uint8", ".nii.gz"), ("int16", ".nii")])
+def test_selected_volumes_match_get_fdata_bit_for_bit(delta_svd, tmp_path, dtype, ext):
+    rng = np.random.default_rng(0)
+    nii = _stored_image(tmp_path / ("dwi" + ext), dtype, rng)
+    if dtype in ("int16", "uint8"):
+        assert (nii.dataobj.slope, nii.dataobj.inter) != (1, 0)    # scaling exercised
+    idx = np.array([0, 2, 3, 6])
+
+    expected = nii.get_fdata()[..., idx].astype(np.float32)
+    got = delta_svd.selected_volumes_float32(nib.load(nii.get_filename()), idx)
+
+    assert got.dtype == np.float32
+    assert np.array_equal(got.view(np.uint32), expected.view(np.uint32))
+
+
+@pytest.mark.parametrize("dtype", ["float32", "int16"])
+def test_filtered_file_is_unchanged_by_the_per_volume_read(delta_svd, tmp_path, dtype):
+    # the file written before this change (float64 selection, cast on save)
+    # and the one written now hold the same bytes of data
+    rng = np.random.default_rng(1)
+    nii = _stored_image(tmp_path / "dwi.nii.gz", dtype, rng)
+    idx = np.array([1, 4, 5])
+    old, new = str(tmp_path / "old.nii.gz"), str(tmp_path / "new.nii.gz")
+    delta_svd.save_nifti(old, nii.get_fdata()[..., idx], nii.affine, nii.header, dtype="float32")
+    delta_svd.save_nifti(new, delta_svd.selected_volumes_float32(nib.load(nii.get_filename()), idx),
+                         nii.affine, nii.header, dtype="float32")
+
+    a, b = nib.load(old), nib.load(new)
+    assert a.header.get_data_dtype() == b.header.get_data_dtype() == np.float32
+    assert np.array_equal(np.asanyarray(a.dataobj.get_unscaled()).view(np.uint32),
+                          np.asanyarray(b.dataobj.get_unscaled()).view(np.uint32))
+
+
+def test_selected_volumes_never_load_the_whole_image_as_float(delta_svd, tmp_path, monkeypatch):
+    nii = _stored_image(tmp_path / "dwi.nii.gz", "int16", np.random.default_rng(2))
+    monkeypatch.setattr(nib.Nifti1Image, "get_fdata",
+                        lambda self, *a, **k: pytest.fail("whole image loaded as float"))
+    delta_svd.selected_volumes_float32(nib.load(nii.get_filename()), np.array([0, 1]))
+
+
 def test_filter_b_values_rounds_near_zero_bvalues_to_zero(delta_svd, tmp_path):
     # b=3 is a b0 in all but name; dipy's gradient_table would otherwise treat it
     # as a (useless) diffusion-weighted direction. Nothing is dropped here - the
