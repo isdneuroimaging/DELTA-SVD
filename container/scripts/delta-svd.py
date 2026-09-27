@@ -1307,32 +1307,36 @@ def isNIfTI(s, abort=True):
             return None
 
 
-def candidate_paths(fn, dwi, anyExtension, inferred=False):
-    """The paths an input given per timepoint is looked for at, in order: as
-    given, and relative to the folder of its DWI image; each optionally
-    completed with a NIfTI extension.
+def per_timepoint_path(fn, dwi):
+    """Where an input given per timepoint is looked for: a bare file name next
+    to that timepoint's DWI image, anything carrying a folder exactly as given.
+
+    A bare name is never looked for in the working directory. It used to be,
+    first, so a file of that name there was silently taken for every timepoint
+    -- e.g. 'bvals' run from inside one session's folder gave the other
+    sessions that session's b-values. A name carrying a folder ('./bvals',
+    'ses-1/bvals', an absolute path) is taken literally and never re-anchored.
+
+    Inferred names need no special case: they are built from the DWI path, so
+    they carry its folder already, or none when the DWI has none either."""
+    if dirname(fn):
+        return fn
+    return join(dirname(dwi), fn)
+
+
+def candidate_paths(fn, dwi, anyExtension):
+    """The paths an input given per timepoint is looked for at, in order: the
+    one per_timepoint_path() names, optionally completed with a NIfTI extension.
 
     This mirrors the resolution for the sake of the error message only. What is
     accepted stays entirely with isNIfTI()/exists(), so this cannot widen it."""
-    #--- An inferred name is built from the DWI path and so already carries its
-    #    folder; joining it to that folder again would only look for
-    #    '<dwiDir>/<dwiDir>/<name>'. Only a path the user typed is worth
-    #    re-anchoring, which is what makes a bare basename work.
-    roots = [fn] if inferred else [fn, join(dirname(dwi), fn)]
-    paths = []
-    for p in roots:
-        # isNIfTI() completes a path that carries no NIfTI extension of its own.
-        # It does probe 'p' itself either way, but a name already ending in one
-        # can only ever match as itself, so listing the completions would be noise.
-        if anyExtension and not p.endswith(NIFTI_EXTENSIONS):
-            paths += [p + e for e in NIFTI_EXTENSIONS]
-        else:
-            paths.append(p)
-    unique = []
-    for p in paths:                     # dirname() is empty for a bare basename
-        if p not in unique:
-            unique.append(p)
-    return unique
+    p = per_timepoint_path(fn, dwi)
+    # isNIfTI() completes a path that carries no NIfTI extension of its own.
+    # It does probe 'p' itself either way, but a name already ending in one
+    # can only ever match as itself, so listing the completions would be noise.
+    if anyExtension and not p.endswith(NIFTI_EXTENSIONS):
+        return [p + e for e in NIFTI_EXTENSIONS]
+    return [p]
 
 
 def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
@@ -1341,7 +1345,7 @@ def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
     Names the timepoint by its DWI image rather than by an index: the '--tp'
     labels are not resolved yet at this point, and the path is what the user has
     to go and look at anyway."""
-    paths = candidate_paths(fn, dwi, anyExtension, inferred)
+    paths = candidate_paths(fn, dwi, anyExtension)
     tried = '\n'.join(f'   {p}' for p in paths)
     if inferred:
         origin = f" No '--{attr}' was given, so it was inferred from the DWI path."
@@ -1484,14 +1488,14 @@ def iniParser():
     parser.add_argument("--version", action='version', version=f'DELTA-SVD {__version__}', help="show the DELTA-SVD version and exit")
     group0 = parser.add_argument_group('input/output data specification')
     group0.add_argument("--dwi", required=True, metavar='NIfTI', type=isNIfTI, nargs="+", action='extend', help="input path(s) to 4D DWI image(s) in NIfTI format. Number of arguments should correspond to number of timepoints.")
-    group0.add_argument("--bval", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-values in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bval'")
-    group0.add_argument("--bvec", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-vectors in FSL format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient.  If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bvec'")
-    group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s). If parent folders are identical to those of corresponding DWI images, providing basename(s) is sufficient. If all basenames are identical, repetition is not needed. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
+    group0.add_argument("--bval", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-values in FSL format, corresponding to DWI image(s). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bval'")
+    group0.add_argument("--bvec", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-vectors in FSL format, corresponding to DWI image(s). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bvec'")
+    group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
     group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all timepoints. Number of arguments should correspond to number of DWI image(s). Labels must be plain names without path separators or traversal and must not collide with internal working directories. Labels have to be unique, and 'all' is reserved for the rows summarising all timepoints. If argument not provided, timepoints are labelled consecutively as TP01, TP02, and so on.")
     group0.add_argument("--id", metavar='label', type=str, help="optional subject ID. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple subjects.")
     group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
     group1 = parser.add_argument_group('additional masking')
-    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
+    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. A bare file name (without a folder) is looked for next to the DWI image of that timepoint; a path containing a folder is used as given. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
     group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space. One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
     group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default skeleton mask). Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0.")
     group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
@@ -1556,11 +1560,7 @@ def pipeline_delta_svd():
                                     f"has to be either one or match the number of DWI images "
                                     f"(n={len(args.dwi)}). Please refer to '--help'.")
         for i, fn in enumerate(flist):
-            fnResolved = resolve(fn)
-            if fnResolved is None and not inferred:
-                # only a path the user typed is re-anchored to the DWI folder;
-                # see candidate_paths() for why an inferred one is not
-                fnResolved = resolve(join(dirname(args.dwi[i]), fn))
+            fnResolved = resolve(per_timepoint_path(fn, args.dwi[i]))
             if fnResolved is None:
                 raise DeltaSvdError(missing_input_message(attr, fn, args.dwi[i], anyExtension, inferred))
             flist[i] = fnResolved
@@ -1599,9 +1599,7 @@ def pipeline_delta_svd():
             if masks[i] == 'NA':
                 masks[i] = None
                 continue
-            fnResolved = isNIfTI(masks[i], abort=False)
-            if fnResolved is None:
-                fnResolved = isNIfTI(join(dirname(args.dwi[i]), masks[i]), abort=False)
+            fnResolved = isNIfTI(per_timepoint_path(masks[i], args.dwi[i]), abort=False)
             if fnResolved is None:
                 raise DeltaSvdError(missing_input_message(
                     attr, masks[i], args.dwi[i], True, False,
@@ -1617,17 +1615,19 @@ def pipeline_delta_svd():
         validate_roi_labels(nib.load(args.RmaskMNI).get_fdata(),
                             'ROI mask in MNI space', args.RmaskMNI)
 
+    # Absolute, so the log shows which file each timepoint really uses: the
+    # same relative name can stand for a different file per timepoint.
     print(f"\nInput contains N={len(args.dwi)} timepoints")
     for i in range(len(args.dwi)):
         print(f'Timepoint {args.tp[i]}:')
-        print(f' DWI   :{args.dwi[i]}')
-        print(f' bval  :{args.bval[i]}')
-        print(f' bvec  :{args.bvec[i]}')
-        print(f' Bmask :{args.bmask[i]}')
+        print(f' DWI   :{os.path.abspath(args.dwi[i])}')
+        print(f' bval  :{os.path.abspath(args.bval[i])}')
+        print(f' bvec  :{os.path.abspath(args.bvec[i])}')
+        print(f' Bmask :{os.path.abspath(args.bmask[i])}')
         if args.Emask[i]:
-            print(f' Emask :{args.Emask[i]}')
+            print(f' Emask :{os.path.abspath(args.Emask[i])}')
         if args.Rmask[i]:
-            print(f' Rmask :{args.Rmask[i]}')
+            print(f' Rmask :{os.path.abspath(args.Rmask[i])}')
 
     if args.RmaskMNI is not None:
         print(f'\nAn additional ROI mask in MNI space (RmaskMNI) was provided:\n {args.RmaskMNI}')

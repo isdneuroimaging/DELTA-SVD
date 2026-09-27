@@ -30,6 +30,8 @@ A run processes one subject, given one diffusion-weighted image per **timepoint*
 
 For `--bval`, `--bvec` and `--bmask`, you may give one value (applied to all timepoints) or one per timepoint. When your files follow the naming convention above, you can omit them entirely.
 
+A bare file name (no folder, e.g. `bvals`) is looked for next to the corresponding DWI image, never in the current directory, so one bare name given for several timepoints finds each timepoint's own file. A path that contains a folder (e.g. `./bvals`, `ses-1/bvals` or an absolute path) is used exactly as given. The same applies to `--Emask` and `--Rmask`.
+
 ## Cross-sectional (single timepoint)
 
 Run from the folder holding `sub-01_dwi.nii.gz`, `sub-01_dwi.bval`, `sub-01_dwi.bvec` and `sub-01_dwi_brainmask.nii.gz`; everything but the DWI is then inferred:

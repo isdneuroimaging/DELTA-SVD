@@ -2315,18 +2315,29 @@ def test_inferred_path_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path,
                       "Notch004/BL/diffusion/data_brainmask.nii"]
 
 
-def test_candidate_paths_re_anchors_only_what_the_user_typed(delta_svd):
+def test_candidate_paths_anchors_only_a_bare_name(delta_svd):
     dwi = "study/sub01/data.nii.gz"
     # inferred: already carries the folder, so it is probed as-is only
-    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True, inferred=True) == [
+    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True) == [
         "study/sub01/data_brainmask.nii.gz", "study/sub01/data_brainmask.nii"]
-    # typed: a bare basename has to be resolvable against the DWI folder
-    assert delta_svd.candidate_paths("m.nii.gz", dwi, True, inferred=False) == [
-        "m.nii.gz", "study/sub01/m.nii.gz"]
+    # a bare name is probed next to the DWI only, never in the working directory
+    assert delta_svd.candidate_paths("m.nii.gz", dwi, True) == ["study/sub01/m.nii.gz"]
+    # a name carrying a folder is probed as given only
+    assert delta_svd.candidate_paths("./m.nii.gz", dwi, True) == ["./m.nii.gz"]
+
+
+def test_per_timepoint_path(delta_svd):
+    dwi = "/data/ses-2/data.nii.gz"
+    assert delta_svd.per_timepoint_path("bvals", dwi) == "/data/ses-2/bvals"
+    assert delta_svd.per_timepoint_path("./bvals", dwi) == "./bvals"
+    assert delta_svd.per_timepoint_path("ses-1/bvals", dwi) == "ses-1/bvals"
+    assert delta_svd.per_timepoint_path("/abs/bvals", dwi) == "/abs/bvals"
+    # a DWI given as a bare name lives in the working directory, so does its file
+    assert delta_svd.per_timepoint_path("bvals", "data.nii.gz") == "bvals"
 
 
 def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_path, monkeypatch, capsys):
-    # the feature the second probe exists for must survive the fix, relative too
+    # relative DWI path, so the DWI folder differs from the working directory
     sub = tmp_path / "study" / "sub01"
     sub.mkdir(parents=True)
     skel = tmp_path / "skel.nii.gz"
@@ -2339,7 +2350,90 @@ def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_
         "--dwi", "study/sub01/data.nii.gz", "--bmask", "mask.nii.gz",
         "--skeletonMask", "skel.nii.gz", "--steps", "qc", "--qc", "0",
     ])
-    assert "Bmask :study/sub01/mask.nii.gz" in out
+    assert f"Bmask :{os.path.abspath('study/sub01/mask.nii.gz')}" in out
+
+
+# ---------------------------------------------------------------------------
+# A bare name means the file next to each timepoint's DWI image. It used to be
+# looked for in the working directory first, so running from inside one
+# session's folder silently gave every session that session's files.
+
+def _two_sessions(tmp_path):
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    dwis = []
+    for ses in ["ses-1", "ses-2"]:
+        d = tmp_path / ses
+        d.mkdir()
+        for fn in ["data.nii.gz", "bvals", "bvecs", "mask.nii.gz", "lesion.nii.gz"]:
+            (d / fn).touch()
+        dwis.append(str(d / "data.nii.gz"))
+    return skel, dwis
+
+
+def test_bare_names_ignore_a_same_named_file_in_the_working_directory(delta_svd, tmp_path, monkeypatch, capsys):
+    skel, dwis = _two_sessions(tmp_path)
+    monkeypatch.chdir(tmp_path / "ses-1")
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", *dwis, "--bval", "bvals", "--bvec", "bvecs", "--bmask", "mask",
+        "--Emask", "lesion.nii.gz", "lesion.nii.gz",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    tp1, tp2 = out.split("Timepoint TP02:")
+    ses1, ses2 = tmp_path / "ses-1", tmp_path / "ses-2"
+    for label, fn in [("bval  ", "bvals"), ("bvec  ", "bvecs"),
+                      ("Bmask ", "mask.nii.gz"), ("Emask ", "lesion.nii.gz")]:
+        assert f"{label}:{ses1 / fn}" in tp1
+        assert f"{label}:{ses2 / fn}" in tp2
+    assert str(ses1) not in tp2
+
+
+def test_bare_name_found_only_in_the_working_directory_is_missing(delta_svd, tmp_path, monkeypatch):
+    skel, dwis = _two_sessions(tmp_path)
+    (tmp_path / "ses-2" / "bvals").unlink()
+    monkeypatch.chdir(tmp_path / "ses-1")
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", *dwis, "--bval", "bvals", "--bvec", "bvecs",
+        "--bmask", "mask", "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "'--bval'" in msg
+    assert dwis[1] in msg
+    assert str(tmp_path / "ses-2" / "bvals") in msg
+
+
+def test_path_with_a_folder_is_used_as_given(delta_svd, tmp_path, monkeypatch, capsys):
+    skel, dwis = _two_sessions(tmp_path)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "bvals").touch()
+    monkeypatch.chdir(tmp_path)
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", *dwis, "--bval", "./shared/bvals", "--bvec", "bvecs", "--bmask", "mask",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    assert out.count(f"bval  :{os.path.abspath('shared/bvals')}") == 2
+
+
+def test_path_with_a_folder_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path, monkeypatch):
+    # 'grad/bvals' exists only relative to the DWI folder, not to the working
+    # directory; it is a path, so it is not looked for there
+    skel, dwis = _two_sessions(tmp_path)
+    for ses in ["ses-1", "ses-2"]:
+        (tmp_path / ses / "grad").mkdir()
+        (tmp_path / ses / "grad" / "bvals").touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", *dwis, "--bval", "grad/bvals", "--bvec", "bvecs",
+        "--bmask", "mask", "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError, match="'--bval'"):
+        delta_svd.pipeline_delta_svd()
 
 
 # ---------------------------------------------------------------------------
@@ -2424,7 +2518,7 @@ def test_missing_explicit_bmask_reports_it_as_given(delta_svd, tmp_path, monkeyp
     msg = str(excinfo.value)
     assert "given as 'nowhere.nii.gz'" in msg
     assert "inferred" not in msg
-    # probed relative to the DWI folder as well, and that is reported
+    # a bare name is probed next to the DWI, and that is reported
     assert str(tmp_path / "nowhere.nii.gz") in msg
 
 
