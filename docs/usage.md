@@ -7,13 +7,13 @@ icon: lucide/play
 DELTA-SVD runs as a container. The container's entry point is the main pipeline script `delta-svd.py`, so the arguments you pass after the image name are the pipeline's arguments.
 
 ```
-apptainer run delta-svd.sif --dwi <image> --id <subject> [options]
+apptainer run --no-home delta-svd.sif --dwi <image> --id <subject> [options]
 ```
 
 Under **Apptainer** (recommended) or rootless **Podman**, output files come out owned by you. Under **Docker** you must bind-mount your data (`-v`) and take an extra step to get output owned by your host user; see [Advanced usage](advanced-usage.md).
 
 > [!NOTE]
-> Apptainer automatically mounts your home directory, the current working directory, and `/tmp`, so data under any of those is visible with no extra flags. The examples below are run from the folder that holds your data (mounted automatically as the working directory), so the file names need no path. For data on another filesystem (e.g. a `/data` or scratch mount not under your home), bind it in explicitly with `--bind`/`-B`, for example `apptainer run --bind /data delta-svd.sif …`.
+> The examples use `--no-home`, which keeps your home directory out of the container, so personal settings stored there cannot affect a run. Apptainer still mounts the current working directory, even inside your home directory, and `/tmp`. The examples below are run from the folder that holds your data (mounted automatically as the working directory), so the file names need no path. For data outside the working directory (e.g. a `/data` or scratch mount), bind it in explicitly with `--bind`/`-B`, for example `apptainer run --no-home --bind /data delta-svd.sif …`.
 
 ## Inputs
 
@@ -35,7 +35,7 @@ For `--bval`, `--bvec` and `--bmask`, you may give one value (applied to all tim
 Run from the folder holding `sub-01_dwi.nii.gz`, `sub-01_dwi.bval`, `sub-01_dwi.bvec` and `sub-01_dwi_brainmask.nii.gz`; everything but the DWI is then inferred:
 
 ```
-apptainer run delta-svd.sif \
+apptainer run --no-home delta-svd.sif \
   --dwi sub-01_dwi.nii.gz \
   --id sub-01
 ```
@@ -45,7 +45,7 @@ apptainer run delta-svd.sif \
 List all the timepoints' images after a single `--dwi` (one image per timepoint). DELTA-SVD builds a within-subject template with ANTs and derives the skeleton on it, so metrics are directly comparable across timepoints:
 
 ```
-apptainer run delta-svd.sif \
+apptainer run --no-home delta-svd.sif \
   --dwi ses-1_dwi.nii.gz ses-2_dwi.nii.gz \
   --tp  ses-1 ses-2 \
   --id  sub-01

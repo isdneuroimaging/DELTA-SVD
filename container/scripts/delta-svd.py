@@ -38,9 +38,10 @@ def fsl_sub_config(fsldir):
 def pin_image_environment(environ, fslSubConfig=fsl_sub_config):
     """Give 'environ' the image's own settings, whatever came in from the host.
 
-    Apptainer passes the host environment through and lets it override the
-    image's ENV values (see IMAGE_ENVIRONMENT), and it mounts the host's home.
-    Left alone, that runs the host's FSL (FSLDIR: the TBSS scripts call
+    Apptainer passes in host variables the image does not set (PYTHONPATH,
+    FSLSUB_*) and mounts the host's home, and the image's ENV values can still
+    be replaced on purpose (see IMAGE_ENVIRONMENT). Left alone, that can run
+    the host's FSL (FSLDIR: the TBSS scripts call
     $FSLDIR/bin/...) or ANTs (ANTSPATH: the template script calls
     ${ANTSPATH}/antsRegistration), another BLAS kernel (OPENBLAS_CORETYPE), the
     host's Python packages (PYTHONPATH, ~/.local), or the host's fsl_sub

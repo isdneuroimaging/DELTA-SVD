@@ -11,7 +11,7 @@ DELTA-SVD is a containerised pipeline for deriving diffusion MRI endpoints suita
 DELTA-SVD runs as a container whose entry point is the pipeline script. The general usage pattern is:
 
 ```
-apptainer run delta-svd.sif --dwi <image> --id <subject> [options]
+apptainer run --no-home delta-svd.sif --dwi <image> --id <subject> [options]
 ```
 
 **See the [**documentation**](https://delta-svd.com) for full details on requirements, installation and usage.**

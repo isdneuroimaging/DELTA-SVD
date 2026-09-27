@@ -29,13 +29,14 @@ SHELL_TOL = 25
 IMAGE_SCRIPT_DIR = "/opt/scripts"
 
 #--- Environment the image's FSL, ANTs and BLAS are selected by. The Dockerfile
-#    sets the same values as ENV (a test keeps the two in step), but Apptainer
-#    turns each ENV into 'export VAR="${VAR:-value}"', so a value set on the host
-#    wins there. delta-svd.py therefore assigns these outright when it runs in
-#    the image: a host FSLDIR or ANTSPATH would otherwise run the host's FSL or
-#    ANTs, and a host OPENBLAS_CORETYPE another BLAS kernel, all of which change
-#    the metrics. PYTHONNOUSERSITE keeps the Python subprocesses (e.g. fsl_sub)
-#    off the host's ~/.local, which Apptainer mounts.
+#    sets the same values as ENV (a test keeps the two in step). Apptainer keeps
+#    those over host variables of the same name, but they can still be replaced
+#    on purpose ('docker run -e', Apptainer's '--env' or APPTAINERENV_*), so
+#    delta-svd.py assigns them outright when it runs in the image: another
+#    FSLDIR or ANTSPATH would run another FSL or ANTs, and another
+#    OPENBLAS_CORETYPE another BLAS kernel, all of which change the metrics.
+#    PYTHONNOUSERSITE keeps the Python subprocesses (e.g. fsl_sub) off
+#    ~/.local in a home that Apptainer mounts.
 IMAGE_ENVIRONMENT = {
     "FSLDIR": "/opt/conda",
     "FSLOUTPUTTYPE": "NIFTI_GZ",
