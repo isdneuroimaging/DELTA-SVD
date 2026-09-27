@@ -164,9 +164,13 @@ This reuses `STAGED` from step 3. If it is not set in the current shell, the com
 echo "Promoting ${STAGED:?not set, see step 3}" && gh workflow run release-promote.yml -f image="$STAGED"
 ```
 
-You can also start it from the Actions tab: choose "Run workflow". The workflow first re-reads the image's own `version` and `revision` labels, and refuses the image if either is malformed, `unknown`, or `-dirty`. It then copies the manifest to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, without rebuilding. Finally, it opens a draft GitHub release that records the digest.
+You can also start it from the Actions tab: choose "Run workflow". The workflow first re-reads the image's own `version` and `revision` labels, and refuses the image if either is malformed, `unknown`, or `-dirty`. It then copies the manifest to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, without rebuilding. Finally, it creates a draft GitHub release that records the digest. 
 
-#### 5. Publish the draft release
+#### 5. Write the release notes
+
+Edit the draft on the Releases page on GitHub and add the release notes above the `Image:` line.
+
+#### 6. Publish the draft release
 
 ```bash
 VER=$(tr -d '[:space:]' < VERSION)
