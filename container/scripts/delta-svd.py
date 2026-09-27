@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime, contextlib, math
+import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime, contextlib
 from os.path import join, exists, dirname, basename
 from shutil import copy2, rmtree
 from pathlib import Path
@@ -46,7 +46,7 @@ def detect_physical_cores():
     # be every core of the host.
     quota = cgroup_cpu_limit()
     if quota is not None:
-        count = min(count, max(1, math.ceil(quota)))
+        count = min(count, max(1, int(-(-quota // 1))))      # rounded up
     return count
 
 
