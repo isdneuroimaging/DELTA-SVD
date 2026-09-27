@@ -263,6 +263,56 @@ def test_detect_physical_cores_returns_positive_int(delta_svd):
 
 
 # ---------------------------------------------------------------------------
+# cgroup_cpu_limit(): a CPU quota (Docker '--cpus', a Kubernetes CPU limit)
+# does not show in the affinity mask, so it is read from the cgroup files.
+
+def _cgroup_file(root, rel, name, text):
+    d = root.joinpath(*[p for p in rel.split("/") if p])
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(text)
+
+
+def test_cgroup_v2_quota_takes_the_tightest_ancestor(delta_svd, tmp_path):
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/user.slice/job\n")
+    root = tmp_path / "fs"
+    _cgroup_file(root, "/user.slice/job", "cpu.max", "150000 100000\n")
+    _cgroup_file(root, "/user.slice", "cpu.max", "400000 100000\n")
+    assert delta_svd.cgroup_cpu_limit(str(proc), str(root)) == 1.5
+
+
+def test_cgroup_v2_without_quota(delta_svd, tmp_path):
+    proc = tmp_path / "cgroup"
+    proc.write_text("0::/\n")
+    root = tmp_path / "fs"
+    _cgroup_file(root, "/", "cpu.max", "max 100000\n")
+    assert delta_svd.cgroup_cpu_limit(str(proc), str(root)) is None
+
+
+@pytest.mark.parametrize("quota, expected", [("-1", None), ("200000", 2.0)])
+def test_cgroup_v1_quota(delta_svd, tmp_path, quota, expected):
+    proc = tmp_path / "cgroup"
+    proc.write_text("4:memory:/job\n3:cpu,cpuacct:/job\n0::/\n")
+    root = tmp_path / "fs"
+    _cgroup_file(root / "cpu,cpuacct", "/job", "cpu.cfs_quota_us", quota + "\n")
+    _cgroup_file(root / "cpu,cpuacct", "/job", "cpu.cfs_period_us", "100000\n")
+    assert delta_svd.cgroup_cpu_limit(str(proc), str(root)) == expected
+
+
+def test_cgroup_limit_none_without_cgroup_information(delta_svd, tmp_path):
+    assert delta_svd.cgroup_cpu_limit(str(tmp_path / "missing"), str(tmp_path)) is None
+
+
+def test_detect_physical_cores_is_capped_by_the_quota(delta_svd, monkeypatch):
+    monkeypatch.setattr(delta_svd, "cgroup_cpu_limit", lambda: None)
+    uncapped = delta_svd.detect_physical_cores()
+    monkeypatch.setattr(delta_svd, "cgroup_cpu_limit", lambda: 0.5)
+    assert delta_svd.detect_physical_cores() == 1          # never below one core
+    monkeypatch.setattr(delta_svd, "cgroup_cpu_limit", lambda: 1000.0)
+    assert delta_svd.detect_physical_cores() == uncapped   # a loose quota changes nothing
+
+
+# ---------------------------------------------------------------------------
 # resolve_thread_budget() / detect_physical_cores()
 #
 # These run at import time, *before* the real parser and before numpy is
@@ -1419,6 +1469,31 @@ def test_extract_stats_emits_correct_metric_names(delta_svd, tmp_path):
     )
 
     assert set(df["metric"]) == {"PSMD", "MSMD", "MSFW"}
+
+
+def test_extract_stats_loads_each_map_once_per_timepoint(delta_svd, tmp_path, monkeypatch):
+    # many regions, but the skeletonised maps are the same for all of them
+    stats_dir = tmp_path / "TBSS" / "stats"
+    stats_dir.mkdir(parents=True)
+    affine = np.eye(4)
+    nib.save(nib.Nifti1Image(np.ones((1, 2, 2)), affine), str(stats_dir / "skel_intersection.nii.gz"))
+    for roi in range(5):
+        nib.save(nib.Nifti1Image(np.ones((1, 2, 2)), affine),
+                 str(stats_dir / f"skel_intersection_RmaskMNI-{roi:02d}.nii.gz"))
+    for mapName in ("FW", "MD"):
+        nib.save(nib.Nifti1Image(np.full((1, 2, 2), 0.5), affine),
+                 str(stats_dir / f"all_TP01_{mapName}_skeletonised.nii.gz"))
+    loads = []
+    realLoad = delta_svd.nib.load
+    monkeypatch.setattr(delta_svd.nib, "load", lambda fn, *a, **k: loads.append(os.path.basename(fn)) or realLoad(fn, *a, **k))
+
+    df = delta_svd.extract_stats(dirTP="/some/path/TP01", dirTBSS=str(tmp_path / "TBSS"),
+                                 fnNonFA={"FW": "unused", "MD": "unused"}, skelMask="skel.nii.gz")
+
+    assert loads.count("all_TP01_FW_skeletonised.nii.gz") == 1
+    assert loads.count("all_TP01_MD_skeletonised.nii.gz") == 1
+    assert len(df) == 6 * 3                    # 6 regions x (MSFW, PSMD, MSMD)
+    assert list(df["metric"][:3]) == ["MSFW", "PSMD", "MSMD"]   # row order unchanged
 
 
 # PSMD is defined as the 95th minus the 5th percentile of MD on the skeleton.
