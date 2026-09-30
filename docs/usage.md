@@ -58,7 +58,7 @@ apptainer run delta-svd.sif \
 
 ## Restricting the analysis with masks
 
-All masks are optional. Per-timepoint masks are given in DWI space (one per timepoint, in the same order as `--dwi`; write `NA` to skip a timepoint) and are merged in template space. Like the brain mask, they have to be on the grid of their DWI image (same dimensions and affine); DELTA-SVD stops before processing otherwise.
+All additional masks are optional. Per-timepoint masks are given in DWI space (one per timepoint, in the same order as `--dwi`; write `NA` to skip a timepoint) and are merged in template space. Like the brain mask, they have to be on the grid of their DWI image (same dimensions and affine); DELTA-SVD stops before processing otherwise.
 
 | Option | Description |
 | --- | --- |
