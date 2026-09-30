@@ -6,18 +6,18 @@ icon: lucide/play
 
 DELTA-SVD runs as a container. The container's entry point is the main pipeline script `delta-svd.py`, so the arguments you pass after the image name are the pipeline's arguments.
 
-```
+```shell
 apptainer run --no-home delta-svd.sif --dwi <image> --id <subject> [options]
 ```
 
 Under **Apptainer** (recommended) or rootless **Podman**, output files come out owned by you. Under **Docker** you must bind-mount your data (`-v`) and take an extra step to get output owned by your host user; see [Advanced usage](advanced-usage.md).
 
 > [!NOTE]
-> The examples use `--no-home`, which keeps your home directory out of the container, so personal settings stored there cannot affect a run. Apptainer still mounts the current working directory, even inside your home directory, and `/tmp`. The examples below are run from the folder that holds your data (mounted automatically as the working directory), so the file names need no path. For data outside the working directory (e.g. a `/data` or scratch mount), bind it in explicitly with `--bind`/`-B`, for example `apptainer run --no-home --bind /data delta-svd.sif …`.
+> The examples use Apptainer with the option `--no-home`, which keeps your home directory out of the container, so personal settings stored there cannot affect a run. Apptainer still mounts the current working directory, even inside your home directory, and `/tmp`. The examples below are run from the folder that holds your data (mounted automatically as the working directory), so the file names need no path. For data outside the working directory (e.g. a `/data` or scratch mount), bind it in explicitly with `--bind`/`-B`.
 
 ## Inputs
 
-A run processes one subject, given one diffusion-weighted image per **timepoint**.
+A run processes one subject, given one diffusion-weighted image per timepoint.
 
 | Option | Required | Description |
 | --- | --- | --- |
@@ -34,7 +34,7 @@ For `--bval`, `--bvec` and `--bmask`, you may give one value (applied to all tim
 
 Run from the folder holding `sub-01_dwi.nii.gz`, `sub-01_dwi.bval`, `sub-01_dwi.bvec` and `sub-01_dwi_brainmask.nii.gz`; everything but the DWI is then inferred:
 
-```
+```shell
 apptainer run --no-home delta-svd.sif \
   --dwi sub-01_dwi.nii.gz \
   --id sub-01
@@ -44,7 +44,7 @@ apptainer run --no-home delta-svd.sif \
 
 List all the timepoints' images after a single `--dwi` (one image per timepoint). DELTA-SVD builds a within-subject template with ANTs and derives the skeleton on it, so metrics are directly comparable across timepoints:
 
-```
+```shell
 apptainer run --no-home delta-svd.sif \
   --dwi ses-1_dwi.nii.gz ses-2_dwi.nii.gz \
   --tp  ses-1 ses-2 \
@@ -54,9 +54,9 @@ apptainer run --no-home delta-svd.sif \
 > [!NOTE]
 > The within-subject template step is the most CPU-intensive part of the pipeline, and runs only for longitudinal input. For sizing a run, and for cluster use, see [Advanced usage](advanced-usage.md#cpu-usage-and-threading).
 
-## Restricting the analysis with masks
+## Restricting the analysis with additional masks
 
-All masks are optional. Per-timepoint masks are given in DWI space (one per timepoint, in the same order as `--dwi`; write `NA` to skip a timepoint) and are merged in template space.
+All additional masks are optional. Per-timepoint masks are given in DWI space (one per timepoint, in the same order as `--dwi`; write `NA` to skip a timepoint) and are merged in template space.
 
 | Option | Description |
 | --- | --- |
@@ -71,24 +71,11 @@ Written to the output folder:
 
 - **`delta-svd_results.csv`** — the results table. Endpoint metric rows contain the validated endpoints **MSMD** (mean skeletonised MD), **PSMD** (peak width of skeletonised MD) and **MSFW** (mean skeletonised free water), reported per timepoint and per region. The table also contains QC bookkeeping rows describing the analysed voxel sets; these have `metric=NA` and `value=NaN`.
 - **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and all command-line arguments used for the run, including values containing spaces or quotes, so results remain traceable. Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, `0` skips both.
-- **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It uses the versioned schema below and records the same command information as the QC report.
+- **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It uses the versioned schema below and records the same command information as the QC report. The run manifest is completion and provenance information; it is not required by the aggregation script, which continues to aggregate any matching results CSV.
 
-The run manifest is completion and provenance information; it is not required by the aggregation script, which continues to aggregate any matching results CSV.
+Intermediate files are written under `delta-svd_temp/` and deleted on success; pass `--debug` to keep them.
 
-### Run manifest schema
-
-`manifest_schema_version` is currently `1`. The remaining fields are:
-
-| Field | Meaning |
-| --- | --- |
-| `pipeline` / `pipeline_version` / `source_revision` | Pipeline identity, release version, and source revision embedded in the image. |
-| `subject_id` | Value supplied with `--id`, or `null` when it was omitted. |
-| `processing_mode` | `cross_sectional` for one DWI or `longitudinal` for multiple timepoints. |
-| `command` | Command used for the run, recorded so that every argument can be identified unambiguously. |
-| `started_at` / `completed_at` | UTC RFC 3339 timestamps. |
-| `steps_completed` | Requested processing steps completed before the manifest was written. |
-| `qc_mode` | Numeric `--qc` mode used for the run. |
-| `outputs` | Final result and QC filenames produced by the requested steps; the manifest does not list itself. |
+### Results table
 
 The results table has the following columns:
 
@@ -101,8 +88,6 @@ The results table has the following columns:
 | `voxels` | Number of skeleton voxels included in the row. |
 | `metric` | Endpoint name for endpoint metric rows; `NA` for QC bookkeeping rows. |
 | `value` | Endpoint value for endpoint metric rows; `NaN` for QC bookkeeping rows. |
-
-### Region values
 
 The `region` column uses these values:
 
@@ -119,13 +104,26 @@ The `region` column uses these values:
 
 Rows with `metric=NA` and `value=NaN` are QC-bookkeeping rows rather than endpoint metrics.
 
-Intermediate files are written under `delta-svd_temp/` and deleted on success; pass `--debug` to keep them.
+### Run manifest schema
+
+`manifest_schema_version` is currently `1`. The fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `pipeline` / `pipeline_version` / `source_revision` | Pipeline identity, release version, and source revision embedded in the image. |
+| `subject_id` | Value supplied with `--id`, or `null` when it was omitted. |
+| `processing_mode` | `cross_sectional` for one DWI or `longitudinal` for multiple timepoints. |
+| `command` | Command used for the run, recorded so that every argument can be identified unambiguously. |
+| `started_at` / `completed_at` | UTC RFC 3339 timestamps. |
+| `steps_completed` | Requested processing steps completed before the manifest was written. |
+| `qc_mode` | Numeric `--qc` mode used for the run. |
+| `outputs` | Final result and QC filenames produced by the requested steps; the manifest does not list itself. |
 
 ## Aggregating across subjects
 
 `delta-svd_aggregate_results.py` collects the per-subject `delta-svd_results.csv` tables into one. It is a second script in the image, so run it with `apptainer exec`. Run from the directory that holds your per-subject output folders and point it at the current directory (`.`):
 
-```
+```shell
 apptainer exec delta-svd.sif \
   delta-svd_aggregate_results.py . -o study_aggregated.csv
 ```

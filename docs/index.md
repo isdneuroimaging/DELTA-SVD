@@ -4,12 +4,11 @@ icon: lucide/house
 
 # DELTA-SVD
 
-**Diffusion Endpoints for Longitudinal Tracking of white matter Alterations in cerebral Small Vessel Disease**
+## Diffusion Endpoints for Longitudinal Tracking of white matter Alterations in cerebral Small Vessel Disease
 
 DELTA-SVD is a containerised pipeline for deriving diffusion MRI endpoints suitable for longitudinal tracking of white matter change in cerebral small vessel disease.
 
 ![DELTA-SVD](assets/delta-svd.webp)
-
 
 ## Citation
 
@@ -18,8 +17,7 @@ The development and validation of DELTA-SVD will be published:
 > Dewenter A, et al. (manuscript submitted).  
 > Full citation details will be provided here upon publication.
 
-> [!IMPORTANT]
-> If you use DELTA-SVD, the [licence](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE) requires you to both cite the method publication and link to the repository at [https://github.com/isdneuroimaging/DELTA-SVD](https://github.com/isdneuroimaging/DELTA-SVD).
+If you use DELTA-SVD, the [licence](https://github.com/isdneuroimaging/DELTA-SVD/blob/main/LICENSE) requires you to both cite the method publication and link to the repository at [https://github.com/isdneuroimaging/DELTA-SVD](https://github.com/isdneuroimaging/DELTA-SVD).
 
 ## Getting started
 

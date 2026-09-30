@@ -8,10 +8,8 @@ icon: lucide/sliders-horizontal
 
 Two parts of the pipeline use more than one core:
 
-- the **diffusion tensor and free-water fit**, spread across worker processes in both cross-sectional and longitudinal runs;
-- the **within-subject template construction**, which runs only for longitudinal input (more than one timepoint) and registers the timepoints in parallel.
-
-Every run also performs TBSS registration. That registration and the remaining steps are effectively single-threaded here; cross-sectional runs omit only the additional within-subject template construction.
+- the **diffusion tensor and free-water fit**;
+- the **within-subject template construction**, which runs only for longitudinal input (more than one timepoint).
 
 `--threads` sets how many physical CPU cores DELTA-SVD may use:
 
@@ -24,37 +22,39 @@ Every run also performs TBSS registration. That registration and the remaining s
 Work is spread across the available cores automatically; you do not need to tune this by hand.
 
 > [!NOTE]
-> Only physical cores are counted; hyperthreads are ignored, because registration gains little from them. To use them anyway, pass an explicit `--threads` value.
+> When using `auto`, only physical cores are counted; hyperthreads are ignored, because registration gains little from them. To use them anyway, pass an explicit `--threads` value.
 
 ### Choosing a value
 
 - **Single subject on a workstation** — leave the default, or set `--threads` to the number of cores you want to devote to the run.
 - **Many subjects on a cluster** — see [Running on an HPC cluster](#running-on-an-hpc-cluster) below.
-- **Limited memory** — peak memory grows with the number of registrations running at once. Lower it with `--para` (`--para 1` runs one registration at a time, the lowest-memory setting).
+- **Limited memory** — peak memory grows with the number of registrations running in parallel. Lower it with `--para` (`--para 1` runs one registration at a time, the lowest-memory setting).
 
 ## Reproducibility
 
-Longitudinal ANTs registration divides its similarity metric across threads and sums the parts, so the thread count changes the order of that summation and with it the last bits of the result. That would normally be negligible, but the white matter skeleton is derived by thresholding an interpolated mask, which turns those last bits into whole voxels moving in or out of the skeleton, enough to shift the longitudinal metrics measurably.
+Longitudinal ANTs registration divides its similarity metric across threads and sums the parts, so the thread count changes the order of that summation and with it the last bits of the result. That would normally be negligible, but the white matter skeleton is derived by thresholding an interpolated mask, which turns those last bits into whole voxels moving in or out of the skeleton, enough to shift the longitudinal metrics minimally, but measurably.
 
 DELTA-SVD therefore fixes the registration thread count at the value the method was validated with, instead of deriving it from the cores available. This is why `--threads` and `--para` affect only runtime and memory: they decide how many registrations run at once, never how each one is computed.
 
 Settings from your own environment cannot change the results either. Apptainer passes host environment variables that the image does not set into the container, such as a `PYTHONPATH` from an HPC module, and the image's own `FSLDIR`, `ANTSPATH` and `OPENBLAS_CORETYPE` can be replaced on purpose with `--env`. Either would select another FSL, ANTs, BLAS kernel or Python packages. DELTA-SVD resets these to the image's own values when it starts, and ignores Python packages in your home directory (`~/.local`).
 
-`--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it**: results produced with a different value cannot be compared with, or pooled with, results produced at the default — unlike a DELTA-SVD `PATCH` version, there is no safe value to deviate to; only the default is validated.
+`--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it in production use**: results produced with a different value cannot be compared with, or pooled with, results produced at the default.
 
 ## Running on an HPC cluster
 
-Because only the two steps above are multi-core (and one of them only for longitudinal input), a large allocation sits idle for much of a run. Sizing the request is a trade of wall time against core-hours, and matters more than tuning any option.
+Because only the two steps above are multi-core (and one of them only for longitudinal input), a large allocation sits idle for much of a run. The general recommendation is to run single-threaded on a cluster and to parallelize runs across subjects.
 
 ### Cross-sectional runs
 
-For throughput, allocate **one core per subject** and run subjects side by side. Cross-sectional runs still perform TBSS registration, but it is effectively single-threaded; additional cores only shorten the tensor and free-water fit, so use more when turnaround time matters rather than for the best core-hour efficiency.
+For throughput, allocate **one core per subject** and run subjects side by side. Additional cores only shorten the tensor and free-water fit, so use more when turnaround time matters rather than for the best core-hour efficiency.
 
 ### Longitudinal runs
 
-**For throughput (the usual case), allocate one core per subject** and run many side by side. The registration still starts its 12 threads; the operating system time-slices them onto that one core at a cost of a few percent. This is much the cheapest in core-hours, because no cores sit idle through the single-threaded phases.
+**For throughput (the usual case), allocate one core per subject** and run many side by side. The registration still starts its 12 threads (to ensure full reproducibility, see above); the operating system time-slices them onto that one core at a cost of a few percent. This is much the cheapest in core-hours, because no cores sit idle through the single-threaded phases.
 
 **For latency, use 12 to 24 cores**: 12 runs one registration at a time, 16 and above run two. Beyond that, returns fade fast: registration is capped at one job per timepoint, and the single-threaded part of the run takes the same time however many cores it has. Go higher only with many timepoints, and only after measuring that template construction dominates your runs.
+
+SLURM example:
 
 ```bash
 #SBATCH --cpus-per-task=1          # throughput: one core per subject
@@ -64,9 +64,6 @@ apptainer run --no-home delta-svd.sif --dwi ses-1.nii.gz ses-2.nii.gz --tp ses-1
 
 Leave `--threads` at `auto`; it reads the cores your scheduler assigned.
 
-> [!NOTE]
-> A one-core job will still start 12 registration threads. This is expected, not a misconfiguration, and the scheduler handles it correctly.
-
 > [!TIP]
 > **Memory, not CPU, usually limits how many subjects you can pack onto a node.** Each concurrent subject holds its own working set. Benchmark one representative subject at your intended packing density before committing to a cluster-wide setting; runtimes depend strongly on CPU model, memory bandwidth and storage.
 
@@ -74,7 +71,7 @@ Leave `--threads` at `auto`; it reads the cores your scheduler assigned.
 
 The image runs as a non-root user (`nonroot`, uid 999). Under Docker the process therefore writes files owned by `999:999` on the host. To get output owned by your host user, run the container as yourself:
 
-```
+```shell
 docker run --rm --user "$(id -u):$(id -g)" \
   -v /path/to/data:/data \
   ghcr.io/isdneuroimaging/delta-svd:<version> --dwi /data/sub-01_dwi.nii.gz --id sub-01
@@ -82,7 +79,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 If a step complains about an unset `HOME`, add `-e HOME=/tmp`. To run the aggregator under Docker, override the entry point:
 
-```
+```shell
 docker run --rm -v /path/to/data:/data \
   --entrypoint delta-svd_aggregate_results.py \
   ghcr.io/isdneuroimaging/delta-svd:<version> /data -o /data/study_aggregated.csv
