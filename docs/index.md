@@ -1,5 +1,7 @@
 ---
 icon: lucide/house
+hide:
+  - toc
 ---
 
 # DELTA-SVD
