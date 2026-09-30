@@ -38,6 +38,8 @@ Longitudinal ANTs registration divides its similarity metric across threads and 
 
 DELTA-SVD therefore fixes the registration thread count at the value the method was validated with, instead of deriving it from the cores available. This is why `--threads` and `--para` affect only runtime and memory: they decide how many registrations run at once, never how each one is computed.
 
+Settings from your own environment cannot change the results either. Apptainer passes host environment variables that the image does not set into the container, such as a `PYTHONPATH` from an HPC module, and the image's own `FSLDIR`, `ANTSPATH` and `OPENBLAS_CORETYPE` can be replaced on purpose with `--env`. Either would select another FSL, ANTs, BLAS kernel or Python packages. DELTA-SVD resets these to the image's own values when it starts, and ignores Python packages in your home directory (`~/.local`).
+
 `--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it**: results produced with a different value cannot be compared with, or pooled with, results produced at the default — unlike a DELTA-SVD `PATCH` version, there is no safe value to deviate to; only the default is validated.
 
 ## Running on an HPC cluster
@@ -57,7 +59,7 @@ For throughput, allocate **one core per subject** and run subjects side by side.
 ```bash
 #SBATCH --cpus-per-task=1          # throughput: one core per subject
 #SBATCH --mem=8G                   # size against your image matrix; see below
-apptainer run delta-svd.sif --dwi ses-1.nii.gz ses-2.nii.gz --tp ses-1 ses-2 --id sub-01
+apptainer run --no-home delta-svd.sif --dwi ses-1.nii.gz ses-2.nii.gz --tp ses-1 ses-2 --id sub-01
 ```
 
 Leave `--threads` at `auto`; it reads the cores your scheduler assigned.
