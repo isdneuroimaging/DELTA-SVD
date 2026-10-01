@@ -91,7 +91,7 @@ Apptainer and rootless Podman map your host identity into the container, so they
 
 | Option | Description |
 | --- | --- |
-| `--reprocess [name]` | Allow reprocessing over existing output (otherwise a run refuses to overwrite). Optionally give an alternative results-CSV base name to preserve the previous `delta-svd_results.csv`. |
+| `--reprocess [name]` | Allow reprocessing over existing output (otherwise a run refuses to overwrite). Optionally give an alternative results-CSV base name to preserve the previous `delta-svd_results.csv`; the aggregator then collects the new table only with `-f <name>`. |
 | `--debug` | Keep the `delta-svd_temp/` folder of intermediate files instead of deleting it. |
 | `--bRange LO HI` | b-value range used for tensor fitting (default `800 1200`). See [Selecting the b-values](#selecting-the-b-values) below. |
 | `--shells B [B ...]` | b-value shells used for tensor fitting, selected individually instead of as a range. Mutually exclusive with `--bRange`. |

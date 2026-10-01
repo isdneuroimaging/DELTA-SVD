@@ -1103,6 +1103,21 @@ def test_filter_b_values_rejects_data_without_a_b0(delta_svd, tmp_path):
         )
 
 
+@pytest.mark.parametrize("shells", [[1000, 2000], [1000]], ids=["filtered", "unfiltered"])
+@pytest.mark.parametrize("shape", [(2, 2, 2, 40), (2, 2, 2, 42), (2, 2, 2)])
+def test_filter_b_values_rejects_a_volume_count_mismatch(delta_svd, tmp_path, shells, shape):
+    # volumes are selected by position, so on the filtered path a mismatch
+    # used to pair b-values with the wrong volumes without any error
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, shells, nPerShell=20)
+    nib.save(nib.Nifti1Image(np.ones(shape), np.eye(4)), fnData)
+
+    with pytest.raises(delta_svd.DeltaSvdError, match="does not hold one volume per b-value"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
 def test_filter_b_values_rejects_too_few_directions(delta_svd, tmp_path):
     fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=11)
 
@@ -1366,6 +1381,18 @@ def test_integrate_masks_inserts_the_background_roi_before_the_named_rois(delta_
 
     # no merged label map: overlapping ROIs would be hidden in it
     assert not (stats / "skel_intersection_Rmask.nii.gz").exists()
+
+
+def test_integrate_masks_ignores_a_timepoint_named_like_an_roi(delta_svd, tmp_path):
+    # timepoint 'ROI-1' writes 'all_ROI-1_FW_skeletonised', which the ROI
+    # pattern also matched, so the extract step crashed reading its label
+    kwargs, stats = _tbss_tree(
+        tmp_path, skeleton=[1, 1, 1, 1, 1, 0], bmasks={"ROI-1": [1, 1, 1, 1, 1, 1]})
+    nib.save(nib.Nifti1Image(_vol([0] * 6), np.eye(4)), str(stats / "all_ROI-1_FW_skeletonised.nii.gz"))
+
+    df = delta_svd.integrate_masks(**kwargs)
+
+    assert list(df["region"]) == ["total", "intersection"]
 
 
 def test_integrate_masks_roi_suffixes_follow_the_emask_exclusion(delta_svd, tmp_path):
@@ -3042,3 +3069,13 @@ def test_cross_sectional_run_accepts_whitespace_in_the_output_path(delta_svd, tm
                                       "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
     with pytest.raises(delta_svd.DeltaSvdError, match="contradictory"):
         delta_svd.pipeline_delta_svd()
+
+
+def test_tbss_lookups_take_the_output_path_literally(delta_svd, tmp_path):
+    # '[1]' in the output path is a glob character class; unescaped, every
+    # lookup under it found nothing and the run failed hours in
+    stats = tmp_path / "out[1]" / "TBSS" / "stats"
+    stats.mkdir(parents=True)
+    fn = stats / "skel_intersection_Rmask-01.nii.gz"
+    fn.touch()
+    assert delta_svd.qc_label_maps(str(stats.parent)) == [str(fn)]
