@@ -1103,6 +1103,21 @@ def test_filter_b_values_rejects_data_without_a_b0(delta_svd, tmp_path):
         )
 
 
+@pytest.mark.parametrize("shells", [[1000, 2000], [1000]], ids=["filtered", "unfiltered"])
+@pytest.mark.parametrize("shape", [(2, 2, 2, 40), (2, 2, 2, 42), (2, 2, 2)])
+def test_filter_b_values_rejects_a_volume_count_mismatch(delta_svd, tmp_path, shells, shape):
+    # volumes are selected by position, so on the filtered path a mismatch
+    # used to pair b-values with the wrong volumes without any error
+    fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, shells, nPerShell=20)
+    nib.save(nib.Nifti1Image(np.ones(shape), np.eye(4)), fnData)
+
+    with pytest.raises(delta_svd.DeltaSvdError, match="does not hold one volume per b-value"):
+        delta_svd.filter_b_values(
+            fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+            out_dir=outDir, bIntervals=DEFAULT_INTERVALS,
+        )
+
+
 def test_filter_b_values_rejects_too_few_directions(delta_svd, tmp_path):
     fnData, fnBval, fnBvec, outDir = _shelled_set(tmp_path, [1000], nPerShell=11)
 

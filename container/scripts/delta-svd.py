@@ -525,6 +525,11 @@ def filter_b_values(fn_data = 'data.nii.gz',
         raise DeltaSvdError(f"The bvec file holds {len(bvecs)} directions but the bval file holds "
                             f"{len(bvals)} b-values. They have to describe the same volumes.\n"
                             f" bval: {fn_bval}\n bvec: {fn_bvec}")
+    #--- volumes are selected by position below, so a mismatch would go unnoticed
+    shape = nib.load(fn_data).shape
+    if len(shape) != 4 or shape[3] != len(bvals):
+        raise DeltaSvdError(f"The DWI image (dimensions {shape}) does not hold one volume per "
+                            f"b-value ({len(bvals)}).\n DWI : {fn_data}\n bval: {fn_bval}")
 
     selB0 =  (bvals <= B0_MAX)
     perInterval = [((bvals >= lo) & (bvals <= hi) & ~selB0) for lo, hi in bIntervals]
