@@ -88,7 +88,8 @@ if running_in_image():
 def detect_physical_cores():
     """Number of *physical* CPU cores this process may use, honouring CPU affinity
     (an HPC scheduler's cpuset). Hyperthreads are deliberately not counted: ANTs
-    registration gains little from SMT. Falls back to the affinity size."""
+    registration gains little from SMT. Falls back to the affinity size. Capped
+    by a cgroup CPU quota, if the process runs under one."""
     try:
         allowed = os.sched_getaffinity(0)          # logical CPUs this process may use
     except AttributeError:                         # non-Linux platforms
@@ -110,11 +111,63 @@ def detect_physical_cores():
                     cur['processor'] = int(val)
                 elif key in ('physical id', 'core id'):
                     cur[key] = int(val)
-        if cores:
-            return len(cores)
+        if not cores:
+            raise ValueError('no core topology in /proc/cpuinfo')
+        count = len(cores)
     except (OSError, ValueError):
-        pass
-    return max(1, len(allowed))                     # fallback: assume no SMT
+        count = max(1, len(allowed))                # fallback: assume no SMT
+    # A CPU quota (Docker '--cpus', a Kubernetes CPU limit) leaves the affinity
+    # untouched, so it has to be read separately; without it the budget would
+    # be every core of the host.
+    quota = cgroup_cpu_limit()
+    if quota is not None:
+        count = min(count, max(1, int(-(-quota // 1))))      # rounded up
+    return count
+
+
+def cgroup_cpu_limit(procCgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
+    """CPUs' worth of time the cgroup CPU quota allows this process, or None
+    without a quota. The tightest of its own cgroup and every ancestor counts.
+    Covers cgroup v2 ('cpu.max') and v1 ('cpu.cfs_quota_us')."""
+    try:
+        with open(procCgroup) as fh:
+            entries = [line.rstrip('\n').split(':', 2) for line in fh if line.count(':') >= 2]
+    except OSError:
+        return None
+
+    def read(path):
+        try:
+            with open(path) as fh:
+                return fh.read().split()
+        except OSError:
+            return None
+
+    def ratio(quota, period):
+        try:
+            return int(quota) / int(period)
+        except (ValueError, ZeroDivisionError):
+            return -1
+
+    def ancestors(base, rel):
+        parts = [p for p in rel.split('/') if p]
+        return [os.path.join(base, *parts[:n]) for n in range(len(parts), -1, -1)]
+
+    limits = []
+    for _, controllers, rel in entries:
+        if controllers == '':                                    # cgroup v2
+            for d in ancestors(root, rel):
+                val = read(os.path.join(d, 'cpu.max'))
+                if val and len(val) == 2 and val[0] != 'max':
+                    limits.append(ratio(val[0], val[1]))
+        elif 'cpu' in controllers.split(','):                   # cgroup v1
+            for mount in ('cpu', 'cpu,cpuacct', 'cpuacct,cpu'):
+                for d in ancestors(os.path.join(root, mount), rel):
+                    quota = read(os.path.join(d, 'cpu.cfs_quota_us'))
+                    period = read(os.path.join(d, 'cpu.cfs_period_us'))
+                    if quota and period:
+                        limits.append(ratio(quota[0], period[0]))    # -1: no quota
+    positive = [x for x in limits if x > 0]
+    return min(positive) if positive else None
 
 
 def resolve_thread_budget(argv):
@@ -1060,6 +1113,10 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
 
     dd = []
     tpB = basename(dirTP)
+    # Loaded once here rather than once per region: with many ROI labels the
+    # repeated decompression added up to tens of seconds per timepoint.
+    maps = {mapName: nib.load(join(dirTBSS, 'stats', 'all_'+tpB+'_'+mapName+'_skeletonised.nii.gz')).get_fdata()
+            for mapName in fnNonFA}
     for fnR in fnROI:
         
         niiROI = nib.load(fnR)
@@ -1073,8 +1130,7 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
             print(f' region    : {roiSuffix}')
             print(f' map       : {mapName}')
 
-            nii = nib.load(join(dirTBSS, 'stats', 'all_'+tpB+'_'+mapName+'_skeletonised.nii.gz'))
-            img = nii.get_fdata()
+            img = maps[mapName]
             skel = img[roi>0]
             print( ' voxels  :',len(skel))
             mean = np.mean(skel) if len(skel)>0 else np.nan
@@ -1100,6 +1156,72 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
 
     return df
 
+def qc_label_maps(dirTBSS):
+    """The merged ROI label maps in skeleton space (DWI-space and MNI-space ROIs)."""
+    return (sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask.nii.gz')))
+            + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz'))))
+
+
+def consecutive_labels(img):
+    """'img' with its non-zero labels renumbered 1..K in ascending order, and
+    the original label of each: (renumbered, labels), labels[k-1] for k."""
+    labels = np.unique(img[img > 0])
+    out = np.zeros(img.shape, ROI_LABEL_DTYPE)
+    out[img > 0] = np.searchsorted(labels, img[img > 0]) + 1
+    return out, labels
+
+
+def restore_labels(img, labels):
+    """Undo consecutive_labels() on an image carrying its numbering."""
+    idx = np.rint(img).astype(np.int64)
+    out = np.zeros(img.shape, ROI_LABEL_DTYPE)
+    out[idx > 0] = labels[idx[idx > 0] - 1]
+    return out
+
+
+def deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP, relabel=False):
+    """Deproject the skeleton-space image 'fn' (in TBSS/stats) into the native
+    space of every timepoint, as '<dirQC>/<timepoint>_<name of fn>'.
+
+    'relabel' is for ROI label maps. With '-n', tbss_deproject runs one
+    applywarp for every integer from 1 up to the largest label, present or
+    not, so a label such as 1000 costs a thousand warps. The labels are
+    renumbered 1..K for the deprojection and restored afterwards. The
+    renumbering keeps their order, so where labels meet, the one that wins is
+    the same as without it."""
+    fnameFAt = "FA-for-tbss-long" if len(dirTP) > 1 else "fwc_wls_dti_FA_05"
+    fnBase = basename(fn)
+    labels = None
+    src = fn
+    if relabel:
+        nii = nib.load(fn)
+        consecutive, labels = consecutive_labels(nii.get_fdata())
+        src = re.sub(r'\.nii(\.gz)?$', '_consecutive.nii.gz', fn)
+        save_nifti(src, consecutive, nii.affine, nii.header, ROI_LABEL_DTYPE)
+
+    with contextlib.chdir(join(dirTBSS,'stats')):
+        cmd = f'tbss_deproject {shlex.quote(basename(src))} 2 -n'
+        run_subprocess(cmd, True, 'tbss_deproject')
+    fnDeprojectedTemplateSpace = join(dirTBSS, 'FA', fnameFAt+'_FA_'+basename(src))
+
+    for iTP in range(len(dirTP)):
+        tpB = basename(dirTP[iTP])
+        fnOut = join(dirQC, tpB+'_'+fnBase)
+        if len(dirTP)>1:
+            ref = join(dirTP[iTP], 'fwc_wls_dti_FA.nii.gz')
+            affine = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
+            invwarp = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}1InverseWarp.nii.gz')
+            cmd = (f"antsApplyTransforms -d 3 --float 1 -i {shlex.quote(fnDeprojectedTemplateSpace)}  -o {shlex.quote(fnOut)} "
+                   f"-r {shlex.quote(ref)} -t [{shlex.quote(affine)},1] -t {shlex.quote(invwarp)} -n NearestNeighbor")
+            run_subprocess(cmd, True, 'antsApplyTransforms')
+        else:
+            copy2(fnDeprojectedTemplateSpace, fnOut)
+        if labels is not None:
+            nii = nib.load(fnOut)
+            save_nifti(fnOut, restore_labels(nii.get_fdata(), labels), nii.affine, nii.header,
+                       ROI_LABEL_DTYPE)
+
+
 def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
         
     from create_qc_image import create_qc_image
@@ -1112,34 +1234,17 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
         skelMask = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
         emaskExists = 0
     
-    fnROI = [skelMask]
-    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask.nii.gz')))
-    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz')))
+    # The merged ROI label maps are never shown in the report, only kept in
+    # 'delta-svd_qc' for inspection, so they are deprojected with '--qc 2' only.
+    fnROI = [skelMask] + (qc_label_maps(dirTBSS) if args.qc >= 2 else [])
 
     if len(dirTP)>1:
         fnameFAt = "FA-for-tbss-long"
     else:
         fnameFAt = "fwc_wls_dti_FA_05"
 
-    for fn in fnROI:
-        with contextlib.chdir(join(dirTBSS,'stats')):
-            cmd = f'tbss_deproject {shlex.quote(basename(fn))} 2 -n'
-            run_subprocess(cmd, True, 'tbss_deproject')
-        fnBase = basename(fn)
-        fnDeprojectedTemplateSpace = join(dirTBSS, 'FA', fnameFAt+'_FA_'+fnBase)
-            
-        for iTP in range(len(dirTP)):
-            tpB = basename(dirTP[iTP])
-            if len(dirTP)>1:
-                fnOut = join(dirQC, tpB+'_'+fnBase)
-                ref = join(dirTP[iTP], 'fwc_wls_dti_FA.nii.gz')
-                affine = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
-                invwarp = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}1InverseWarp.nii.gz')
-                cmd = (f"antsApplyTransforms -d 3 --float 1 -i {shlex.quote(fnDeprojectedTemplateSpace)}  -o {shlex.quote(fnOut)} "
-                       f"-r {shlex.quote(ref)} -t [{shlex.quote(affine)},1] -t {shlex.quote(invwarp)} -n NearestNeighbor")
-                run_subprocess(cmd, True, 'antsApplyTransforms')
-            else:
-                copy2(fnDeprojectedTemplateSpace, join(dirQC, tpB+'_'+fnBase))    
+    for iFn, fn in enumerate(fnROI):
+        deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP, relabel=iFn > 0)
     
     #--- in space of the input, per timepoint
     vlim = [
@@ -1642,7 +1747,7 @@ def iniParser():
     group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
     group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."
     group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of timepoints either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
-    group2.add_argument("--threads", metavar='cores', type=threadBudget, default='auto', help="number of physical CPU cores DELTA-SVD may use. Two steps are multi-core: the diffusion tensor / free-water fit, and (for longitudinal input only) the within-subject template construction; TBSS and the remaining steps are single-threaded. Defaults to 'auto', which detects the cores available to the process, honouring an HPC scheduler's allocation. It has no effect on the results, only on runtime, so it can be tuned freely.")
+    group2.add_argument("--threads", metavar='cores', type=threadBudget, default='auto', help="number of physical CPU cores DELTA-SVD may use. Two steps are multi-core: the diffusion tensor / free-water fit, and (for longitudinal input only) the within-subject template construction; TBSS and the remaining steps are single-threaded. Defaults to 'auto', which detects the cores available to the process, honouring an HPC scheduler's allocation and a container CPU limit (e.g. Docker's '--cpus'). It has no effect on the results, only on runtime, so it can be tuned freely.")
     group2.add_argument("--itkThreads", metavar='threads', type=assertPositiveItkThreads, default=ITK_THREADS_DEFAULT, help=argparse.SUPPRESS) #--- "Expert override for the ITK threads used per ANTs registration job. WARNING: this changes the computed metrics -- ITK sums the registration metric per thread, so a different count sums in a different order. Defaults to 12, the value DELTA-SVD was validated at. Results produced with different values must not be compared or pooled."
     group2.add_argument("--iterations", type=str, default='30x30x8', help=argparse.SUPPRESS) #--- "Iterations at each resolution level of the pairwise ANTs registrations during template creation. Must be three levels and specified in the format: 'L1xL2xL3'. Defaults to '30x30x8'."
     group2.add_argument("--numRegistrations", type=assertPositiveRegistrations, default=3, help=argparse.SUPPRESS) #--- "Iterations of the template construction. Each iteration comprises averaging of images and pairwise registrations of each timepoint to the template. Defaults to 3 iterations."

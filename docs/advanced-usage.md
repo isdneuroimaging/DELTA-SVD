@@ -15,7 +15,7 @@ Two parts of the pipeline use more than one core:
 
 | Value | Behaviour |
 | --- | --- |
-| `auto` (default) | Detect the physical cores available to the run. On a cluster this honours the cores your scheduler assigned, so a correctly sized job needs no setting. |
+| `auto` (default) | Detect the physical cores available to the run. On a cluster this honours the cores your scheduler assigned, and in a container a CPU limit such as Docker's `--cpus`, so a correctly sized job needs no setting. |
 | `N` | Cap usage at `N` cores. |
 | `1` | Use a single core. |
 
