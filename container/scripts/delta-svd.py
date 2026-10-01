@@ -211,6 +211,7 @@ if _missing:
              f"  without it would silently produce different metrics.")
 
 import nibabel as nib
+from nibabel.volumeutils import apply_read_scaling
 import numpy as np
 import pandas as pd
 
@@ -423,6 +424,38 @@ def format_b_values(bvals):
     return ', '.join(f'{int(v)} (n={n})' for v, n in zip(values, counts))
 
 
+def selected_volumes_float32(nii, idx):
+    """nii.get_fdata()[..., idx] cast to float32, bit for bit, without holding
+    every volume of the image in float64 at once.
+
+    Only the stored (unscaled) data of the whole file is read, in its own type;
+    each selected volume is then scaled exactly as get_fdata() scales it and cast
+    to float32 on its own. The scaling below mirrors nibabel's
+    ArrayProxy._get_scaled() for dtype float64 (unchanged from nibabel 5.3.3,
+    the version the image pins, to 5.4); apply_read_scaling() works element by
+    element with a precision chosen from the stored type only, so scaling one
+    volume at a time gives the same values as scaling all of them. A test
+    compares the result with get_fdata() for scaled and unscaled input.
+
+    On multi-shell data this was the peak memory of the whole fit step: a
+    288-volume HCP-sized image is ~8.4 GB in float64, before the selection
+    copied part of it again."""
+    proxy = nii.dataobj
+    if not nib.is_proxy(proxy):                       # in-memory image
+        return np.asarray(nii.get_fdata()[..., idx], dtype=np.float32)
+    raw = np.asanyarray(proxy.get_unscaled())
+    slope, inter = np.asanyarray(proxy.slope), np.asanyarray(proxy.inter)
+    if np.can_cast(slope, np.float64):
+        slope = slope.astype(np.float64)
+    if np.can_cast(inter, np.float64):
+        inter = inter.astype(np.float64)
+    out = np.empty(raw.shape[:-1] + (len(idx),), dtype=np.float32)
+    for k, i in enumerate(idx):
+        vol = apply_read_scaling(raw[..., i], slope, inter)
+        out[..., k] = vol.astype(np.promote_types(vol.dtype, np.float64), copy=False)
+    return out
+
+
 def filter_b_values(fn_data = 'data.nii.gz',
                 fn_bval = 'file.bval',
                 fn_bvec = 'file.bvec',
@@ -510,8 +543,7 @@ def filter_b_values(fn_data = 'data.nii.gz',
         bvecs = bvecsStr[sel]
 
         nii = nib.load(fn_data)
-        img = nii.get_fdata()
-        img = img[:,:,:,sel]
+        img = selected_volumes_float32(nii, np.flatnonzero(sel))
 
         fn_bval = join(out_dir, basename(fn_bval))
         fn_bvec = join(out_dir, basename(fn_bvec))
@@ -520,7 +552,8 @@ def filter_b_values(fn_data = 'data.nii.gz',
         write_bval_or_bvec(bvecs, fn_bvec)
         # dtype='float32' explicit: a lossless round-trip for the float32 input the
         # pipeline expects (do not change -- float64 would alter results for
-        # int16-with-scaling input)
+        # int16-with-scaling input). 'img' is float32 already, see
+        # selected_volumes_float32().
         save_nifti(fn_data, img, nii.affine, nii.header, dtype='float32')
 
         print('New data saved to:')
