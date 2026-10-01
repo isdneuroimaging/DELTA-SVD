@@ -100,7 +100,7 @@ Apptainer and rootless Podman map your host identity into the container, so they
 
 ## Selecting the b-values
 
-DELTA-SVD fits the tensor on one shell around b = 1000 s/mm², selected from your data automatically, so multi-shell acquisitions need no special handling. Two options change which volumes are selected, and only one of them can be given at a time.
+By default, DELTA-SVD fits the tensor using all shells in the 800–1200 s/mm² range, so multi-shell acquisitions need no special handling when they include a suitable shell. Two options change which volumes are selected, and only one of them can be given at a time.
 
 **`--bRange LO HI`** takes the lower and upper limit of the (non-zero) shell(s) to include, and defaults to `800 1200`:
 

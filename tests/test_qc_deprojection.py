@@ -64,14 +64,17 @@ def test_deproject_to_native_renumbers_label_maps(delta_svd, tmp_path, monkeypat
 
 @pytest.mark.parametrize("qc, expected", [
     (1, [("skel_intersection.nii.gz", False)]),
-    (2, [("skel_intersection.nii.gz", False), ("skel_intersection_Rmask.nii.gz", True),
+    (2, [("skel_intersection.nii.gz", False), ("skel_intersection_Rmask-00.nii.gz", False),
+         ("skel_intersection_Rmask-01.nii.gz", False),
          ("skel_intersection_RmaskMNI.nii.gz", True)]),
 ])
 def test_prepare_qc_deprojects_label_maps_only_when_kept(delta_svd, tmp_path, monkeypatch, qc, expected):
-    # the label maps are never shown in the report, only kept with '--qc 2'
+    # DWI-space ROI masks are kept separately so overlaps remain visible in QC 2.
+    # A merged '_Rmask.nii.gz' (written by older versions) must be ignored.
     stats = tmp_path / "TBSS" / "stats"
     stats.mkdir(parents=True)
     for name in ["skel_intersection.nii.gz", "skel_intersection_Rmask.nii.gz",
+                 "skel_intersection_Rmask-00.nii.gz", "skel_intersection_Rmask-01.nii.gz",
                  "skel_intersection_RmaskMNI.nii.gz"]:
         (stats / name).touch()
     tp = tmp_path / "TP01"

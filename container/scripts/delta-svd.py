@@ -1017,15 +1017,13 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timept.append(timeptT)
         region.append(skelSuffixT)
 
-        if iFn==0: imgROImerged = np.zeros(imgROI.shape, ROI_LABEL_DTYPE)
-        imgROImerged[imgROI>0] = int(roi)
-        if iFn==len(fnROI)-1 and np.count_nonzero(imgROImerged)>0: 
-            pnameROImerged = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'_Rmask.nii.gz')
-            save_nifti(pnameROImerged, imgROImerged, niiROI.affine, niiROI.header, dtype=ROI_LABEL_DTYPE)
+        #- no merged label map: ROIs may overlap, which merging would hide
+        if iFn==0: roiUnion = np.zeros(imgROI.shape, bool)
+        roiUnion |= imgROI>0
     # complementary ROI for the background
     if len(fnROI)>0:
         imgROI = maskIntersection.copy()
-        imgROI[imgROImerged>0] = 0
+        imgROI[roiUnion] = 0
         skelSuffixT = skelSuffix + '_Rmask-00'
         pnameROI = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixT+'.nii.gz')
         save_nifti(pnameROI, imgROI, niiMask.affine, niiMask.header, dtype='uint8')
@@ -1157,8 +1155,10 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
     return df
 
 def qc_label_maps(dirTBSS):
-    """The merged ROI label maps in skeleton space (DWI-space and MNI-space ROIs)."""
-    return (sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask.nii.gz')))
+    """The ROI maps in skeleton space: one binary map per DWI-space ROI label,
+    kept separate so overlapping labels remain visible, and the merged
+    MNI-space label map."""
+    return (sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask-*.nii.gz')))
             + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz'))))
 
 
@@ -1234,8 +1234,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
         skelMask = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
         emaskExists = 0
     
-    # The merged ROI label maps are never shown in the report, only kept in
-    # 'delta-svd_qc' for inspection, so they are deprojected with '--qc 2' only.
+    # ROI maps are kept for inspection with '--qc 2', not shown in the report.
     fnROI = [skelMask] + (qc_label_maps(dirTBSS) if args.qc >= 2 else [])
 
     if len(dirTP)>1:
@@ -1243,8 +1242,9 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
     else:
         fnameFAt = "fwc_wls_dti_FA_05"
 
-    for iFn, fn in enumerate(fnROI):
-        deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP, relabel=iFn > 0)
+    for fn in fnROI:
+        deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP,
+                            relabel=fn.endswith('_RmaskMNI.nii.gz'))
     
     #--- in space of the input, per timepoint
     vlim = [
@@ -1603,6 +1603,8 @@ def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
             f"{origin}\n Looked for:\n{tried}\n{hint}{fix}{note}")
 
 def isCSV(s):
+    if '/' in s or '\\' in s:
+        raise argparse.ArgumentTypeError(f"--reprocess requires a CSV base name in the output folder; you provided '{s}'")
     if s == 'overwrite' or s.endswith('.csv') or s.endswith('.CSV'):
         return s
     else:
