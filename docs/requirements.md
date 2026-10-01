@@ -6,6 +6,9 @@ icon: lucide/database
 
 DELTA-SVD analyses multi-directional diffusion MRI that has already been preprocessed. It does not perform image preprocessing itself. The guidance below describes acquisitions and preprocessing that make data well suited to the pipeline. It reflects current best practice rather than a single mandated protocol: sensible deviations are fine, but these recommendations are a safe default.
 
+> [!IMPORTANT]
+> **Keep input data and preprocessing consistent throughout the project.** For longitudinal analyses, ensure that scanner acquisition parameters, data handling, and preprocessing are identical across all timepoints to support reliable results. Also make sure you are aware of any changes in scanner hardware or software during your project, which can substantially affect diffusion MRI data.
+
 ## Required input
 
 Each timepoint is described by four files. The DWI must already be **preprocessed** (see [Preprocessing](#preprocessing) below); DELTA-SVD does not preprocess it for you.

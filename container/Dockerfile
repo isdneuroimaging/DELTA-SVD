@@ -58,6 +58,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ENV OPENBLAS_CORETYPE="Haswell" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONNOUSERSITE=1 \
     LANG="en_US.UTF-8" \
     LC_ALL="en_US.UTF-8" \
     PATH="/opt/scripts:/opt/conda/bin:/opt/ants-2.4.3/bin:$PATH" \
@@ -158,7 +159,7 @@ RUN printf '%s\n' "$VERSION" > VERSION \
  && printf '%s\n' "$VCS_REF" > SOURCE_REVISION
 
 USER 999:999
-ENTRYPOINT [ "python", "/opt/scripts/delta-svd.py" ]
+ENTRYPOINT [ "python", "-E", "-s", "-u", "/opt/scripts/delta-svd.py" ]
 
 LABEL org.opencontainers.image.version="$VERSION" \
     org.opencontainers.image.revision="$VCS_REF" \
