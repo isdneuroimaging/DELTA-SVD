@@ -1004,7 +1004,9 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timept.append(timeptT)
         region.append(skelSuffix)
 
-    fnROI = sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', 'all_ROI-*_skeletonised.nii.gz')))
+    # numeric labels only: a timepoint labelled 'ROI-1' writes 'all_ROI-1_FW_skeletonised'
+    fnROI = sorted(fn for fn in glob.glob(join(glob.escape(dirTBSS), 'stats', 'all_ROI-*_skeletonised.nii.gz'))
+                   if re.fullmatch(r'all_ROI-[0-9]+_skeletonised\.nii\.gz', basename(fn)))
     for iFn,fn in enumerate(fnROI):
         roi = re.sub(r'.*all_ROI-([0-9]*)_skeletonised.nii.gz','\\1',fn)
         niiROI = nib.load(fn)

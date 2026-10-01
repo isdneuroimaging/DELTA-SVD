@@ -1383,6 +1383,18 @@ def test_integrate_masks_inserts_the_background_roi_before_the_named_rois(delta_
     assert not (stats / "skel_intersection_Rmask.nii.gz").exists()
 
 
+def test_integrate_masks_ignores_a_timepoint_named_like_an_roi(delta_svd, tmp_path):
+    # timepoint 'ROI-1' writes 'all_ROI-1_FW_skeletonised', which the ROI
+    # pattern also matched, so the extract step crashed reading its label
+    kwargs, stats = _tbss_tree(
+        tmp_path, skeleton=[1, 1, 1, 1, 1, 0], bmasks={"ROI-1": [1, 1, 1, 1, 1, 1]})
+    nib.save(nib.Nifti1Image(_vol([0] * 6), np.eye(4)), str(stats / "all_ROI-1_FW_skeletonised.nii.gz"))
+
+    df = delta_svd.integrate_masks(**kwargs)
+
+    assert list(df["region"]) == ["total", "intersection"]
+
+
 def test_integrate_masks_roi_suffixes_follow_the_emask_exclusion(delta_svd, tmp_path):
     # Once an exclusion mask is present the ROI outputs have to hang off the
     # *excluded* skeleton, both in name and in content - extract_stats() globs
