@@ -908,7 +908,7 @@ def run_tbss(fnameFAt = None, dirTBSS = None):
     
 def batch_tbss_non_fa(dirTP = None, dirTBSS = None, fnNonFA = None):
     
-    fnameFAt = glob.glob(join(dirTBSS, 'FA', '*_FA.nii.gz'))
+    fnameFAt = glob.glob(join(glob.escape(dirTBSS), 'FA', '*_FA.nii.gz'))
     fnameFAt = re.sub(r'_FA\.nii\.gz','.nii.gz',basename(fnameFAt[0]))
 
     tpB = basename(dirTP)
@@ -921,7 +921,7 @@ def run_tbss_non_fa(fn = None, label=None, dirTBSS = None, fnameFAt = None):
     
     # get name of FA used for projection onto skeleton
     if fnameFAt is None:
-        fnameFAt = glob.glob(join(dirTBSS, 'FA', '*_FA.nii.gz'))
+        fnameFAt = glob.glob(join(glob.escape(dirTBSS), 'FA', '*_FA.nii.gz'))
         fnameFAt = re.sub(r'_FA\.nii\.gz','.nii.gz',basename(fnameFAt[0]))
 
     dirTBSS_nonFA = join(dirTBSS, label)
@@ -1004,7 +1004,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timept.append(timeptT)
         region.append(skelSuffix)
 
-    fnROI = sorted(glob.glob(join(dirTBSS, 'stats', 'all_ROI-*_skeletonised.nii.gz')))
+    fnROI = sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', 'all_ROI-*_skeletonised.nii.gz')))
     for iFn,fn in enumerate(fnROI):
         roi = re.sub(r'.*all_ROI-([0-9]*)_skeletonised.nii.gz','\\1',fn)
         niiROI = nib.load(fn)
@@ -1107,10 +1107,10 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
         skelMaskInters = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
 
     fnROI = [skelMaskInters]
-    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask-*.nii.gz')))
-    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI-*.nii.gz')))
-    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_LH.nii.gz')))
-    fnROI = fnROI + sorted(glob.glob(join(dirTBSS, 'stats', '*_RH.nii.gz')))
+    fnROI = fnROI + sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', '*_Rmask-*.nii.gz')))
+    fnROI = fnROI + sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', '*_RmaskMNI-*.nii.gz')))
+    fnROI = fnROI + sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', '*_LH.nii.gz')))
+    fnROI = fnROI + sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', '*_RH.nii.gz')))
 
 
 
@@ -1164,9 +1164,9 @@ def qc_label_maps(dirTBSS):
     kept separate so overlapping labels remain visible, and the merged
     MNI-space label map."""
     # Match only numeric label suffixes, excluding prior QC deprojection outputs.
-    return (sorted(fn for fn in glob.glob(join(dirTBSS, 'stats', '*_Rmask-*.nii.gz'))
+    return (sorted(fn for fn in glob.glob(join(glob.escape(dirTBSS), 'stats', '*_Rmask-*.nii.gz'))
                    if re.search(r'_Rmask-[0-9]+\.nii\.gz$', basename(fn)))
-            + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz'))))
+            + sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', '*_RmaskMNI.nii.gz'))))
 
 
 def consecutive_labels(img):
@@ -1948,13 +1948,13 @@ def pipeline_delta_svd():
     dirTemplate = join(dirTemp,'template')
     dirTemplateInter = join(dirTemp, 'intermediateTemplates')
     dirTBSS = join(dirTemp,'TBSS')
-    fnNonTBSS = glob.glob(join(dirTBSS,'*')) + glob.glob(join(dirTBSS, 'stats','*'))
+    fnNonTBSS = glob.glob(join(glob.escape(dirTBSS),'*')) + glob.glob(join(glob.escape(dirTBSS), 'stats','*'))
     fnNonTBSS = [x for x in fnNonTBSS if not re.match('FA$|origdata$|stats$|all_FA|mean_FA|thresh',basename(x))]
     if args.reprocess is None or args.reprocess == 'overwrite':
         fnCSV = join(args.dirOutput, 'delta-svd_results.csv')
     else:
         fnCSV = join(args.dirOutput, args.reprocess)
-    fnSkelRegions = glob.glob(join(dirTBSS, 'stats','*_intersection*'))
+    fnSkelRegions = glob.glob(join(glob.escape(dirTBSS), 'stats','*_intersection*'))
     dirQC = join(args.dirOutput, 'delta-svd_qc')
     fnHTML = join(args.dirOutput, 'delta-svd_qc.html')
     fnManifest = join(args.dirOutput, 'delta-svd_run_manifest.json')

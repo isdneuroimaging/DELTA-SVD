@@ -3057,3 +3057,13 @@ def test_cross_sectional_run_accepts_whitespace_in_the_output_path(delta_svd, tm
                                       "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
     with pytest.raises(delta_svd.DeltaSvdError, match="contradictory"):
         delta_svd.pipeline_delta_svd()
+
+
+def test_tbss_lookups_take_the_output_path_literally(delta_svd, tmp_path):
+    # '[1]' in the output path is a glob character class; unescaped, every
+    # lookup under it found nothing and the run failed hours in
+    stats = tmp_path / "out[1]" / "TBSS" / "stats"
+    stats.mkdir(parents=True)
+    fn = stats / "skel_intersection_Rmask-01.nii.gz"
+    fn.touch()
+    assert delta_svd.qc_label_maps(str(stats.parent)) == [str(fn)]
