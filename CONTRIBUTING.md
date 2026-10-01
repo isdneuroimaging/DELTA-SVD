@@ -27,9 +27,11 @@ Three quantities shift the endpoints without any source change, because they alt
 | --- | --- | --- |
 | **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
-| **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `ENV OPENBLAS_CORETYPE=Haswell` in the `Dockerfile` |
+| **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `OPENBLAS_CORETYPE=Haswell` in `IMAGE_ENVIRONMENT` (`delta_svd_constants.py`), mirrored as `ENV` in the `Dockerfile` |
 
 A last-bit difference in the fitted tensors nudges the deformation field, and the skeleton (thresholding an *interpolated binary* mask at exactly 1) converts that into whole voxels entering or leaving — nothing absorbs it, so it reaches the metrics. If the reference subject ever moves without an obvious cause, check these three before suspecting the code.
+
+The image's tool selection is pinned the same way. The `Dockerfile` `ENV` values can still be replaced at run time (`docker run -e`, Apptainer's `--env` or `APPTAINERENV_*`), and Apptainer passes in host variables the image does not set and mounts the host's home, so `delta-svd.py` assigns everything in `IMAGE_ENVIRONMENT` (`FSLDIR`, `ANTSPATH`, `OPENBLAS_CORETYPE`, ...) itself when it runs in the image, drops host `PYTHON*` and `FSLSUB_*` variables, and runs Python with `-E -s` so neither `PYTHONPATH` nor `~/.local` can supply packages. Otherwise a host FSL, ANTs, BLAS kernel or numpy could do the processing. A test keeps `IMAGE_ENVIRONMENT` and the `Dockerfile` `ENV` in step.
 
 #### Checking whether a change moved the numbers
 
@@ -65,7 +67,7 @@ Rules for the runs being compared:
 
 - Development happens on a feature branch; open pull requests against `main`.
 - `main` is protected: it takes a pull request with at least one approving review and passing status checks (`pytest` on 3.11 and 3.14, `hadolint`, `compileall`). There is no direct-push or force-push exception, including for maintainers.
-- [`VERSION`](VERSION) is the single source of truth for the release version; bump it in the same change that cuts a release.
+- [`VERSION`](VERSION) is the single source of truth for the release version; bump it in the feature branch that makes up the release (see [Releasing](#releasing)).
 - Keep the working tree clean before building a release image: `build.sh` marks the image revision `-dirty` when there is any uncommitted change, including an untracked file.
 
 ### Building the image
@@ -79,44 +81,103 @@ container/build.sh delta-svd:dev   # custom tag; extra args pass through to dock
 
 ### Releasing
 
-Releases are built and staged by CI ([`release-build.yml`](.github/workflows/release-build.yml)), validated by hand against the staged image, then published by a second CI workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) that copies the validated manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` without a human having checked the exact digest first.
+A release goes through three stages. CI builds it and stages it ([`release-build.yml`](.github/workflows/release-build.yml)). A maintainer then checks the staged image by hand. Finally, a second workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) copies that same manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` unless a human has checked the exact digest first.
 
-Rebuilding an *older* commit will fail outright, not just differ: the `apt` pins resolve against the live Ubuntu archive, and `ca-certificates`' version is itself a date, so the pin stops matching once the archive moves on. **The pushed image digest, not the source tree, is the artefact of record for a release** — recover an old release by pulling its digest, not by rebuilding its tag.
+Keep in mind before you start:
 
-Only exact version tags are published; there is **no `latest` tag**, so no run can pick up a new version by accident (see [Validation status](#validation-status-read-this-first)).
+- **The pushed image digest is the release, not the source tree.** An *older* commit cannot be rebuilt: the build fails. The `apt` pins resolve against the live Ubuntu archive, and the `ca-certificates` version is itself a date, so the pin stops matching once the archive moves on. To recover an old release, pull its digest. Do not rebuild its tag.
+- **Only exact version tags are published.** There is no `latest` tag, so no run can pick up a new version by accident (see [Validation status](#validation-status-read-this-first)).
+- **Choosing the version number.** Bump only the last digit when a change provably leaves the validated whole-skeleton endpoints untouched. Otherwise bump `MAJOR.MINOR`, which tells users their results cannot be pooled with earlier ones. A patch that corrects optional derived rows must carry a compatibility note. The note names the affected inputs and tells users not to pool those rows across the patch.
 
-1. **Bump [`VERSION`](VERSION)** and commit it. Use the last digit only for a change that provably leaves the validated whole-skeleton endpoints untouched (see [Validation status](#validation-status-read-this-first)); otherwise bump `MAJOR.MINOR`, which is what tells users their results cannot be pooled with earlier ones. A patch that corrects optional derived rows must carry a compatibility note naming the affected inputs and telling users not to pool those rows across the patch.
+#### 1. Bump the version in the feature branch
 
-    Land this through a normal pull request first — `main` is protected, so the bump commit has to be merged (not pushed directly) before it can be tagged in the next step.
+Bump the version as the last commit of the feature branch that makes up the release. The reviewer then sees the version choice (patch or `MAJOR.MINOR`) next to the change that justifies it. If a release bundles several pull requests that are already merged, put the bump in a short pull request of its own instead.
 
-    `VERSION` is the single source of truth, but two files restate it by hand because their formats cannot interpolate, and both have to move in the same commit:
+[`VERSION`](VERSION) is the single source of truth. Two files restate it by hand because their formats cannot interpolate, and both must change in the same commit:
 
-    - [`CITATION.cff`](CITATION.cff) — its `version:` field, which GitHub renders in "Cite this repository";
-    - [`docs/install.md`](docs/install.md) — the image tag in the `apptainer pull` / `docker pull` / verification commands, which otherwise keeps handing users the *previous* image.
+- [`CITATION.cff`](CITATION.cff): the `version:` field, which GitHub shows under "Cite this repository".
+- [`docs/install.md`](docs/install.md): the image tag in the pull and verification commands. If this is missed, the docs keep handing users the *previous* image.
 
-    `tests/test_version.py` fails if either disagrees with `VERSION`. Everything else derives from it automatically: `build.sh` (which `release-build.yml` also calls) passes it to the `Dockerfile` as the `VERSION` build argument, which both stamps the OCI label and writes the file next to the scripts that `--version` reports. The file itself is never copied into the image, so a plain `docker build` without that argument reports `unknown`.
+On the feature branch, set `VER` to the new version, then run the block below. This is the only place the version is typed in; every later step reads it back from `VERSION`.
 
-2. **Tag the release commit and push the tag.** This triggers `release-build.yml`, which checks the tag against `VERSION`, builds the image (same semantics as a local `build.sh` run), and pushes it — attested via `actions/attest-build-provenance` — to a public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`, tagged by commit SHA only so it can never be mistaken for a release.
+```bash
+VER=X.Y.Z
+echo "$VER" > VERSION
+sed -i "s/^version: .*/version: $VER/" CITATION.cff
+sed -i -E "s/delta-svd:[0-9]+\.[0-9]+\.[0-9]+/delta-svd:$VER/g" docs/install.md
+git diff
+.venv-test/bin/python -m pytest tests/test_version.py
+git commit -am "Bump version to $VER"
+git push
+```
 
-    ```bash
-    git tag -a "v$(tr -d '[:space:]' < VERSION)" -m "DELTA-SVD $(tr -d '[:space:]' < VERSION)"
-    git push origin "v$(tr -d '[:space:]' < VERSION)"
-    ```
+`tests/test_version.py` fails if either file disagrees with `VERSION`. Everything else takes the version from `VERSION` automatically. `build.sh` (which `release-build.yml` also calls) passes it to the `Dockerfile` as the `VERSION` build argument. That argument stamps the OCI label and writes the file that `--version` reports. The `VERSION` file itself is never copied into the image, so a plain `docker build` without that argument reports `unknown`.
 
-    Watch the run's job summary for the staged image reference (`ghcr.io/isdneuroimaging/delta-svd-staging@sha256:...`) and copy it — everything from here on refers to that, not the tag.
+`main` is protected, so the **pull request must be merged before the next step**.
 
-    If validation below fails and needs a fix, delete the tag, commit the fix, and re-tag: nothing has reached the production package yet, so moving the tag is safe.
+#### 2. Tag the merged commit
 
-3. **Validate**, unless the change is provably not metric-affecting. Run the longitudinal comparison from [Validation status](#validation-status-read-this-first) using *the staged image*, not a local rebuild:
+After merging the PR:
 
-    ```bash
-    STAGED="ghcr.io/isdneuroimaging/delta-svd-staging@sha256:..."   # from the job summary
-    apptainer pull delta-svd_staging.sif "docker://$STAGED"
-    ```
+```bash
+git switch main
+git pull
+VER=$(tr -d '[:space:]' < VERSION)
+git tag -a "v$VER" -m "DELTA-SVD $VER"
+git push origin "v$VER"
+```
 
-4. **Promote.** Once validated, run `release-promote.yml` with that same image reference — Actions tab → "Run workflow", or `gh workflow run release-promote.yml -f image="$STAGED"`. It re-reads the image's own `version`/`revision` labels (refusing anything malformed, `unknown`, or `-dirty`), copies the manifest — never a rebuild — to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, and opens a draft GitHub release recording it.
+Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and attests it with `actions/attest-build-provenance`. It pushes the image to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
 
-5. **Publish the draft release** from the web UI, or `gh release edit "v$VER" --draft=false`.
+The run's job summary shows the staged image reference, `ghcr.io/isdneuroimaging/delta-svd-staging@sha256:...`. Copy it: every later step uses this reference, not the tag.
+
+#### 3. Validate the staged image
+
+You can skip this step only if the change is provably not metric-affecting. Pull *the staged image*; a local rebuild does not count:
+
+```bash
+STAGED="ghcr.io/isdneuroimaging/delta-svd-staging@sha256:..."   # from the job summary
+apptainer pull delta-svd_staging.sif "docker://$STAGED"
+```
+
+Process the longitudinal reference subject with it, following the rules in [Checking whether a change moved the numbers](#checking-whether-a-change-moved-the-numbers). Then compare the results with those of the previous release:
+
+```bash
+.venv-test/bin/python tools/compare_results.py \
+    before/delta-svd_results.csv after/delta-svd_results.csv
+```
+
+If validation fails, fix it and re-tag. Production has not been touched yet, so moving the tag is safe:
+
+```bash
+VER=$(tr -d '[:space:]' < VERSION)
+git tag -d "v$VER"
+git push origin --delete "v$VER"
+# merge the fix through a pull request, then repeat step 2
+```
+
+#### 4. Promote
+
+This reuses `STAGED` from step 3. If it is not set in the current shell, the command stops without triggering anything:
+
+```bash
+echo "Promoting ${STAGED:?not set, see step 3}" && gh workflow run release-promote.yml -f image="$STAGED"
+```
+
+You can also start it from the Actions tab: choose "Run workflow". The workflow first re-reads the image's own `version` and `revision` labels, and refuses the image if either is malformed, `unknown`, or `-dirty`. It then copies the manifest to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, without rebuilding. Finally, it creates a draft GitHub release that records the digest. 
+
+#### 5. Write the release notes
+
+Edit the draft on the Releases page on GitHub and add the release notes above the `Image:` line.
+
+#### 6. Publish the draft release
+
+```bash
+VER=$(tr -d '[:space:]' < VERSION)
+gh release edit "v$VER" --draft=false
+```
+
+You can also publish it from the Releases page on GitHub.
 
 ### Tests
 

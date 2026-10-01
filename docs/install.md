@@ -37,7 +37,7 @@ The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimag
 
 Pull the image and convert it to a local `.sif` file in one step:
 
-```
+```shell
 apptainer pull delta-svd.sif docker://ghcr.io/isdneuroimaging/delta-svd:1.0.3
 ```
 
@@ -47,7 +47,7 @@ This writes `delta-svd.sif` into the current directory, the file used throughout
 
 Pull the image into the local daemon's store:
 
-```
+```shell
 docker pull ghcr.io/isdneuroimaging/delta-svd:1.0.3
 ```
 
@@ -57,13 +57,13 @@ Replace `docker` with `podman` to use rootless Podman instead.
 
 Run the pipeline's help to confirm the image works:
 
-```
+```shell
 apptainer run delta-svd.sif --help
 ```
 
 or, with Docker:
 
-```
+```shell
 docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.3 --help
 ```
 
@@ -73,7 +73,7 @@ If you see the DELTA-SVD option help, you are ready to go; continue with [Usage]
 
 Every release image is built and pushed by a GitHub Actions workflow that attaches a [Sigstore](https://www.sigstore.dev/)-signed build attestation, verifiable with the [GitHub CLI](https://cli.github.com/) (`gh`, version 2.49 or later):
 
-```
+```shell
 gh attestation verify oci://ghcr.io/isdneuroimaging/delta-svd:1.0.3 --owner isdneuroimaging
 ```
 
@@ -81,9 +81,9 @@ A successful verification confirms the image was built by that workflow from the
 
 ## Checking which version you have
 
-Because results from a different `MAJOR.MINOR` version must not be pooled, it is worth being able to confirm which one a `.sif` file or an image tag actually is. Pass `--version`:
+Because results from a different `MAJOR.MINOR` version must not be pooled, it is worth confirming which one a `.sif` file or an image tag actually is. Check with `--version`:
 
-```
+```shell
 apptainer run delta-svd.sif --version
 ```
 
@@ -93,4 +93,4 @@ The version is also recorded with the run so results can be traced back after th
 
 - the **first line of the run's console output**, ahead of the command line;
 - the **run manifest** (`delta-svd_run_manifest.json`) for successful runs, which records both the release version and the source revision embedded in the container;
-- the **QC report** (`delta-svd_qc.html`) when QC is enabled, in the table at the top.
+- the **QC report** (`delta-svd_qc.html`, unless switched off with `--qc 0`), in the table at the top.

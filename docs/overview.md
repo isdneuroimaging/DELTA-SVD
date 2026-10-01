@@ -4,7 +4,7 @@ icon: lucide/compass
 
 # Overview
 
-DELTA-SVD is a containerised diffusion-MRI pipeline that turns preprocessed diffusion-weighted images into diffusion metrics designed for **longitudinal** tracking of change in cerebral small vessel disease (cSVD). It fits the diffusion (bi)-tensor, projects the resulting maps onto a white matter skeleton (TBSS-style), applies a custom mask and reports summary endpoints per timepoint and per region.
+DELTA-SVD is a containerised diffusion-MRI pipeline that turns preprocessed diffusion-weighted images into diffusion metrics designed for **longitudinal** tracking of change in cerebral small vessel disease (cSVD). It fits the diffusion (bi)-tensor, projects the resulting maps onto a white matter skeleton (TBSS-style), applies a custom mask, provides a QC report, and reports summary endpoints per timepoint and per region.
 
 For a longitudinal run it builds a **within-subject template** so that the skeleton and the skeleton-derived metrics are directly comparable across timepoints, rather than re-deriving them independently at each visit.
 
@@ -24,7 +24,7 @@ Each timepoint is a preprocessed 4D DWI plus its b-values, b-vectors, and a DWI-
 
 DELTA-SVD runs as a container; you pass the pipeline's arguments after the image name:
 
-```
+```shell
 apptainer run delta-svd.sif --dwi <image> --id <subject>
 ```
 
@@ -33,10 +33,10 @@ Pass a single DWI for a **[cross-sectional](usage.md#cross-sectional-single-time
 ## Outputs
 
 - **`delta-svd_results.csv`** — the results table, reporting three validated endpoint metrics per timepoint and per region:
-    - **MSMD** — mean skeletonised mean diffusivity; the recommended primary endpoint for most datasets.
+    - **MSMD** — mean skeletonised mean diffusivity; the **recommended metric for most datasets**.
     - **PSMD** — peak width of skeletonised mean diffusivity; an established marker of white-matter damage in cSVD.
     - **MSFW** — mean skeletonised free water.
 - **`delta-svd_qc.html`** — a quality-control report with the skeleton and masks overlaid on the data.
 - **`delta-svd_run_manifest.json`** — a machine-readable record of the completed run, including its version, source revision, command, UTC timestamps, processing mode, and outputs.
 
-For guidance on which endpoint to report, see the **[FAQ](faq.md#what-are-msmd-psmd-and-msfw-and-which-should-i-report)**; for the full output detail and QC levels, see **[Usage](usage.md#output)**.
+For additional guidance on which metric to report, see the **[FAQ](faq.md#what-are-msmd-psmd-and-msfw-and-which-should-i-report)**; for the full output detail and QC levels, see **[Usage](usage.md#output)**.
