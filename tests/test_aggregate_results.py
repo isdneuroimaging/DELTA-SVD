@@ -348,13 +348,15 @@ def test_shebang_isolates_from_the_host_python_environment():
     assert SCRIPT.read_text().splitlines()[0] == "#!/usr/bin/env -S python3 -E -s"
 
 
-@pytest.mark.parametrize("outputs, warned", [
-    (["alt.csv", "delta-svd_qc.html"], True),       # left behind by '--reprocess alt.csv'
-    (["delta-svd_results.csv", "delta-svd_qc.html"], False),
+@pytest.mark.parametrize("steps, outputs, warned", [
+    (["extract", "qc"], ["alt.csv", "delta-svd_qc.html"], True),    # left behind by '--reprocess alt.csv'
+    (["extract", "qc"], ["delta-svd_results.csv", "delta-svd_qc.html"], False),
+    (["qc"], ["delta-svd_qc.html"], False),                         # QC-only re-run: table still current
 ])
-def test_warns_about_a_csv_the_run_manifest_does_not_list(tmp_path, outputs, warned):
+def test_warns_about_a_csv_the_run_manifest_does_not_list(tmp_path, steps, outputs, warned):
     _write_fixture_csv(tmp_path / "sub01", "sub01", 0.1, 0.2)
-    (tmp_path / "sub01" / "delta-svd_run_manifest.json").write_text(json.dumps({"outputs": outputs}))
+    (tmp_path / "sub01" / "delta-svd_run_manifest.json").write_text(
+        json.dumps({"steps_completed": steps, "outputs": outputs}))
 
     r = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
 

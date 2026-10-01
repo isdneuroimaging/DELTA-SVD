@@ -156,13 +156,16 @@ if __name__ == "__main__":
         nRows.append(len(dfT))
         fnamesOk.append(file)
         # a re-run with '--reprocess <name>.csv' keeps the old table, but the
-        # manifest it leaves beside it lists only the new one
+        # manifest it leaves beside it lists only the new one. Only a run that
+        # extracted names the current table: a QC-only re-run lists none.
         try:
             with open(os.path.join(os.path.dirname(file), 'delta-svd_run_manifest.json')) as fh:
-                outputs = json.load(fh).get('outputs')
+                manifest = json.load(fh)
+            outputs, steps = manifest.get('outputs'), manifest.get('steps_completed')
         except (OSError, ValueError, AttributeError):
-            outputs = None
-        if isinstance(outputs, list) and os.path.basename(file) not in outputs:
+            outputs, steps = None, None
+        if (isinstance(outputs, list) and isinstance(steps, list) and 'extract' in steps
+                and os.path.basename(file) not in outputs):
             print('WARNING: Not listed in the run manifest next to it, so it may be from an earlier run:', file)
     if len(fnamesOk)>0:
         fnames = fnamesOk
