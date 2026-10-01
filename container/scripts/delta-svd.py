@@ -1158,7 +1158,9 @@ def qc_label_maps(dirTBSS):
     """The ROI maps in skeleton space: one binary map per DWI-space ROI label,
     kept separate so overlapping labels remain visible, and the merged
     MNI-space label map."""
-    return (sorted(glob.glob(join(dirTBSS, 'stats', '*_Rmask-*.nii.gz')))
+    # Match only numeric label suffixes, excluding prior QC deprojection outputs.
+    return (sorted(fn for fn in glob.glob(join(dirTBSS, 'stats', '*_Rmask-*.nii.gz'))
+                   if re.search(r'_Rmask-[0-9]+\.nii\.gz$', basename(fn)))
             + sorted(glob.glob(join(dirTBSS, 'stats', '*_RmaskMNI.nii.gz'))))
 
 
