@@ -100,6 +100,13 @@ def test_isCSV_rejects_other_extensions(delta_svd):
     assert "--reprocess" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("name", ["../results.csv", "./results.csv", "/tmp/results.csv",
+                                         r"..\results.csv"])
+def test_isCSV_rejects_paths_instead_of_base_names(delta_svd, name):
+    with pytest.raises(argparse.ArgumentTypeError, match="base name"):
+        delta_svd.isCSV(name)
+
+
 def test_assertPositiveJobs_accepts_values_at_or_above_one(delta_svd):
     assert delta_svd.assertPositiveJobs("1") == 1
     assert delta_svd.assertPositiveJobs("5") == 5
@@ -1357,9 +1364,8 @@ def test_integrate_masks_inserts_the_background_roi_before_the_named_rois(delta_
     background = nib.load(str(stats / "skel_intersection_Rmask-00.nii.gz")).get_fdata()
     assert background.ravel().tolist() == [0, 0, 1, 1, 0, 0]
 
-    # the merged file re-labels each ROI with its own number, not a binary union
-    merged = nib.load(str(stats / "skel_intersection_Rmask.nii.gz")).get_fdata()
-    assert merged.ravel().tolist() == [1, 2, 0, 0, 0, 0]
+    # no merged label map: overlapping ROIs would be hidden in it
+    assert not (stats / "skel_intersection_Rmask.nii.gz").exists()
 
 
 def test_integrate_masks_roi_suffixes_follow_the_emask_exclusion(delta_svd, tmp_path):
@@ -1381,6 +1387,52 @@ def test_integrate_masks_roi_suffixes_follow_the_emask_exclusion(delta_svd, tmp_
                                  "intersection_Emask_Rmask-01"]
     roi01 = nib.load(str(stats / "skel_intersection_Emask_Rmask-01.nii.gz")).get_fdata()
     assert roi01.ravel().tolist() == [1, 0, 0, 0, 0, 0]      # index 1 was excluded
+
+
+def test_prepare_qc_deprojects_the_roi_maps_integrate_masks_writes(delta_svd, tmp_path, monkeypatch):
+    # prepare_qc() finds the ROI maps by file name, so a renamed output in
+    # integrate_masks() would silently drop them from '--qc 2'. Runs the two
+    # together rather than against hand-named placeholder files.
+    import create_html_with_png
+    import create_qc_image
+
+    kwargs, stats = _tbss_tree(
+        tmp_path,
+        skeleton=[1, 1, 1, 1, 1, 0],
+        bmasks={"TP01": [1, 1, 1, 1, 1, 1]},
+        emask=[0, 0, 0, 0, 1, 0],
+        rois={"01": [1, 1, 0, 0, 0, 0], "02": [0, 1, 1, 0, 0, 0]},   # overlap at index 1
+        mni=[0, 0, 1, 1, 2, 2],
+    )
+    delta_svd.integrate_masks(**kwargs)
+
+    for name in ["fwc_wls_dti_FA_05.nii.gz", "wls_dti_FA.nii.gz", "wls_dti_MD.nii.gz"]:
+        (tmp_path / "TP01" / name).touch()
+    dirQC = tmp_path / "delta-svd_qc"
+    dirQC.mkdir()
+    deprojected = []
+    monkeypatch.setattr(delta_svd, "deproject_to_native",
+                        lambda fn, *a, relabel=False: deprojected.append((os.path.basename(fn), relabel)))
+    monkeypatch.setattr(create_qc_image, "create_qc_image",
+                        lambda *a, animate=True, **k: "x.png" if animate else [])
+    monkeypatch.setattr(create_html_with_png, "create_html_with_png", lambda *a, **k: None)
+
+    delta_svd.prepare_qc(str(dirQC), str(tmp_path / "qc.html"), kwargs["skelMask"],
+                         kwargs["dirTBSS"], str(tmp_path / "template"), kwargs["dirTP"],
+                         "results.csv", SimpleNamespace(qc=2, dirOutput=str(tmp_path)))
+
+    # every binary ROI map as written, without relabelling; only the merged MNI map is relabelled
+    assert deprojected == [
+        ("skel_intersection_Emask-as-label2.nii.gz", False),
+        ("skel_intersection_Emask_Rmask-00.nii.gz", False),
+        ("skel_intersection_Emask_Rmask-01.nii.gz", False),
+        ("skel_intersection_Emask_Rmask-02.nii.gz", False),
+        ("skel_intersection_Emask_RmaskMNI.nii.gz", True),
+    ]
+    # the overlap survives in the separate maps
+    roi01 = nib.load(str(stats / "skel_intersection_Emask_Rmask-01.nii.gz")).get_fdata()
+    roi02 = nib.load(str(stats / "skel_intersection_Emask_Rmask-02.nii.gz")).get_fdata()
+    assert roi01.ravel()[1] == roi02.ravel()[1] == 1
 
 
 def test_integrate_masks_relabels_mni_rois_including_the_background(delta_svd, tmp_path):
@@ -1443,9 +1495,6 @@ def test_integrate_and_extract_preserve_wide_dwi_labels(delta_svd, tmp_path):
     assert list(df["region"][-3:]) == [
         "intersection_Rmask-00", "intersection_Rmask-255", "intersection_Rmask-256",
     ]
-    merged = nib.load(str(stats / "skel_intersection_Rmask.nii.gz"))
-    assert merged.get_data_dtype() == np.dtype("uint16")
-    assert merged.get_fdata().ravel().tolist() == [0, 255, 256]
 
     nib.save(nib.Nifti1Image(_vol([1.0, 2.0, 3.0]), np.eye(4)),
              str(stats / "all_TP01_MD_skeletonised.nii.gz"))
