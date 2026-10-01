@@ -4,7 +4,7 @@
 Aggregate DELTA-SVD result tables across subjects
 """
 
-import sys, os, glob, argparse, re
+import sys, os, glob, argparse, re, json
 import numpy as np
 import pandas as pd
 import datetime
@@ -155,6 +155,15 @@ if __name__ == "__main__":
         dfs.append(dfT)
         nRows.append(len(dfT))
         fnamesOk.append(file)
+        # a re-run with '--reprocess <name>.csv' keeps the old table, but the
+        # manifest it leaves beside it lists only the new one
+        try:
+            with open(os.path.join(os.path.dirname(file), 'delta-svd_run_manifest.json')) as fh:
+                outputs = json.load(fh).get('outputs')
+        except (OSError, ValueError, AttributeError):
+            outputs = None
+        if isinstance(outputs, list) and os.path.basename(file) not in outputs:
+            print('WARNING: Not listed in the run manifest next to it, so it may be from an earlier run:', file)
     if len(fnamesOk)>0:
         fnames = fnamesOk
     else:
