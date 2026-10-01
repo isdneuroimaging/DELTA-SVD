@@ -339,3 +339,9 @@ def test_aggregate_reports_an_empty_glob_on_stderr(tmp_path):
     assert result.returncode == 1
     assert "No CSV files found" in result.stderr
     assert "'-f'" in result.stderr and "'-d'" in result.stderr
+
+
+def test_shebang_isolates_from_the_host_python_environment():
+    # started from PATH inside the image, as the docs show, so the shebang is
+    # what keeps a host PYTHONPATH or ~/.local out (delta-svd.py re-execs itself)
+    assert SCRIPT.read_text().splitlines()[0] == "#!/usr/bin/env -S python3 -E -s"

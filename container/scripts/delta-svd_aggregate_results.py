@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S python3 -E -s
 # -*- coding: utf-8 -*-
 """
 Aggregate DELTA-SVD result tables across subjects
