@@ -2070,11 +2070,12 @@ def test_binarise_mask_write_path_is_byte_identical_for_a_binary_mask(delta_svd,
 def _minimal_pipeline_inputs(tmp_path):
     dwi = tmp_path / "sub01.nii.gz"
     skel = tmp_path / "skel.nii.gz"
-    for fn in [
-        dwi, tmp_path / "sub01.bval", tmp_path / "sub01.bvec",
-        tmp_path / "sub01_brainmask.nii.gz", skel,
-    ]:
+    for fn in [tmp_path / "sub01.bval", tmp_path / "sub01.bvec", skel]:
         fn.touch()
+    # real headers: the brain mask is checked against the DWI grid up front
+    nib.save(nib.Nifti1Image(np.zeros((2, 2, 2, 2), dtype="float32"), np.eye(4)), str(dwi))
+    nib.save(nib.Nifti1Image(np.ones((2, 2, 2), dtype="uint8"), np.eye(4)),
+             str(tmp_path / "sub01_brainmask.nii.gz"))
     return dwi, skel
 
 
@@ -2154,7 +2155,9 @@ def test_pipeline_rejects_all_as_a_longitudinal_timepoint_label(delta_svd, tmp_p
     [("../other", "path traversal"), ("visit/one", "path separator"),
      (r"visit\one", "path separator"), ("template", "internal working directory"),
      ("intermediateTemplates", "internal working directory"),
-     ("TBSS", "internal working directory")],
+     ("TBSS", "internal working directory"),
+     # FSL's tbss_non_FA and ANTs' template script split names at whitespace
+     ("visit one", "whitespace"), ("visit\tone", "whitespace")],
 )
 def test_rejects_unsafe_timepoint_labels(delta_svd, label, message):
     with pytest.raises(ValueError, match=message):
@@ -2182,7 +2185,7 @@ def test_unsafe_reprocessing_leaves_unrelated_files_untouched(
     assert sentinel.read_text() == "untouched"
 
 
-@pytest.mark.parametrize("label", ["TP01", "ses-1", "visit.1", "visit one"])
+@pytest.mark.parametrize("label", ["TP01", "ses-1", "visit.1"])
 def test_accepts_plain_timepoint_labels(delta_svd, label):
     delta_svd.validate_timepoint_labels([label])
 
@@ -2445,18 +2448,29 @@ def test_inferred_path_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path,
                       "Notch004/BL/diffusion/data_brainmask.nii"]
 
 
-def test_candidate_paths_re_anchors_only_what_the_user_typed(delta_svd):
+def test_candidate_paths_anchors_only_a_bare_name(delta_svd):
     dwi = "study/sub01/data.nii.gz"
     # inferred: already carries the folder, so it is probed as-is only
-    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True, inferred=True) == [
+    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True) == [
         "study/sub01/data_brainmask.nii.gz", "study/sub01/data_brainmask.nii"]
-    # typed: a bare basename has to be resolvable against the DWI folder
-    assert delta_svd.candidate_paths("m.nii.gz", dwi, True, inferred=False) == [
-        "m.nii.gz", "study/sub01/m.nii.gz"]
+    # a bare name is probed next to the DWI only, never in the working directory
+    assert delta_svd.candidate_paths("m.nii.gz", dwi, True) == ["study/sub01/m.nii.gz"]
+    # a name carrying a folder is probed as given only
+    assert delta_svd.candidate_paths("./m.nii.gz", dwi, True) == ["./m.nii.gz"]
+
+
+def test_per_timepoint_path(delta_svd):
+    dwi = "/data/ses-2/data.nii.gz"
+    assert delta_svd.per_timepoint_path("bvals", dwi) == "/data/ses-2/bvals"
+    assert delta_svd.per_timepoint_path("./bvals", dwi) == "./bvals"
+    assert delta_svd.per_timepoint_path("ses-1/bvals", dwi) == "ses-1/bvals"
+    assert delta_svd.per_timepoint_path("/abs/bvals", dwi) == "/abs/bvals"
+    # a DWI given as a bare name lives in the working directory, so does its file
+    assert delta_svd.per_timepoint_path("bvals", "data.nii.gz") == "bvals"
 
 
 def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_path, monkeypatch, capsys):
-    # the feature the second probe exists for must survive the fix, relative too
+    # relative DWI path, so the DWI folder differs from the working directory
     sub = tmp_path / "study" / "sub01"
     sub.mkdir(parents=True)
     skel = tmp_path / "skel.nii.gz"
@@ -2469,7 +2483,90 @@ def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_
         "--dwi", "study/sub01/data.nii.gz", "--bmask", "mask.nii.gz",
         "--skeletonMask", "skel.nii.gz", "--steps", "qc", "--qc", "0",
     ])
-    assert "Bmask :study/sub01/mask.nii.gz" in out
+    assert f"Bmask :{os.path.abspath('study/sub01/mask.nii.gz')}" in out
+
+
+# ---------------------------------------------------------------------------
+# A bare name means the file next to each timepoint's DWI image. It used to be
+# looked for in the working directory first, so running from inside one
+# session's folder silently gave every session that session's files.
+
+def _two_sessions(tmp_path):
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    dwis = []
+    for ses in ["ses-1", "ses-2"]:
+        d = tmp_path / ses
+        d.mkdir()
+        for fn in ["data.nii.gz", "bvals", "bvecs", "mask.nii.gz", "lesion.nii.gz"]:
+            (d / fn).touch()
+        dwis.append(str(d / "data.nii.gz"))
+    return skel, dwis
+
+
+def test_bare_names_ignore_a_same_named_file_in_the_working_directory(delta_svd, tmp_path, monkeypatch, capsys):
+    skel, dwis = _two_sessions(tmp_path)
+    monkeypatch.chdir(tmp_path / "ses-1")
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", *dwis, "--bval", "bvals", "--bvec", "bvecs", "--bmask", "mask",
+        "--Emask", "lesion.nii.gz", "lesion.nii.gz",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    tp1, tp2 = out.split("Timepoint TP02:")
+    ses1, ses2 = tmp_path / "ses-1", tmp_path / "ses-2"
+    for label, fn in [("bval  ", "bvals"), ("bvec  ", "bvecs"),
+                      ("Bmask ", "mask.nii.gz"), ("Emask ", "lesion.nii.gz")]:
+        assert f"{label}:{ses1 / fn}" in tp1
+        assert f"{label}:{ses2 / fn}" in tp2
+    assert str(ses1) not in tp2
+
+
+def test_bare_name_found_only_in_the_working_directory_is_missing(delta_svd, tmp_path, monkeypatch):
+    skel, dwis = _two_sessions(tmp_path)
+    (tmp_path / "ses-2" / "bvals").unlink()
+    monkeypatch.chdir(tmp_path / "ses-1")
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", *dwis, "--bval", "bvals", "--bvec", "bvecs",
+        "--bmask", "mask", "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError) as excinfo:
+        delta_svd.pipeline_delta_svd()
+
+    msg = str(excinfo.value)
+    assert "'--bval'" in msg
+    assert dwis[1] in msg
+    assert str(tmp_path / "ses-2" / "bvals") in msg
+
+
+def test_path_with_a_folder_is_used_as_given(delta_svd, tmp_path, monkeypatch, capsys):
+    skel, dwis = _two_sessions(tmp_path)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "bvals").touch()
+    monkeypatch.chdir(tmp_path)
+
+    out = _resolved_inputs(delta_svd, monkeypatch, capsys, [
+        "--dwi", *dwis, "--bval", "./shared/bvals", "--bvec", "bvecs", "--bmask", "mask",
+        "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    assert out.count(f"bval  :{os.path.abspath('shared/bvals')}") == 2
+
+
+def test_path_with_a_folder_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path, monkeypatch):
+    # 'grad/bvals' exists only relative to the DWI folder, not to the working
+    # directory; it is a path, so it is not looked for there
+    skel, dwis = _two_sessions(tmp_path)
+    for ses in ["ses-1", "ses-2"]:
+        (tmp_path / ses / "grad").mkdir()
+        (tmp_path / ses / "grad" / "bvals").touch()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [
+        "delta-svd.py", "--dwi", *dwis, "--bval", "grad/bvals", "--bvec", "bvecs",
+        "--bmask", "mask", "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0",
+    ])
+    with pytest.raises(delta_svd.DeltaSvdError, match="'--bval'"):
+        delta_svd.pipeline_delta_svd()
 
 
 # ---------------------------------------------------------------------------
@@ -2554,7 +2651,7 @@ def test_missing_explicit_bmask_reports_it_as_given(delta_svd, tmp_path, monkeyp
     msg = str(excinfo.value)
     assert "given as 'nowhere.nii.gz'" in msg
     assert "inferred" not in msg
-    # probed relative to the DWI folder as well, and that is reported
+    # a bare name is probed next to the DWI, and that is reported
     assert str(tmp_path / "nowhere.nii.gz") in msg
 
 
@@ -2791,3 +2888,108 @@ def test_pipeline_rejects_an_off_grid_mask_before_processing(
     with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions"):
         delta_svd.pipeline_delta_svd()
     assert not (tmp_path / "delta-svd_temp").exists()
+
+
+# ---------------------------------------------------------------------------
+# check_dwi_grid(): masks given in DWI space have to be on their DWI's grid.
+
+_DWI_AFFINE = np.diag([2.0, 2.0, 2.5, 1.0])
+_DWI_AFFINE[:3, 3] = [-100.0, -120.0, -60.0]
+
+
+def _save_dwi(path, shape=(8, 9, 7, 3), affine=_DWI_AFFINE):
+    nib.save(nib.Nifti1Image(np.zeros(shape, dtype="float32"), affine), str(path))
+    return str(path)
+
+
+def test_check_dwi_grid_accepts_a_matching_grid(delta_svd, tmp_path):
+    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
+    affine = _DWI_AFFINE.copy()
+    affine[0, 3] += 1e-6                          # float32 header round-off
+    delta_svd.check_dwi_grid(_save_grid(tmp_path / "mask.nii.gz", (8, 9, 7), affine),
+                             "brain mask", "bmask", dwi)
+
+
+def test_check_dwi_grid_rejects_a_wrong_shape(delta_svd, tmp_path):
+    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
+    fn = _save_grid(tmp_path / "lesion.nii.gz", (16, 18, 14), _DWI_AFFINE)
+    with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions") as excinfo:
+        delta_svd.check_dwi_grid(fn, "exclusion mask", "Emask", dwi)
+    msg = str(excinfo.value)
+    assert fn in msg and dwi in msg and "'--Emask'" in msg
+
+
+def test_check_dwi_grid_rejects_a_shifted_affine(delta_svd, tmp_path):
+    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
+    affine = _DWI_AFFINE.copy()
+    affine[2, 3] += 2.5                           # one slice off
+    fn = _save_grid(tmp_path / "roi.nii.gz", (8, 9, 7), affine)
+    with pytest.raises(delta_svd.DeltaSvdError, match="affine"):
+        delta_svd.check_dwi_grid(fn, "ROI mask in DWI space", "Rmask", dwi)
+
+
+@pytest.mark.parametrize("option", ["--bmask", "--Emask", "--Rmask"])
+def test_pipeline_rejects_an_off_grid_dwi_mask_before_processing(
+        delta_svd, tmp_path, monkeypatch, option):
+    dwi = _save_dwi(tmp_path / "sub01.nii.gz")
+    for fn in ["sub01.bval", "sub01.bvec"]:
+        (tmp_path / fn).touch()
+    _save_grid(tmp_path / "sub01_brainmask.nii.gz", (8, 9, 7), _DWI_AFFINE)
+    offGrid = _save_grid(tmp_path / "off.nii.gz", (16, 18, 14), _DWI_AFFINE)
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", dwi, option, offGrid,
+                                      "--skeletonMask", str(skel)])
+
+    with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions") as excinfo:
+        delta_svd.pipeline_delta_svd()
+    assert f"'{option}'" in str(excinfo.value)
+    assert not (tmp_path / "delta-svd_temp").exists()
+
+
+# ---------------------------------------------------------------------------
+# Whitespace in the output path breaks ANTs' template construction only.
+
+def _two_timepoints_in(folder):
+    folder.mkdir(parents=True)
+    dwis = []
+    for tp in ["tp1", "tp2"]:
+        for suffix in [".nii.gz", ".bval", ".bvec", "_brainmask.nii.gz"]:
+            (folder / (tp + suffix)).touch()
+        dwis.append(str(folder / (tp + ".nii.gz")))
+    return dwis
+
+
+def test_longitudinal_run_rejects_whitespace_in_the_output_path(delta_svd, tmp_path, monkeypatch):
+    dwis = _two_timepoints_in(tmp_path / "My Study")
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", *dwis,
+                                      "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
+    with pytest.raises(delta_svd.DeltaSvdError, match="whitespace") as excinfo:
+        delta_svd.pipeline_delta_svd()
+    assert "'--dirOutput'" in str(excinfo.value)
+
+
+def test_longitudinal_run_accepts_an_output_folder_without_whitespace(delta_svd, tmp_path, monkeypatch):
+    dwis = _two_timepoints_in(tmp_path / "My Study")
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", *dwis, "-o", str(tmp_path / "out"),
+                                      "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
+    # gets past the path check to the contradictory-options error that follows it
+    with pytest.raises(delta_svd.DeltaSvdError, match="contradictory"):
+        delta_svd.pipeline_delta_svd()
+
+
+def test_cross_sectional_run_accepts_whitespace_in_the_output_path(delta_svd, tmp_path, monkeypatch):
+    folder = tmp_path / "My Study"
+    folder.mkdir()
+    for fn in ["tp1.nii.gz", "tp1.bval", "tp1.bvec", "tp1_brainmask.nii.gz"]:
+        (folder / fn).touch()
+    skel = tmp_path / "skel.nii.gz"
+    skel.touch()
+    monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", str(folder / "tp1.nii.gz"),
+                                      "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
+    with pytest.raises(delta_svd.DeltaSvdError, match="contradictory"):
+        delta_svd.pipeline_delta_svd()
