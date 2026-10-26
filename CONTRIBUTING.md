@@ -21,15 +21,16 @@ Changes that provably leave those endpoints untouched (documentation, packaging,
 
 #### External hazards: settings that move the metrics from outside the code
 
-Three quantities shift the endpoints without any source change, because they alter how the *same* arithmetic is executed. All three are pinned in this repository; unpinning any of them, or changing what it's pinned to, is a metric-affecting change requiring re-validation.
+Four quantities shift the endpoints without any source change, because they alter how the *same* arithmetic is executed. All four are pinned in this repository; unpinning any of them, or changing what it's pinned to, is a metric-affecting change requiring re-validation.
 
 | Hazard | Why it moves the numbers | Pinned as |
 | --- | --- | --- |
 | **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
 | **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `OPENBLAS_CORETYPE=Haswell` in `IMAGE_ENVIRONMENT` (`delta_svd_constants.py`), mirrored as `ENV` in the `Dockerfile` |
+| **System glibc (`libm`)** | the ANTs binaries link the system `libm`, whose results can differ between glibc builds; `apt-get install locales` would otherwise pull the newest `libc6` from `noble-updates` | exact `libc6`/`libc-bin`/`locales` versions in the `Dockerfile`; a build fails once Ubuntu supersedes them, and bumping them needs re-validation |
 
-A last-bit difference in the fitted tensors nudges the deformation field, and the skeleton (thresholding an *interpolated binary* mask at exactly 1) converts that into whole voxels entering or leaving — nothing absorbs it, so it reaches the metrics. If the reference subject ever moves without an obvious cause, check these three before suspecting the code.
+A last-bit difference in the fitted tensors nudges the deformation field, and the skeleton (thresholding an *interpolated binary* mask at exactly 1) converts that into whole voxels entering or leaving — nothing absorbs it, so it reaches the metrics. If the reference subject ever moves without an obvious cause, check these four before suspecting the code.
 
 The image's tool selection is pinned the same way. The `Dockerfile` `ENV` values can still be replaced at run time (`docker run -e`, Apptainer's `--env` or `APPTAINERENV_*`), and Apptainer passes in host variables the image does not set and mounts the host's home, so `delta-svd.py` assigns everything in `IMAGE_ENVIRONMENT` (`FSLDIR`, `ANTSPATH`, `OPENBLAS_CORETYPE`, ...) itself when it runs in the image, drops host `PYTHON*` and `FSLSUB_*` variables, and runs Python with `-E -s` so neither `PYTHONPATH` nor `~/.local` can supply packages. Otherwise a host FSL, ANTs, BLAS kernel or numpy could do the processing. A test keeps `IMAGE_ENVIRONMENT` and the `Dockerfile` `ENV` in step.
 
@@ -208,13 +209,13 @@ docker run --rm -v "$PWD:/repo:ro" -w /repo -e PYTHONPYCACHEPREFIX=/tmp/pyc \
     python:3.11-slim python -m compileall -q container/scripts tools tests
 ```
 
-To run the same suite against the *pinned* stack instead (worth doing after changing the conda lock, where a dependency bump could remove an API the scripts rely on), use [`tests/run-in-locked-env.sh`](tests/run-in-locked-env.sh), which builds a throwaway environment from the lock in a container. See the header of that script for details.
+To run the same suite against the *pinned* stack instead (worth doing after changing the conda lock, where a dependency bump could remove an API the scripts rely on), use [`tests/run-in-locked-env.sh`](tests/run-in-locked-env.sh), which builds a throwaway environment from the lock and the Dockerfile's pinned Pillow wheel in a container. See the header of that script for details.
 
 ### Container dependencies
 
-Runtime dependencies are pinned as an explicit conda environment in `container/conda-explicit-linux-64.txt`. Regenerate that lock rather than hand-editing it when dependencies change, so it stays reproducible. Regeneration is a metric-affecting change in its own right, even when no direct dependency was touched: it can move any transitive package, and the numerics ones reach the numbers.
+The runtime dependency specification has two parts: the explicit conda environment in `container/conda-explicit-linux-64.txt` and the Pillow wheel pinned by URL and SHA-256 in `container/Dockerfile`. The lock deliberately omits Pillow because current conda builds require a newer libzlib that conflicts with pinned FSL packages. The lock alone does not recreate the complete runtime. Keep the Pillow URL and SHA-256 in `tests/run-in-locked-env.sh` identical to the Dockerfile; the helper installs it before recording the environment snapshots used to check the pytest installation.
 
-There is one deliberate exception, documented in the lock's own header: the four BLAS/LAPACK entries (`libopenblas`, `libblas`, `libcblas`, `liblapack`) are **hand-maintained**, pinned to the versions in the container the method was validated against. After any regeneration, re-apply those four URLs and re-run the longitudinal comparison above.
+Regeneration is a metric-affecting change in its own right, even when no direct dependency was touched: it can move any transitive package, and the numerics ones reach the numbers. For the security updates documented in the lock's header, hand-edit only the affected URLs and checksums without re-solving. The four BLAS/LAPACK entries (`libopenblas`, `libblas`, `libcblas`, `liblapack`) are also **hand-maintained**, pinned to the versions in the container the method was validated against. After any future regeneration, re-apply both sets of hand-edits, keep conda Pillow out of the lock, and re-run the longitudinal comparison above.
 
 ### Conventions
 

@@ -6,7 +6,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ## OS dependencies
 RUN apt-get update -qq && apt-get install -y -q --no-install-recommends \
-        ca-certificates=20260601* \
+        ca-certificates=20260816* \
         wget=1.21.4* \
         unzip=6.0* \
  && apt-get clean \
@@ -69,10 +69,14 @@ ENV OPENBLAS_CORETYPE="Haswell" \
     QT_QPA_PLATFORM="offscreen"
 
 ## OS dependencies, locale (Apptainer needs it generated), nonroot user
+## libc6 is pinned exactly because the ANTs binaries link the system libm, whose
+## results can differ between glibc builds; locales would otherwise upgrade it.
 RUN apt-get update -qq && apt-get install -y -q --no-install-recommends \
-        ca-certificates=20260601* \
+        ca-certificates=20260816* \
         dc=1.07.1* \
-        locales=2.39* \
+        libc6=2.39-0ubuntu8.9 \
+        libc-bin=2.39-0ubuntu8.9 \
+        locales=2.39-0ubuntu8.9 \
         wget=1.21.4* \
  && groupadd --system --gid 999 nonroot \
  && useradd --system --uid 999 --gid 999 \
@@ -102,6 +106,14 @@ RUN conda tos accept --override-channels \
  && sed -i -e '105s/^/# /' -e '106s/^/# /' -e '107s/^/# /' -e '108s/^/# /' -e '109s/^/# /' /opt/conda/bin/tbss_1_preproc \
  && find /opt/conda/data/standard -type f \( -name 'FSL*' -o -name 'MNI152*' \) -delete \
  && rm -rf /opt/conda/data/standard/bianca /opt/conda/data/standard/tissuepriors
+
+## Pillow comes from PyPI, not the lock: every conda pillow >=12.3 needs libzlib >=1.3.2,
+## which FSL pins below 1.3. The wheel bundles its own image libraries under pillow.libs,
+## so the conda shared libraries stay as locked. Only the QC images use Pillow.
+RUN wget --progress=dot:giga https://files.pythonhosted.org/packages/36/46/f509b74787f40ce0627501089d630b2c741b63b244c1f40b640b3b01e181/pillow-13.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl -P /opt/ \
+ && echo "a625df9a2a5597fa5e5266e01aefc82604bb85d291e3547981e863560d75da6c  /opt/pillow-13.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl" | sha256sum -c - \
+ && python -m pip install --no-deps --no-index --no-cache-dir /opt/pillow-13.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl \
+ && rm /opt/pillow-13.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 
 ## The FSL Licence permits redistribution only with the source included (see NOTICE).
 ## Versions come from the installed env so they cannot drift from what is shipped.
