@@ -17,30 +17,14 @@ permissions:
 
 jobs:
   pytest:
-    # Python-version compatibility only, NOT the pinned conda stack: this
-    # installs dipy/nibabel/numpy unpinned from PyPI. 3.11 matches the version
-    # the container ships (see container/conda-explicit-linux-64.txt); 3.14 is
-    # the current interpreter, keeping honest the CONTRIBUTING.md claim that
-    # the suite also passes on a current stack. Neither entry exercises the
-    # pinned scientific stack - that is tests/run-in-locked-env.sh below.
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.14"]
+    # Use the same Python packages and shared libraries as the container,
+    # installed from explicit URLs without solving the environment.
     runs-on: ubuntu-latest
-    # The suite finishes in under a minute; anything longer is a hung test
-    # (seen once on 3.14 with an unpinned dependency), not slow work. Fail
-    # fast instead of holding the runner for the 6-hour default.
-    timeout-minutes: 15
+    # Environment creation downloads the pinned packages from their channels.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: tests/requirements.txt
-      - run: pip install -r tests/requirements.txt
-      - run: python -m pytest -q
+      - run: tests/run-in-locked-env.sh
 
   compileall:
     # Tripwire for syntax that a non-3.11 dev interpreter accepts but the
@@ -64,14 +48,3 @@ jobs:
         with:
           dockerfile: container/Dockerfile
           failure-threshold: warning
-
-  # Only thing that exercises the pinned conda lock (numerical behaviour of
-  # the scientific stack), rather than just interpreter/PyPI compatibility.
-  # Manual-only: it builds a conda environment inside a container and pulls
-  # from FSL's/Anaconda's servers, which is too slow and too flaky for every PR.
-  locked-env:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: tests/run-in-locked-env.sh

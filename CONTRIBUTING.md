@@ -67,7 +67,7 @@ Rules for the runs being compared:
 ### Workflow
 
 - Development happens on a feature branch; open pull requests against `main`.
-- `main` is protected: it takes a pull request with at least one approving review and passing status checks (`pytest` on 3.11 and 3.14, `hadolint`, `compileall`). There is no direct-push or force-push exception, including for maintainers.
+- `main` is protected: it takes a pull request with at least one approving review and passing status checks (`pytest` against the pinned runtime, `hadolint`, `compileall`). There is no direct-push or force-push exception, including for maintainers.
 - [`VERSION`](VERSION) is the single source of truth for the release version; bump it in the feature branch that makes up the release (see [Releasing](#releasing)).
 - Keep the working tree clean before building a release image: `build.sh` marks the image revision `-dirty` when there is any uncommitted change, including an untracked file.
 
@@ -128,7 +128,7 @@ git tag -a "v$VER" -m "DELTA-SVD $VER"
 git push origin "v$VER"
 ```
 
-Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and attests it with `actions/attest-build-provenance`. It pushes the image to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
+Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and pushes it to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. It runs the unit tests inside that exact staged digest before attesting it with `actions/attest-build-provenance` and reporting it for manual validation. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
 
 The run's job summary shows the staged image reference, `ghcr.io/isdneuroimaging/delta-svd-staging@sha256:...`. Copy it: every later step uses this reference, not the tag.
 
@@ -182,17 +182,33 @@ You can also publish it from the Releases page on GitHub.
 
 ### Tests
 
-The unit tests exercise the Python scripts in `container/scripts/` with pytest. They cover script logic (argument handling and validation, input path resolution, mask merging, metric naming, results-table assembly, and the QC report) and are deliberately insensitive to the exact dependency versions: the suite passes unchanged both on the stack pinned for the image (Python 3.11, numpy 1.24, dipy 1.5) and on a current one (Python 3.14, numpy 2.5, dipy 1.12).
+The unit tests exercise the Python scripts in `container/scripts/` with pytest. They cover script logic (argument handling and validation, input path resolution, mask merging, metric naming, results-table assembly, and the QC report). PR and `main` CI test the container's pinned Python stack (Python 3.11, numpy 1.24, dipy 1.5) using `tests/run-in-locked-env.sh`. Release CI runs the same suite inside the actual staged image digest. Unpinned PyPI dependencies are only a convenience for local development, not a PR or release acceptance check.
 
 Two separate things need pinning, and they cover different risks:
 
 - **Python version** (3.11) guards syntax and stdlib compatibility with the shipped interpreter. `ast.parse(source, feature_version=(3, 11))` does not reliably catch version-specific syntax, since its tokenizer runs before the feature-version check — only compiling under a real 3.11 interpreter does.
-- **The conda lock** guards the numerical behaviour of the scientific stack. `tests/requirements.txt` installs numpy/dipy/nibabel unpinned from PyPI, so pinning Python alone doesn't cover this; use [`tests/run-in-locked-env.sh`](#tests) below for that.
+- **The runtime dependencies** are installed from the explicit conda lock plus the pinned Pillow wheel, without re-solving. The test helper uses the Dockerfile's base image and glibc pins, too. Python alone does not establish compatibility with this stack.
 
 > [!IMPORTANT]
 > The suite does **not** check the metric values the pipeline produces, so a green run says nothing about whether a change is metric-affecting. That judgement, and any re-validation it triggers, still rests on review; see [Validation status](#validation-status-read-this-first).
 
-Run them in a virtual environment; the dependencies are listed in [`tests/requirements.txt`](tests/requirements.txt) and are pulled from PyPI, independently of the container's conda environment. `python3 -m venv` picks up whatever `python3` is on your machine, so pin it to 3.11 if that differs, e.g. with [uv](https://docs.astral.sh/uv/): `uv venv --python 3.11 .venv-test`:
+Run the same check as PR CI with Docker:
+
+```bash
+tests/run-in-locked-env.sh
+```
+
+It creates a disposable environment from the lock and the pinned Pillow wheel; it does not build the release image or download FSL source archives. It still needs access to the package channels, including FSL's conda channel. Pytest 9.1.1 is installed only as test tooling, and the helper checks both conda and pip package lists to reject any replacement of runtime packages.
+
+To test an image that is already built, use:
+
+```bash
+DELTA_SVD_TEST_IMAGE=delta-svd:dev tests/run-in-locked-env.sh
+```
+
+Release CI uses this mode with the staged image's immutable digest. It skips environment creation and installs pytest only in the disposable container, leaving the image unchanged. The working tree is mounted read-only in both modes.
+
+For local development, a virtual environment using [`tests/requirements.txt`](tests/requirements.txt) is also available. These dependencies come from PyPI independently of the container environment, so results may differ when new dependency versions change behaviour:
 
 ```bash
 python3 -m venv .venv-test
@@ -200,7 +216,7 @@ python3 -m venv .venv-test
 .venv-test/bin/python -m pytest
 ```
 
-The `.venv-test/` directory is git-ignored. Run the suite before opening a pull request and add tests for new behaviour; CI runs it too, on Python 3.11 and 3.14, on every pull request and push to `main`.
+The `.venv-test/` directory is git-ignored. Run the pinned-environment suite before opening a pull request and add tests for new behaviour; CI runs that suite on every pull request and push to `main`.
 
 CI also compiles every module under Python 3.11 as a fast tripwire for version-specific syntax. Check it locally with just Docker:
 
@@ -208,8 +224,6 @@ CI also compiles every module under Python 3.11 as a fast tripwire for version-s
 docker run --rm -v "$PWD:/repo:ro" -w /repo -e PYTHONPYCACHEPREFIX=/tmp/pyc \
     python:3.11-slim python -m compileall -q container/scripts tools tests
 ```
-
-To run the same suite against the *pinned* stack instead (worth doing after changing the conda lock, where a dependency bump could remove an API the scripts rely on), use [`tests/run-in-locked-env.sh`](tests/run-in-locked-env.sh), which builds a throwaway environment from the lock and the Dockerfile's pinned Pillow wheel in a container. See the header of that script for details.
 
 ### Container dependencies
 
