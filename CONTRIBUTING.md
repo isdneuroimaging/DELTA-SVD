@@ -21,15 +21,16 @@ Changes that provably leave those endpoints untouched (documentation, packaging,
 
 #### External hazards: settings that move the metrics from outside the code
 
-Three quantities shift the endpoints without any source change, because they alter how the *same* arithmetic is executed. All three are pinned in this repository; unpinning any of them, or changing what it's pinned to, is a metric-affecting change requiring re-validation.
+Four quantities shift the endpoints without any source change, because they alter how the *same* arithmetic is executed. All four are pinned in this repository; unpinning any of them, or changing what it's pinned to, is a metric-affecting change requiring re-validation.
 
 | Hazard | Why it moves the numbers | Pinned as |
 | --- | --- | --- |
 | **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
 | **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `OPENBLAS_CORETYPE=Haswell` in `IMAGE_ENVIRONMENT` (`delta_svd_constants.py`), mirrored as `ENV` in the `Dockerfile` |
+| **System glibc (`libm`)** | the ANTs binaries link the system `libm`, whose results can differ between glibc builds; `apt-get install locales` would otherwise pull the newest `libc6` from `noble-updates` | exact `libc6`/`libc-bin`/`locales` versions in the `Dockerfile`; a build fails once Ubuntu supersedes them, and bumping them needs re-validation |
 
-A last-bit difference in the fitted tensors nudges the deformation field, and the skeleton (thresholding an *interpolated binary* mask at exactly 1) converts that into whole voxels entering or leaving — nothing absorbs it, so it reaches the metrics. If the reference subject ever moves without an obvious cause, check these three before suspecting the code.
+A last-bit difference in the fitted tensors nudges the deformation field, and the skeleton (thresholding an *interpolated binary* mask at exactly 1) converts that into whole voxels entering or leaving — nothing absorbs it, so it reaches the metrics. If the reference subject ever moves without an obvious cause, check these four before suspecting the code.
 
 The image's tool selection is pinned the same way. The `Dockerfile` `ENV` values can still be replaced at run time (`docker run -e`, Apptainer's `--env` or `APPTAINERENV_*`), and Apptainer passes in host variables the image does not set and mounts the host's home, so `delta-svd.py` assigns everything in `IMAGE_ENVIRONMENT` (`FSLDIR`, `ANTSPATH`, `OPENBLAS_CORETYPE`, ...) itself when it runs in the image, drops host `PYTHON*` and `FSLSUB_*` variables, and runs Python with `-E -s` so neither `PYTHONPATH` nor `~/.local` can supply packages. Otherwise a host FSL, ANTs, BLAS kernel or numpy could do the processing. A test keeps `IMAGE_ENVIRONMENT` and the `Dockerfile` `ENV` in step.
 
@@ -66,7 +67,7 @@ Rules for the runs being compared:
 ### Workflow
 
 - Development happens on a feature branch; open pull requests against `main`.
-- `main` is protected: it takes a pull request with at least one approving review and passing status checks (`pytest` on 3.11 and 3.14, `hadolint`, `compileall`). There is no direct-push or force-push exception, including for maintainers.
+- `main` is protected: it takes a pull request with at least one approving review and passing status checks (`pytest` against the pinned runtime, `hadolint`, `compileall`). There is no direct-push or force-push exception, including for maintainers.
 - [`VERSION`](VERSION) is the single source of truth for the release version; bump it in the feature branch that makes up the release (see [Releasing](#releasing)).
 - Keep the working tree clean before building a release image: `build.sh` marks the image revision `-dirty` when there is any uncommitted change, including an untracked file.
 
@@ -127,7 +128,7 @@ git tag -a "v$VER" -m "DELTA-SVD $VER"
 git push origin "v$VER"
 ```
 
-Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and attests it with `actions/attest-build-provenance`. It pushes the image to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
+Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and pushes it to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. It runs the unit tests inside that exact staged digest before attesting it with `actions/attest-build-provenance` and reporting it for manual validation. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
 
 The run's job summary shows the staged image reference, `ghcr.io/isdneuroimaging/delta-svd-staging@sha256:...`. Copy it: every later step uses this reference, not the tag.
 
@@ -181,17 +182,33 @@ You can also publish it from the Releases page on GitHub.
 
 ### Tests
 
-The unit tests exercise the Python scripts in `container/scripts/` with pytest. They cover script logic (argument handling and validation, input path resolution, mask merging, metric naming, results-table assembly, and the QC report) and are deliberately insensitive to the exact dependency versions: the suite passes unchanged both on the stack pinned for the image (Python 3.11, numpy 1.24, dipy 1.5) and on a current one (Python 3.14, numpy 2.5, dipy 1.12).
+The unit tests exercise the Python scripts in `container/scripts/` with pytest. They cover script logic (argument handling and validation, input path resolution, mask merging, metric naming, results-table assembly, and the QC report). PR and `main` CI test the container's pinned Python stack (Python 3.11, numpy 1.24, dipy 1.5) using `tests/run-in-locked-env.sh`. Release CI runs the same suite inside the actual staged image digest. Unpinned PyPI dependencies are only a convenience for local development, not a PR or release acceptance check.
 
 Two separate things need pinning, and they cover different risks:
 
 - **Python version** (3.11) guards syntax and stdlib compatibility with the shipped interpreter. `ast.parse(source, feature_version=(3, 11))` does not reliably catch version-specific syntax, since its tokenizer runs before the feature-version check — only compiling under a real 3.11 interpreter does.
-- **The conda lock** guards the numerical behaviour of the scientific stack. `tests/requirements.txt` installs numpy/dipy/nibabel unpinned from PyPI, so pinning Python alone doesn't cover this; use [`tests/run-in-locked-env.sh`](#tests) below for that.
+- **The runtime dependencies** are installed from the explicit conda lock plus the pinned Pillow wheel, without re-solving. The test helper uses the Dockerfile's base image and glibc pins, too. Python alone does not establish compatibility with this stack.
 
 > [!IMPORTANT]
 > The suite does **not** check the metric values the pipeline produces, so a green run says nothing about whether a change is metric-affecting. That judgement, and any re-validation it triggers, still rests on review; see [Validation status](#validation-status-read-this-first).
 
-Run them in a virtual environment; the dependencies are listed in [`tests/requirements.txt`](tests/requirements.txt) and are pulled from PyPI, independently of the container's conda environment. `python3 -m venv` picks up whatever `python3` is on your machine, so pin it to 3.11 if that differs, e.g. with [uv](https://docs.astral.sh/uv/): `uv venv --python 3.11 .venv-test`:
+Run the same check as PR CI with Docker:
+
+```bash
+tests/run-in-locked-env.sh
+```
+
+It creates a disposable environment from the lock and the pinned Pillow wheel; it does not build the release image or download FSL source archives. It still needs access to the package channels, including FSL's conda channel. Pytest 9.1.1 is installed only as test tooling, and the helper checks both conda and pip package lists to reject any replacement of runtime packages.
+
+To test an image that is already built, use:
+
+```bash
+DELTA_SVD_TEST_IMAGE=delta-svd:dev tests/run-in-locked-env.sh
+```
+
+Release CI uses this mode with the staged image's immutable digest. It skips environment creation and installs pytest only in the disposable container, leaving the image unchanged. The working tree is mounted read-only in both modes.
+
+For local development, a virtual environment using [`tests/requirements.txt`](tests/requirements.txt) is also available. These dependencies come from PyPI independently of the container environment, so results may differ when new dependency versions change behaviour:
 
 ```bash
 python3 -m venv .venv-test
@@ -199,7 +216,7 @@ python3 -m venv .venv-test
 .venv-test/bin/python -m pytest
 ```
 
-The `.venv-test/` directory is git-ignored. Run the suite before opening a pull request and add tests for new behaviour; CI runs it too, on Python 3.11 and 3.14, on every pull request and push to `main`.
+The `.venv-test/` directory is git-ignored. Run the pinned-environment suite before opening a pull request and add tests for new behaviour; CI runs that suite on every pull request and push to `main`.
 
 CI also compiles every module under Python 3.11 as a fast tripwire for version-specific syntax. Check it locally with just Docker:
 
@@ -208,13 +225,11 @@ docker run --rm -v "$PWD:/repo:ro" -w /repo -e PYTHONPYCACHEPREFIX=/tmp/pyc \
     python:3.11-slim python -m compileall -q container/scripts tools tests
 ```
 
-To run the same suite against the *pinned* stack instead (worth doing after changing the conda lock, where a dependency bump could remove an API the scripts rely on), use [`tests/run-in-locked-env.sh`](tests/run-in-locked-env.sh), which builds a throwaway environment from the lock in a container. See the header of that script for details.
-
 ### Container dependencies
 
-Runtime dependencies are pinned as an explicit conda environment in `container/conda-explicit-linux-64.txt`. Regenerate that lock rather than hand-editing it when dependencies change, so it stays reproducible. Regeneration is a metric-affecting change in its own right, even when no direct dependency was touched: it can move any transitive package, and the numerics ones reach the numbers.
+The runtime dependency specification has two parts: the explicit conda environment in `container/conda-explicit-linux-64.txt` and the Pillow wheel pinned by URL and SHA-256 in `container/Dockerfile`. The lock deliberately omits Pillow because current conda builds require a newer libzlib that conflicts with pinned FSL packages. The lock alone does not recreate the complete runtime. Keep the Pillow URL and SHA-256 in `tests/run-in-locked-env.sh` identical to the Dockerfile; the helper installs it before recording the environment snapshots used to check the pytest installation.
 
-There is one deliberate exception, documented in the lock's own header: the four BLAS/LAPACK entries (`libopenblas`, `libblas`, `libcblas`, `liblapack`) are **hand-maintained**, pinned to the versions in the container the method was validated against. After any regeneration, re-apply those four URLs and re-run the longitudinal comparison above.
+Regeneration is a metric-affecting change in its own right, even when no direct dependency was touched: it can move any transitive package, and the numerics ones reach the numbers. For the security updates documented in the lock's header, hand-edit only the affected URLs and checksums without re-solving. The four BLAS/LAPACK entries (`libopenblas`, `libblas`, `libcblas`, `liblapack`) are also **hand-maintained**, pinned to the versions in the container the method was validated against. After any future regeneration, re-apply both sets of hand-edits, keep conda Pillow out of the lock, and re-run the longitudinal comparison above.
 
 ### Conventions
 

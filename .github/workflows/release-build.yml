@@ -48,6 +48,11 @@ jobs:
       - id: digest
         run: echo "digest=$(jq -r '."containerimage.digest"' metadata.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Test the staged image
+        env:
+          DELTA_SVD_TEST_IMAGE: ghcr.io/isdneuroimaging/delta-svd-staging@${{ steps.digest.outputs.digest }}
+        run: tests/run-in-locked-env.sh
+
       - uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/isdneuroimaging/delta-svd-staging
