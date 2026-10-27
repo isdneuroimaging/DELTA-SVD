@@ -18,7 +18,9 @@ def test_create_qc_image_requires_mask():
         cqi.create_qc_image(["a.nii.gz"], [[0, 1]], fnameMask=None)
 
 
-def test_create_qc_image_produces_expected_png_dimensions(tmp_path):
+@pytest.mark.parametrize("mask_kind", ["empty", "full", "with_hole"])
+@pytest.mark.filterwarnings("error:No contour levels were found within the data range:UserWarning")
+def test_create_qc_image_produces_expected_png_dimensions(tmp_path, mask_kind):
     affine = np.eye(4)
     shape = (10, 10, 12)
     rng = np.random.default_rng(0)
@@ -27,6 +29,10 @@ def test_create_qc_image_produces_expected_png_dimensions(tmp_path):
     mask = np.zeros(shape, dtype="uint8")
     mask[3:7, 3:7, 3:9] = 1
     bmask = np.ones(shape, dtype="uint8")
+    if mask_kind == "empty":
+        bmask[:] = 0
+    elif mask_kind == "with_hole":
+        bmask[4:6, 4:6, :] = 0
 
     fnFA = _save(tmp_path, "fa.nii.gz", fa, affine)
     fnMD = _save(tmp_path, "md.nii.gz", md, affine)

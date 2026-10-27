@@ -703,7 +703,7 @@ def free_water_correction(fn_data = 'data.nii.gz',
     bvals, bvecs = read_bvals_bvecs(fn_bval, fn_bvec)
     print(f'bvals = \n{bvals}\n')
 
-    gtab = gradient_table(bvals, bvecs)
+    gtab = gradient_table(bvals, bvecs=bvecs)
     
     W = design_matrix(gtab)
     

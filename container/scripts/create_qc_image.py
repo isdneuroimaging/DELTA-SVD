@@ -122,7 +122,9 @@ def create_qc_image(fnamesBG, vlim, labels=None, fnameMask=None, fnameBmask=None
             imgBmaskT = imgBmask[iBG]
         else:
             imgBmaskT = imgBmask[-1]
-        ax.contour(imgBmaskT, levels=[0.5], colors='cyan', linestyles='solid', linewidths=1, alpha=1, antialiased = True)
+        # A constant mask has no boundary at level 0.5.
+        if imgBmaskT.any() and not imgBmaskT.all():
+            ax.contour(imgBmaskT, levels=[0.5], colors='cyan', linestyles='solid', linewidths=1, alpha=1, antialiased = True)
         fontSz = np.ceil(imgBmaskT.shape[0]/25)
         dist = np.ceil(imgBmaskT.shape[0]/40)
         if labels is not None:

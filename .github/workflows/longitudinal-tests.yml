@@ -1,0 +1,72 @@
+name: longitudinal-tests
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'DELTA-SVD image with an exact SHA-256 digest (production or staging)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  longitudinal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        subject: [sub-test01, sub-test02]
+    env:
+      IMAGE: ${{ inputs.image }}
+      SUBJECT: ${{ matrix.subject }}
+      DATASET: ${{ github.workspace }}/dataset/delta-svd-longitudinal-test-v1
+      RESULTS: ${{ github.workspace }}/results
+    steps:
+      - name: Require an exact DELTA-SVD image digest
+        shell: bash
+        run: |
+          [[ "$IMAGE" =~ ^ghcr\.io/isdneuroimaging/delta-svd(-staging)?@sha256:[0-9a-f]{64}$ ]] || { echo '::error::expected a DELTA-SVD image with a SHA-256 digest'; exit 1; }
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Download and verify the reference dataset
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+            https://zenodo.org/records/23690907/files/delta-svd-longitudinal-test-v1.zip \
+            --output "$RUNNER_TEMP/dataset.zip"
+          echo "b5fcb9114c06147fff818f341595a851656da77ef67e3b228743e8aefce3101b  $RUNNER_TEMP/dataset.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/dataset.zip" -d "$GITHUB_WORKSPACE/dataset"
+          python -m pip install -r "$DATASET/requirements.txt"
+
+      - name: Process and compare with the 1.0.0 reference
+        shell: bash
+        env:
+          PYTHON: python
+        run: |
+          bash "$DATASET/run-tests.sh" "$IMAGE" "$RESULTS" "$SUBJECT" \
+            2>&1 | tee validation.log
+
+      - name: Save results and QC, including on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: longitudinal-${{ matrix.subject }}-${{ github.run_attempt }}
+          retention-days: 7
+          path: |
+            validation.log
+            results/${{ matrix.subject }}/*.csv
+            results/${{ matrix.subject }}/*.json
+            results/${{ matrix.subject }}/*.html
+            results/${{ matrix.subject }}/*.log
+            results/${{ matrix.subject }}/comparison.txt
