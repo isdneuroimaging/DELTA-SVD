@@ -1,6 +1,6 @@
 name: release-build
 
-# Builds and stages the release image for manual validation; see
+# Builds, stages and regression-tests the release image for manual review; see
 # CONTRIBUTING.md "Releasing". release-promote.yml publishes it.
 on:
   push:
@@ -15,6 +15,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
 
@@ -48,22 +50,40 @@ jobs:
       - id: digest
         run: echo "digest=$(jq -r '."containerimage.digest"' metadata.json)" >> "$GITHUB_OUTPUT"
 
-      - name: Test the staged image
-        env:
-          DELTA_SVD_TEST_IMAGE: ghcr.io/isdneuroimaging/delta-svd-staging@${{ steps.digest.outputs.digest }}
-        run: tests/run-in-locked-env.sh
-
-      - uses: actions/attest-build-provenance@v4
-        with:
-          subject-name: ghcr.io/isdneuroimaging/delta-svd-staging
-          subject-digest: ${{ steps.digest.outputs.digest }}
-
-      - name: Job summary
+      - name: Staged image summary
         run: |
           {
             echo "### Staged image"
             echo '```'
             echo "ghcr.io/isdneuroimaging/delta-svd-staging@${{ steps.digest.outputs.digest }}"
             echo '```'
-            echo "Validate this image, then run release-promote.yml with it to publish."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Test the staged image
+        env:
+          DELTA_SVD_TEST_IMAGE: ghcr.io/isdneuroimaging/delta-svd-staging@${{ steps.digest.outputs.digest }}
+        run: tests/run-in-locked-env.sh
+
+  longitudinal:
+    needs: build
+    uses: ./.github/workflows/longitudinal-tests.yml
+    with:
+      image: ghcr.io/isdneuroimaging/delta-svd-staging@${{ needs.build.outputs.digest }}
+
+  validated:
+    needs: [build, longitudinal]
+    runs-on: ubuntu-latest
+    steps:
+      # Promotion requires this attestation, so issue it only after the
+      # longitudinal regression tests and staged-image unit tests have passed.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/isdneuroimaging/delta-svd-staging
+          subject-digest: ${{ needs.build.outputs.digest }}
+
+      - name: Job summary
+        run: |
+          {
+            echo "Staged-image unit tests passed; all longitudinal regression subjects match the approved reference exactly."
+            echo "Review the longitudinal artifacts and QC, then run release-promote.yml with this digest."
           } >> "$GITHUB_STEP_SUMMARY"

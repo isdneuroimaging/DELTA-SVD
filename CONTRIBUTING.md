@@ -36,7 +36,7 @@ The image's tool selection is pinned the same way. The `Dockerfile` `ENV` values
 
 #### Checking whether a change moved the numbers
 
-"Provably untouched" means measured, not assumed: nothing in the test suite checks the endpoint values. For anything that plausibly reaches the validated processing path (a regenerated conda lock, an FSL or ANTs version bump, an edit to the fitting, brain/exclusion masking or skeletonisation code, a change to the `sed` patches in the `Dockerfile`), build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
+"Provably untouched" means measured, not assumed: the unit tests do not check endpoint values. Release CI separately processes the longitudinal subjects from the [Zenodo regression dataset](https://zenodo.org/records/23690907) and compares them exactly with the approved reference results. For additional representative inputs or changes outside that dataset's coverage, build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
 
 ```bash
 .venv-test/bin/python tools/compare_results.py \
@@ -82,7 +82,7 @@ container/build.sh delta-svd:dev   # custom tag; extra args pass through to dock
 
 ### Releasing
 
-A release goes through three stages. CI builds it and stages it ([`release-build.yml`](.github/workflows/release-build.yml)). A maintainer then checks the staged image by hand. Finally, a second workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) copies that same manifest into the production package. Nothing reaches `ghcr.io/isdneuroimaging/delta-svd` unless a human has checked the exact digest first.
+A release goes through three stages. CI builds, stages and regression-tests it ([`release-build.yml`](.github/workflows/release-build.yml)). A maintainer reviews the results and QC. Finally, a second workflow ([`release-promote.yml`](.github/workflows/release-promote.yml)) copies that same manifest into the production package. Promotion remains a manual decision about the exact tested digest.
 
 Keep in mind before you start:
 
@@ -128,25 +128,23 @@ git tag -a "v$VER" -m "DELTA-SVD $VER"
 git push origin "v$VER"
 ```
 
-Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and pushes it to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. It runs the unit tests inside that exact staged digest before attesting it with `actions/attest-build-provenance` and reporting it for manual validation. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
+Pushing the tag triggers `release-build.yml`. The workflow checks the tag against `VERSION`, builds the image the same way a local `build.sh` run would, and pushes it to the public **staging** package, `ghcr.io/isdneuroimaging/delta-svd-staging`. It runs the unit tests inside that exact digest, then calls `longitudinal-tests.yml` to process the Zenodo regression subjects in separate jobs. Only after all tests pass does it issue the build-provenance attestation that promotion requires. The staged image is tagged by commit SHA only, so it cannot be mistaken for a release.
 
 The run's job summary shows the staged image reference, `ghcr.io/isdneuroimaging/delta-svd-staging@sha256:...`. Copy it: every later step uses this reference, not the tag.
 
-#### 3. Validate the staged image
+#### 3. Review the longitudinal validation
 
-You can skip this step only if the change is provably not metric-affecting. Pull *the staged image*; a local rebuild does not count:
+Open the release workflow's longitudinal artifacts and review the exact comparison output, longitudinal changes and HTML QC reports. Artifacts are retained for seven days. Processing failures and any changed metric value or skeleton voxel count fail the workflow and prevent the attestation required for promotion. The dataset URL and SHA-256 checksum are pinned in `longitudinal-tests.yml`; no remote computer or additional secrets are needed.
 
-```bash
-STAGED="ghcr.io/isdneuroimaging/delta-svd-staging@sha256:..."   # from the job summary
-apptainer pull delta-svd_staging.sif "docker://$STAGED"
-```
+CI intentionally uses the dataset’s bundled `run-tests.sh` and `tools/compare_results.py`, both pinned by the archive checksum. The bundled comparator currently matches the repository’s `tools/compare_results.py`, which is used for manual before/after checks. When replacing the reference dataset, review its runner and comparator alongside the reference results.
 
-Process the longitudinal reference subject with it, following the rules in [Checking whether a change moved the numbers](#checking-whether-a-change-moved-the-numbers). Then compare the results with those of the previous release:
+The same checks can be started independently from Actions → **longitudinal-tests** → **Run workflow**, or with an exact production or staging digest:
 
 ```bash
-.venv-test/bin/python tools/compare_results.py \
-    before/delta-svd_results.csv after/delta-svd_results.csv
+gh workflow run longitudinal-tests.yml -f image="ghcr.io/isdneuroimaging/delta-svd@sha256:..."
 ```
+
+The longitudinal regression set does not replace formal validation or checks of optional features it does not cover. Intentional endpoint changes require formal re-validation and a new approved reference dataset; update its pinned URL and checksum through review rather than weakening comparisons.
 
 If validation fails, fix it and re-tag. Production has not been touched yet, so moving the tag is safe:
 
@@ -159,10 +157,10 @@ git push origin --delete "v$VER"
 
 #### 4. Promote
 
-This reuses `STAGED` from step 3. If it is not set in the current shell, the command stops without triggering anything:
+Set `STAGED` to the validated digest from the release workflow's job summary. If it is not set in the current shell, the command stops without triggering anything:
 
 ```bash
-echo "Promoting ${STAGED:?not set, see step 3}" && gh workflow run release-promote.yml -f image="$STAGED"
+echo "Promoting ${STAGED:?not set, see step 4}" && gh workflow run release-promote.yml -f image="$STAGED"
 ```
 
 You can also start it from the Actions tab: choose "Run workflow". The workflow first re-reads the image's own `version` and `revision` labels, and refuses the image if either is malformed, `unknown`, or `-dirty`. It then copies the manifest to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, without rebuilding. Finally, it creates a draft GitHub release that records the digest. 
