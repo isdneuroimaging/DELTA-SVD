@@ -42,14 +42,14 @@ jobs:
       - name: Download and verify the reference dataset
         shell: bash
         run: |
-          curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
+          curl --fail --location --retry 3 --connect-timeout 20 --max-time 600 \
             https://zenodo.org/records/23690907/files/delta-svd-longitudinal-test-v1.zip \
             --output "$RUNNER_TEMP/dataset.zip"
           echo "b5fcb9114c06147fff818f341595a851656da77ef67e3b228743e8aefce3101b  $RUNNER_TEMP/dataset.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/dataset.zip" -d "$GITHUB_WORKSPACE/dataset"
           python -m pip install -r "$DATASET/requirements.txt"
 
-      - name: Process and compare with the 1.0.0 reference
+      - name: Process and compare with the approved reference
         shell: bash
         env:
           PYTHON: python

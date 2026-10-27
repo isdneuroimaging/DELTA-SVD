@@ -50,6 +50,15 @@ jobs:
       - id: digest
         run: echo "digest=$(jq -r '."containerimage.digest"' metadata.json)" >> "$GITHUB_OUTPUT"
 
+      - name: Staged image summary
+        run: |
+          {
+            echo "### Staged image"
+            echo '```'
+            echo "ghcr.io/isdneuroimaging/delta-svd-staging@${{ steps.digest.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Test the staged image
         env:
           DELTA_SVD_TEST_IMAGE: ghcr.io/isdneuroimaging/delta-svd-staging@${{ steps.digest.outputs.digest }}
@@ -65,10 +74,8 @@ jobs:
     needs: [build, longitudinal]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      # Promotion requires this attestation, so issue it only after both
-      # longitudinal subjects and the staged-image unit tests have passed.
+      # Promotion requires this attestation, so issue it only after the
+      # longitudinal regression tests and staged-image unit tests have passed.
       - uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/isdneuroimaging/delta-svd-staging
@@ -77,10 +84,6 @@ jobs:
       - name: Job summary
         run: |
           {
-            echo "### Staged image"
-            echo '```'
-            echo "ghcr.io/isdneuroimaging/delta-svd-staging@${{ needs.build.outputs.digest }}"
-            echo '```'
-            echo "Both longitudinal subjects match the 1.0.0 reference exactly."
+            echo "Staged-image unit tests passed; all longitudinal regression subjects match the approved reference exactly."
             echo "Review the longitudinal artifacts and QC, then run release-promote.yml with this digest."
           } >> "$GITHUB_STEP_SUMMARY"
