@@ -116,18 +116,8 @@ RUN wget --progress=dot:giga https://files.pythonhosted.org/packages/36/46/f509b
  && rm /opt/pillow-13.0.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 
 ## The FSL Licence permits redistribution only with the source included (see NOTICE).
-## Versions come from the installed env so they cannot drift from what is shipped.
-RUN set -e \
- && mkdir -p /opt/fsl-source \
- && for name in flirt fnirt avwutils tbss; do \
-        ver=$(conda list -p /opt/conda -f "fsl-${name}" | tail -n1 | awk '{print $2}'); \
-        wget --progress=dot:giga \
-            --tries=5 --waitretry=10 --retry-connrefused \
-            "https://git.fmrib.ox.ac.uk/fsl/${name}/-/archive/${ver}/${name}-${ver}.tar.gz" \
-            -O "/opt/fsl-source/${name}-${ver}.tar.gz"; \
-        sleep 3; \
-    done \
- && apt-get purge -y --auto-remove wget \
+## Official conda packages already install their matching source under /opt/conda/src.
+RUN apt-get purge -y --auto-remove wget \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
