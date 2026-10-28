@@ -160,6 +160,8 @@ ARG BUILD_DATE=unknown
 RUN printf '%s\n' "$VERSION" > VERSION \
  && printf '%s\n' "$VCS_REF" > SOURCE_REVISION
 
+## fsl_sub uses getpass.getuser(); arbitrary Docker UIDs may lack a passwd entry.
+ENV USER="nonroot"
 USER 999:999
 ENTRYPOINT [ "python", "-E", "-s", "-u", "/opt/scripts/delta-svd.py" ]
 

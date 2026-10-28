@@ -16,6 +16,7 @@ permissions:
   contents: write
   packages: write
   attestations: read
+  actions: read
 
 jobs:
   promote:
@@ -48,18 +49,69 @@ jobs:
           # endpoint dereferences annotated tags).
           TAG_SHA="$(gh api "repos/isdneuroimaging/delta-svd/commits/v${VERSION}" --jq .sha)" || { echo "::error::cannot resolve tag v${VERSION} on the remote"; exit 1; }
           [[ "$TAG_SHA" == "$REVISION" ]] || { echo "::error::tag v${VERSION} points at ${TAG_SHA}, but the image was built from ${REVISION}"; exit 1; }
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
-          echo "digest=${SRC#*@}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "revision=$REVISION"
+            echo "digest=${SRC#*@}"
+          } >> "$GITHUB_OUTPUT"
 
       # Labels are self-declared, the attestation is not. The signer path is
       # case-sensitive and must match the repository's canonical name.
       - name: Verify build provenance
+        id: provenance
         run: |
           gh attestation verify "oci://$SRC" \
             --repo isdneuroimaging/delta-svd \
             --signer-workflow isdneuroimaging/DELTA-SVD/.github/workflows/release-build.yml \
-            --source-digest "${{ steps.labels.outputs.revision }}"
+            --source-digest "${{ steps.labels.outputs.revision }}" \
+            --format json > provenance.json
+          INVOCATION="$(jq -r '.[0].verificationResult.statement.predicate.runDetails.metadata.invocationId' provenance.json)"
+          [[ "$INVOCATION" =~ ^https://github\.com/isdneuroimaging/DELTA-SVD/actions/runs/([0-9]+)/attempts/([0-9]+)$ ]] || { echo '::error::missing or unexpected validation run in attestation'; exit 1; }
+          {
+            echo "run=${BASH_REMATCH[1]}"
+            echo "attempt=${BASH_REMATCH[2]}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Download and check release test evidence
+        env:
+          BUILD_RUN: ${{ steps.provenance.outputs.run }}
+          BUILD_ATTEMPT: ${{ steps.provenance.outputs.attempt }}
+          VERSION: ${{ steps.labels.outputs.version }}
+          REVISION: ${{ steps.labels.outputs.revision }}
+        run: |
+          gh run download "$BUILD_RUN" --repo isdneuroimaging/DELTA-SVD \
+            --name "test-evidence-$BUILD_ATTEMPT" --dir evidence || {
+              echo '::error::Cannot download test evidence for the attested attempt. Re-run all jobs in release-build and promote the new digest from its summary within seven days.'
+              exit 1
+            }
+          python3 - <<'PY'
+          import json
+          import os
+          import zipfile
+
+          archive = f'evidence/delta-svd_{os.environ["VERSION"]}_test-evidence.zip'
+          with zipfile.ZipFile(archive) as bundle:
+              required = {'evidence.json'} | {
+                  f'{subject}/{name}'
+                  for subject in ('sub-test01', 'sub-test02')
+                  for name in ('delta-svd_results.csv', 'longitudinal-changes.csv',
+                               'comparison.txt', 'delta-svd_run_manifest.json')
+              }
+              if set(bundle.namelist()) != required or bundle.testzip() is not None:
+                  raise SystemExit('Incomplete or corrupt test evidence ZIP')
+              evidence = json.loads(bundle.read('evidence.json'))
+          expected = {
+              'image': os.environ['SRC'],
+              'source_revision': os.environ['REVISION'],
+              'workflow_run': f'https://github.com/isdneuroimaging/DELTA-SVD/actions/runs/{os.environ["BUILD_RUN"]}',
+              'run_attempt': int(os.environ['BUILD_ATTEMPT']),
+              'subjects': {'sub-test01': 'passed', 'sub-test02': 'passed'},
+              'comparison': {'metric_values': 'exact', 'voxel_counts': 'exact', 'ignored_keys': []},
+          }
+          for key, value in expected.items():
+              if evidence.get(key) != value:
+                  raise SystemExit(f'Test evidence does not match promotion: {key}')
+          PY
 
       - name: Copy manifest to the production package
         run: crane copy "$SRC" "ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}"
@@ -69,7 +121,7 @@ jobs:
       - name: Draft release
         run: |
           VER="${{ steps.labels.outputs.version }}"
-          gh release create "v${VER}" \
+          gh release create "v${VER}" "evidence/delta-svd_${VER}_test-evidence.zip" \
             --repo isdneuroimaging/delta-svd \
             --draft \
             --verify-tag \
