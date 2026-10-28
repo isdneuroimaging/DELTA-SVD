@@ -82,7 +82,7 @@ jobs:
     # Release builds must produce complete evidence before they can be attested.
     if: github.event_name == 'push'
     needs: longitudinal
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       IMAGE: ${{ inputs.image }}
     steps:
@@ -93,6 +93,10 @@ jobs:
           pattern: longitudinal-*-${{ github.run_attempt }}
           merge-multiple: true
           path: validation
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
 
       - name: Package release test evidence
         run: python3 tools/package_test_evidence.py validation/results evidence

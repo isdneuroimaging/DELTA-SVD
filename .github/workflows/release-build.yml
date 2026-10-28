@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
     steps:
@@ -72,7 +72,7 @@ jobs:
 
   validated:
     needs: [build, longitudinal]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Promotion requires this attestation, so issue it only after the
       # longitudinal regression tests and staged-image unit tests have passed,
