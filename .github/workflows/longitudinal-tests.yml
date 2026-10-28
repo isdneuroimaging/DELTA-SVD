@@ -56,6 +56,7 @@ jobs:
           python -m pip install -r tests/requirements-longitudinal.txt
 
       - name: Process and compare with the approved reference
+        id: compare
         shell: bash
         env:
           PYTHON: python
@@ -76,6 +77,25 @@ jobs:
             results/${{ matrix.subject }}/*.html
             results/${{ matrix.subject }}/*.log
             results/${{ matrix.subject }}/comparison.txt
+
+      - name: Longitudinal result summary
+        if: always()
+        shell: bash
+        env:
+          COMPARISON_OUTCOME: ${{ steps.compare.outcome }}
+        run: |
+          {
+            echo "### Longitudinal validation: $SUBJECT"
+            if [[ "$COMPARISON_OUTCOME" == success ]]; then
+              echo "PASS — all metric values and skeleton voxel counts match the approved reference exactly."
+            elif [[ "$COMPARISON_OUTCOME" == failure ]]; then
+              echo "FAIL — processing or reference comparison failed. Review the job logs and longitudinal artifacts for details."
+            else
+              echo "INCOMPLETE — longitudinal validation did not finish. Review the job logs for details."
+            fi
+            echo
+            echo "HTML QC reports are available in the longitudinal-$SUBJECT-${{ github.run_attempt }} artifact for visual review."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   evidence:
     # Standalone comparisons may target older images without a run manifest.
