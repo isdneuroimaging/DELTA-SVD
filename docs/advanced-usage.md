@@ -80,7 +80,8 @@ docker run --rm --user "$(id -u):$(id -g)" \
 If a step complains about an unset `HOME`, add `-e HOME=/tmp`. To run the aggregator under Docker, override the entry point:
 
 ```shell
-docker run --rm -v /path/to/data:/data \
+docker run --rm --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data \
   --entrypoint delta-svd_aggregate_results.py \
   ghcr.io/isdneuroimaging/delta-svd:<version> /data -o /data/study_aggregated.csv
 ```

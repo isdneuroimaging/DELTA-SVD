@@ -36,7 +36,7 @@ The image's tool selection is pinned the same way. The `Dockerfile` `ENV` values
 
 #### Checking whether a change moved the numbers
 
-"Provably untouched" means measured, not assumed: the unit tests do not check endpoint values. Release CI separately processes the longitudinal subjects from the [Zenodo regression dataset](https://zenodo.org/records/23690907) and compares them exactly with the approved reference results. For additional representative inputs or changes outside that dataset's coverage, build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
+"Provably untouched" means measured, not assumed: the unit tests do not check endpoint values. Release CI separately processes the longitudinal subjects from the [Zenodo regression dataset](https://zenodo.org/records/23723917) and compares them exactly with the approved reference results. For additional representative inputs or changes outside that dataset's coverage, build the image before and after the change, process the same representative subject with each, and diff the two `delta-svd_results.csv` tables:
 
 ```bash
 .venv-test/bin/python tools/compare_results.py \
@@ -136,7 +136,18 @@ The run's job summary shows the staged image reference, `ghcr.io/isdneuroimaging
 
 Open the release workflow's longitudinal artifacts and review the exact comparison output, longitudinal changes and HTML QC reports. Artifacts are retained for seven days. Processing failures and any changed metric value or skeleton voxel count fail the workflow and prevent the attestation required for promotion. The dataset URL and SHA-256 checksum are pinned in `longitudinal-tests.yml`; no remote computer or additional secrets are needed.
 
-CI intentionally uses the dataset’s bundled `run-tests.sh` and `tools/compare_results.py`, both pinned by the archive checksum. The bundled comparator currently matches the repository’s `tools/compare_results.py`, which is used for manual before/after checks. When replacing the reference dataset, review its runner and comparator alongside the reference results.
+The release build also packages a small evidence ZIP after both subjects pass. It contains `evidence.json` (tested image digest, source revision, validation run and attempt, dataset URL and SHA-256, comparison rules and subject verdicts), plus each subject’s result CSV, longitudinal-change CSV, comparison output and pipeline run manifest. The validation job downloads this attempt’s evidence before issuing the image attestation. Promotion retrieves this ZIP from the exact run and attempt identified by the verified image attestation and checks its image digest and source revision before copying the image. Missing, expired or mismatched evidence blocks promotion; promote within the seven-day artifact retention period. If rerunning validation, use “Re-run all jobs” so both subjects’ artifacts belong to the same attempt, then promote the new digest from that attempt’s summary. The ZIP remains attached to the release after publication. HTML QC reports and console logs stay in the temporary CI artifacts.
+
+The Zenodo archive contains only data, reference results and provenance. CI checks out this repository and runs `tests/run-longitudinal.sh`, using `tools/compare_results.py` for exact comparisons and `tools/longitudinal_changes.py` for review summaries. Host-side dependencies are pinned in `tests/requirements-longitudinal.txt`. The runner passes `USER=nonroot` into Docker so FSL can resolve a username even when the host UID has no entry in the image’s password database. When replacing the reference dataset, review its provenance and reference results alongside these scripts.
+
+During release review, inspect changes to `tests/run-longitudinal.sh` and `tools/compare_results.py` to ensure the regression check still compares every metric value and skeleton voxel count exactly, without ignored keys.
+
+To run the same checks locally after downloading, verifying and extracting the archive:
+
+```bash
+python3 -m pip install -r tests/requirements-longitudinal.txt
+bash tests/run-longitudinal.sh /path/to/delta-svd-longitudinal-test-v2 ghcr.io/isdneuroimaging/delta-svd@sha256:... /path/to/new-results
+```
 
 The same checks can be started independently from Actions → **longitudinal-tests** → **Run workflow**, or with an exact production or staging digest:
 
@@ -163,7 +174,7 @@ Set `STAGED` to the validated digest from the release workflow's job summary. If
 echo "Promoting ${STAGED:?not set, see step 4}" && gh workflow run release-promote.yml -f image="$STAGED"
 ```
 
-You can also start it from the Actions tab: choose "Run workflow". The workflow first re-reads the image's own `version` and `revision` labels, and refuses the image if either is malformed, `unknown`, or `-dirty`. It then copies the manifest to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, without rebuilding. Finally, it creates a draft GitHub release that records the digest. 
+You can also start it from the Actions tab: choose "Run workflow". The workflow first re-reads the image's own `version` and `revision` labels, and refuses the image if either is malformed, `unknown`, or `-dirty`. It then copies the manifest to `ghcr.io/isdneuroimaging/delta-svd:<version>` at the *same* digest, without rebuilding. Finally, it creates a draft GitHub release that records the digest and attaches `delta-svd_<version>_test-evidence.zip`.
 
 #### 5. Write the release notes
 

@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+env:
+  DATASET_URL: https://zenodo.org/records/23723917/files/delta-svd-longitudinal-test-v2.zip
+  DATASET_SHA256: 88d7aab257c5f20d3a6acdfcd837a5d6d4994b825ff4f47b3225341b6ebf4e8f
+
 jobs:
   longitudinal:
     runs-on: ubuntu-24.04
@@ -27,13 +31,15 @@ jobs:
     env:
       IMAGE: ${{ inputs.image }}
       SUBJECT: ${{ matrix.subject }}
-      DATASET: ${{ github.workspace }}/dataset/delta-svd-longitudinal-test-v1
+      DATASET: ${{ github.workspace }}/dataset/delta-svd-longitudinal-test-v2
       RESULTS: ${{ github.workspace }}/results
     steps:
       - name: Require an exact DELTA-SVD image digest
         shell: bash
         run: |
           [[ "$IMAGE" =~ ^ghcr\.io/isdneuroimaging/delta-svd(-staging)?@sha256:[0-9a-f]{64}$ ]] || { echo '::error::expected a DELTA-SVD image with a SHA-256 digest'; exit 1; }
+
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
@@ -43,18 +49,18 @@ jobs:
         shell: bash
         run: |
           curl --fail --location --retry 3 --connect-timeout 20 --max-time 600 \
-            https://zenodo.org/records/23690907/files/delta-svd-longitudinal-test-v1.zip \
+            "$DATASET_URL" \
             --output "$RUNNER_TEMP/dataset.zip"
-          echo "b5fcb9114c06147fff818f341595a851656da77ef67e3b228743e8aefce3101b  $RUNNER_TEMP/dataset.zip" | sha256sum --check
+          echo "$DATASET_SHA256  $RUNNER_TEMP/dataset.zip" | sha256sum --check
           unzip -q "$RUNNER_TEMP/dataset.zip" -d "$GITHUB_WORKSPACE/dataset"
-          python -m pip install -r "$DATASET/requirements.txt"
+          python -m pip install -r tests/requirements-longitudinal.txt
 
       - name: Process and compare with the approved reference
         shell: bash
         env:
           PYTHON: python
         run: |
-          bash "$DATASET/run-tests.sh" "$IMAGE" "$RESULTS" "$SUBJECT" \
+          bash tests/run-longitudinal.sh "$DATASET" "$IMAGE" "$RESULTS" "$SUBJECT" \
             2>&1 | tee validation.log
 
       - name: Save results and QC, including on failure
@@ -70,3 +76,30 @@ jobs:
             results/${{ matrix.subject }}/*.html
             results/${{ matrix.subject }}/*.log
             results/${{ matrix.subject }}/comparison.txt
+
+  evidence:
+    # Standalone comparisons may target older images without a run manifest.
+    # Release builds must produce complete evidence before they can be attested.
+    if: github.event_name == 'push'
+    needs: longitudinal
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ inputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: longitudinal-*-${{ github.run_attempt }}
+          merge-multiple: true
+          path: validation
+
+      - name: Package release test evidence
+        run: python3 tools/package_test_evidence.py validation/results evidence
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-evidence-${{ github.run_attempt }}
+          path: evidence/delta-svd_*_test-evidence.zip
+          if-no-files-found: error
+          retention-days: 7
