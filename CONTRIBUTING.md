@@ -25,7 +25,7 @@ Four quantities shift the endpoints without any source change, because they alte
 
 | Hazard | Why it moves the numbers | Pinned as |
 | --- | --- | --- |
-| **ITK threads per registration job** | see [Reproducibility](docs/advanced-usage.md#reproducibility) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
+| **ITK threads per registration job** | see [Reproducibility](docs/reproducibility.md#within-a-version) | `ITK_THREADS_DEFAULT = 12` in `delta_svd_constants.py`, overridable only via the hidden `--itkThreads` |
 | **BLAS/LAPACK library version** | `np.linalg.pinv` in the free-water fit changes by a few bits between releases | the four hand-maintained BLAS lines in `conda-explicit-linux-64.txt` |
 | **BLAS kernel selected for the CPU** | `libopenblas` is a `DYNAMIC_ARCH` build and picks kernels from the CPU's features, so `pinv` differs between kernel families | `OPENBLAS_CORETYPE=Haswell` in `IMAGE_ENVIRONMENT` (`delta_svd_constants.py`), mirrored as `ENV` in the `Dockerfile` |
 | **System glibc (`libm`)** | the ANTs binaries link the system `libm`, whose results can differ between glibc builds; `apt-get install locales` would otherwise pull the newest `libc6` from `noble-updates` | exact `libc6`/`libc-bin`/`locales` versions in the `Dockerfile`; a build fails once Ubuntu supersedes them, and bumping them needs re-validation |
