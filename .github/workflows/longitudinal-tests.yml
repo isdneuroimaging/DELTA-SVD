@@ -93,8 +93,10 @@ jobs:
             else
               echo "INCOMPLETE — longitudinal validation did not finish. Review the job logs for details."
             fi
-            echo
-            echo "HTML QC reports are available in the longitudinal-$SUBJECT-${{ github.run_attempt }} artifact for visual review."
+            if [[ -f "$RESULTS/$SUBJECT/delta-svd_qc.html" ]]; then
+              echo
+              echo "HTML QC reports are available in the longitudinal-$SUBJECT-${{ github.run_attempt }} artifact for visual review."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   evidence:

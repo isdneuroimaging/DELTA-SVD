@@ -31,7 +31,7 @@ No separate Python, FSL, or ANTs installation is required; those are all provide
 The image is published to the GitHub Container Registry at `ghcr.io/isdneuroimaging/delta-svd`, tagged with its release version. There is deliberately **no `latest` tag**, so every run has to name the version it uses.
 
 > [!IMPORTANT]
-> **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Bug-fix releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined. See [Between releases](reproducibility.md#between-releases) for how this is tested.
+> **Use one version per project.** Choose a version at the start of a project and process all data with it. Version numbers follow `MAJOR.MINOR.PATCH` (e.g. `1.2.0`). Patch releases, which differ only in the last (`PATCH`) digit, preserve the validated whole-skeleton endpoints on standard inputs. Any change in the first two numbers can shift the validated endpoints, so results from different `MAJOR.MINOR` versions must not be combined. See [Between releases](reproducibility.md#between-releases) for how this is tested.
 
 ### Apptainer (recommended)
 

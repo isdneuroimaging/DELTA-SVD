@@ -17,7 +17,7 @@ DELTA-SVD is a **clinically and technically validated** tool: its whole-skeleton
 - the default skeleton mask and other bundled reference data;
 - version changes to the scientific stack that does the maths (FSL, ANTs, and the pinned conda packages such as numpy, scipy, dipy, nibabel).
 
-Changes that provably leave those endpoints untouched (documentation, packaging, tests, or refactors verified to produce identical standard-run output) do not need re-validation. A correction confined to optional derived rows, such as custom-ROI results, may use a patch version only when the affected inputs and pooling restriction are documented explicitly; it does not make those affected rows interchangeable across the patch. When in doubt, assume a change is endpoint-affecting and raise it with the maintainers first. This is also why `container/scripts/markvcid_fw_mrn.py` is kept verbatim (see [Conventions](#conventions)).
+Changes that provably leave those endpoints untouched (documentation, packaging, tests, or refactors verified to produce identical standard-run output) do not need re-validation. A correction confined to optional derived rows, such as custom-ROI results, may ship as a patch release only when the affected inputs and pooling restriction are documented explicitly; it does not make those affected rows interchangeable across the patch release. When in doubt, assume a change is endpoint-affecting and raise it with the maintainers first. This is also why `container/scripts/markvcid_fw_mrn.py` is kept verbatim (see [Conventions](#conventions)).
 
 #### External hazards: settings that move the metrics from outside the code
 
@@ -88,11 +88,11 @@ Keep in mind before you start:
 
 - **The pushed image digest is the release, not the source tree.** An *older* commit cannot be rebuilt: the build fails. The `apt` pins resolve against the live Ubuntu archive, and the `ca-certificates` version is itself a date, so the pin stops matching once the archive moves on. To recover an old release, pull its digest. Do not rebuild its tag.
 - **Only exact version tags are published.** There is no `latest` tag, so no run can pick up a new version by accident (see [Validation status](#validation-status-read-this-first)).
-- **Choosing the version number.** Bump only the last digit when a change provably leaves the validated whole-skeleton endpoints untouched. Otherwise bump `MAJOR.MINOR`, which tells users their results cannot be pooled with earlier ones. A patch that corrects optional derived rows must carry a compatibility note. The note names the affected inputs and tells users not to pool those rows across the patch.
+- **Choosing the version number.** Make a patch release (bump only the last digit) when a change provably leaves the validated whole-skeleton endpoints untouched. Otherwise bump `MAJOR.MINOR`, which tells users their results cannot be pooled with earlier ones. A patch release that corrects optional derived rows must carry a compatibility note. The note names the affected inputs and tells users not to pool those rows across the patch release.
 
 #### 1. Bump the version in the feature branch
 
-Bump the version as the last commit of the feature branch that makes up the release. The reviewer then sees the version choice (patch or `MAJOR.MINOR`) next to the change that justifies it. If a release bundles several pull requests that are already merged, put the bump in a short pull request of its own instead.
+Bump the version as the last commit of the feature branch that makes up the release. The reviewer then sees the version choice (patch release or `MAJOR.MINOR`) next to the change that justifies it. If a release bundles several pull requests that are already merged, put the bump in a short pull request of its own instead.
 
 [`VERSION`](VERSION) is the single source of truth. Two files restate it by hand because their formats cannot interpolate, and both must change in the same commit:
 
