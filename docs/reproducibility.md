@@ -28,3 +28,55 @@ To test that the endpoints are preserved, each release is compared with a fixed 
 Starting with version 1.0.6, each GitHub release includes the outcome as `delta-svd_<version>_test-evidence.zip`. The ZIP records the tested image digest, source revision, the reference dataset's URL and checksum, and per-subject verdicts, along with each subject's result tables, comparison output and run manifest.
 
 This is the evidence that a patch release leaves those endpoints unchanged from the published version on these reference data. It doesn't test every possible input or optional feature, and it doesn't replace formal validation. If a patch release corrects optional derived outputs, its compatibility note names the affected inputs and the rows that must not be pooled across the patch release. A release that intentionally changes the endpoints requires formal re-validation and a new approved reference.
+
+## Testing your installation
+
+We recommend running the release check yourself before starting a project, and whenever your system changes. It confirms that your image, container runtime and hardware reproduce the reference results for all 1.0.x releases. It doesn't check your own data or preprocessing.
+
+**1. Download the [test data](https://zenodo.org/records/23723917) and the comparison script:**
+
+```shell
+curl -LO https://zenodo.org/records/23723917/files/delta-svd-longitudinal-test-v2.zip
+echo "88d7aab257c5f20d3a6acdfcd837a5d6d4994b825ff4f47b3225341b6ebf4e8f  delta-svd-longitudinal-test-v2.zip" | sha256sum --check
+unzip -q delta-svd-longitudinal-test-v2.zip
+cd delta-svd-longitudinal-test-v2
+curl -LO https://raw.githubusercontent.com/isdneuroimaging/DELTA-SVD/main/tools/compare_results.py
+```
+
+**2. Run the test with the [image](install.md#getting-the-image) you plan to use, using either Apptainer or Docker:**
+
+```shell
+# Apptainer: replace /path/to/delta-svd.sif with your image
+for sub in sub-test01 sub-test02; do
+  apptainer run --no-home /path/to/delta-svd.sif \
+    --dwi inputs/$sub/ses-1/${sub}_ses-1_dwi.nii.gz inputs/$sub/ses-2/${sub}_ses-2_dwi.nii.gz \
+    --tp ses-1 ses-2 --id $sub -o results/$sub
+done
+for sub in sub-test01 sub-test02; do
+  apptainer exec --no-home /path/to/delta-svd.sif python compare_results.py \
+    reference/$sub/delta-svd_results.csv results/$sub/delta-svd_results.csv
+done
+```
+
+```shell
+# Docker: replace <version> with your version
+for sub in sub-test01 sub-test02; do
+  docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/data" -w /data \
+    ghcr.io/isdneuroimaging/delta-svd:<version> \
+    --dwi inputs/$sub/ses-1/${sub}_ses-1_dwi.nii.gz inputs/$sub/ses-2/${sub}_ses-2_dwi.nii.gz \
+    --tp ses-1 ses-2 --id $sub -o results/$sub
+done
+for sub in sub-test01 sub-test02; do
+  docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/data" -w /data --entrypoint python \
+    ghcr.io/isdneuroimaging/delta-svd:<version> compare_results.py \
+    reference/$sub/delta-svd_results.csv results/$sub/delta-svd_results.csv
+done
+```
+
+**3. Check the result.** The last lines of the output must report this for both subjects:
+
+```text
+RESULT: no metric value and no voxel count changed.
+```
+
+If not, don't process study data on that system yet, and [open an issue](https://github.com/isdneuroimaging/DELTA-SVD/issues) with the comparison output, your DELTA-SVD version, container runtime and CPU model.

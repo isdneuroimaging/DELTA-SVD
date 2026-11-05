@@ -155,7 +155,7 @@ The same checks can be started independently from Actions → **longitudinal-tes
 gh workflow run longitudinal-tests.yml -f image="ghcr.io/isdneuroimaging/delta-svd@sha256:..."
 ```
 
-The longitudinal regression set does not replace formal validation or checks of optional features it does not cover. Intentional endpoint changes require formal re-validation and a new approved reference dataset; update its pinned URL and checksum through review rather than weakening comparisons.
+The longitudinal regression set does not replace formal validation or checks of optional features it does not cover. Intentional endpoint changes require formal re-validation and a new approved reference dataset; update its pinned URL and checksum through review rather than weakening comparisons. The URL, checksum and supported version range are also stated in [Testing your installation](docs/reproducibility.md#testing-your-installation), so update them there too. That section quotes the comparison script's success line, which `tools/package_test_evidence.py` also requires verbatim.
 
 If validation fails, fix it and re-tag. Production has not been touched yet, so moving the tag is safe:
 

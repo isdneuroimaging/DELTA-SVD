@@ -69,6 +69,8 @@ docker run --rm ghcr.io/isdneuroimaging/delta-svd:1.0.6 --help
 
 If you see the DELTA-SVD option help, you are ready to go; continue with [Usage](usage.md).
 
+This confirms that the image runs. To confirm that it reproduces the reference results on your system, see [Testing your installation](reproducibility.md#testing-your-installation).
+
 ## Verify the image's provenance
 
 Every release image is built and pushed by a GitHub Actions workflow that attaches a [Sigstore](https://www.sigstore.dev/)-signed build attestation, verifiable with the [GitHub CLI](https://cli.github.com/) (`gh`, version 2.49 or later):

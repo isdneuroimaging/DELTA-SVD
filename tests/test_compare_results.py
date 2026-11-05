@@ -183,7 +183,7 @@ def test_main_returns_one_when_a_metric_moved(compare_results, tmp_path, capsys)
     fnB = _write(tmp_path, "before.csv", _rows())
     fnA = _write(tmp_path, "after.csv", _rows(msmd="0.00073219"))
     assert compare_results.main([str(fnB), str(fnA)]) == 1
-    assert "metric-affecting" in capsys.readouterr().out
+    assert "difference(s) found" in capsys.readouterr().out
 
 
 def test_main_accepts_repeated_ignore_key(compare_results, tmp_path, capsys):
