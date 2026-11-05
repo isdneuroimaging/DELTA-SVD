@@ -25,7 +25,7 @@ jobs:
   # request catches those before the merge rather than on main, where the
   # failure would land with a Pages deployment already in flight.
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Superseded builds are safe to cancel; only the deploy below is not.
     concurrency:
       group: docs-build-${{ github.ref }}
@@ -56,7 +56,7 @@ jobs:
   deploy:
     needs: build
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Allow one Pages deployment at a time; in-progress runs finish
     # (cancel-in-progress defaults to false, so the string form suffices).
     # Scoped to this job, so a pull-request build never queues behind a deploy.

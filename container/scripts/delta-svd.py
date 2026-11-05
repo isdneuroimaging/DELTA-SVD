@@ -806,11 +806,14 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1
         print("  NOTE: the threads outnumber the cores several times over. This affects only the "
               "runtime, never the results; allocate more cores to bring it down.")
 
+    # ANTs' template construction script uses its paths unquoted, so whitespace
+    # would split them. Running inside 'dirOut' keeps its path out of the command.
     cmd = (f"export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS={itkThreads}; "
            "export ANTS_RANDOM_SEED=1; "
            f"antsMultivariateTemplateConstruction2.sh -d 3 -i {int(numRegistrations)} -f 4x2x1 -s 2x1x0vox -q {shlex.quote(iterations)} -t SyN -m CC "
-           f" -r 1 -z /opt/scripts/FMRIB58_FA_2mm_crop.nii.gz -y 0 {control} -o {shlex.quote(dirOut + '/')} {' '.join(shlex.quote(f) for f in fnFA)}")
-    run_subprocess(cmd, False, 'antsMultivariateTemplateConstruction2.sh')
+           f" -r 1 -z /opt/scripts/FMRIB58_FA_2mm_crop.nii.gz -y 0 {control} -o ./ {' '.join(shlex.quote(basename(f)) for f in fnFA)}")
+    with contextlib.chdir(dirOut):
+        run_subprocess(cmd, False, 'antsMultivariateTemplateConstruction2.sh')
 
     fnAverage = []
     for iTP, tp in enumerate(timepoints):
@@ -1898,15 +1901,6 @@ def pipeline_delta_svd():
 
     if args.dirOutput is None:
         args.dirOutput = os.path.dirname(args.dwi[0])
-    # ANTs' template construction script uses its paths unquoted, so whitespace
-    # splits them: it fails after the fits, leaving stray folders behind.
-    # Checked as an absolute path, as the script also uses the working directory.
-    dirOutputAbs = os.path.abspath(args.dirOutput)
-    if len(args.dwi) > 1 and any(ch.isspace() for ch in dirOutputAbs):
-        raise DeltaSvdError(f"The output folder contains whitespace, which the ANTs template "
-                            f"construction used for longitudinal input cannot handle:\n"
-                            f"  {dirOutputAbs}\n Choose an output folder without spaces "
-                            f"with '--dirOutput'.")
     
     # Copy: 'stepsImplemented' is module-level and backs the '--steps' choices, so
     # dropping 'qc' from it would erode that list for a later run in the process.
@@ -1948,7 +1942,7 @@ def pipeline_delta_svd():
     dirTemp = join(args.dirOutput, 'delta-svd_temp')
     dirTP = [join(dirTemp, tp) for tp in args.tp] #-- folders for all timepoints
     dirTemplate = join(dirTemp,'template')
-    dirTemplateInter = join(dirTemp, 'intermediateTemplates')
+    dirTemplateInter = join(dirTemplate, 'intermediateTemplates')
     dirTBSS = join(dirTemp,'TBSS')
     fnNonTBSS = glob.glob(join(glob.escape(dirTBSS),'*')) + glob.glob(join(glob.escape(dirTBSS), 'stats','*'))
     fnNonTBSS = [x for x in fnNonTBSS if not re.match('FA$|origdata$|stats$|all_FA|mean_FA|thresh',basename(x))]

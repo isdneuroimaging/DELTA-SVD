@@ -190,8 +190,7 @@ def main(argv=None):
             print()
 
     if differences:
-        print(f'RESULT: {len(differences)} difference(s) found; this change is metric-affecting '
-              f'and requires re-validation (see CONTRIBUTING.md).')
+        print(f'RESULT: {len(differences)} difference(s) found.')
         return 1
     print('RESULT: no metric value and no voxel count changed.')
     return 0

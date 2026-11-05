@@ -13,6 +13,7 @@ nav = [
   { "Data requirements" = "requirements.md" },
   { "Usage" = "usage.md" },
   { "Advanced usage" = "advanced-usage.md" },
+  { "Reproducibility" = "reproducibility.md" },
   { "FAQ" = "faq.md" },
 ]
 

@@ -56,6 +56,7 @@ jobs:
           python -m pip install -r tests/requirements-longitudinal.txt
 
       - name: Process and compare with the approved reference
+        id: compare
         shell: bash
         env:
           PYTHON: python
@@ -77,12 +78,33 @@ jobs:
             results/${{ matrix.subject }}/*.log
             results/${{ matrix.subject }}/comparison.txt
 
+      - name: Longitudinal result summary
+        if: always()
+        shell: bash
+        env:
+          COMPARISON_OUTCOME: ${{ steps.compare.outcome }}
+        run: |
+          {
+            echo "### Longitudinal validation: $SUBJECT"
+            if [[ "$COMPARISON_OUTCOME" == success ]]; then
+              echo "PASS — all metric values and skeleton voxel counts match the approved reference exactly."
+            elif [[ "$COMPARISON_OUTCOME" == failure ]]; then
+              echo "FAIL — processing or reference comparison failed. Review the job logs and longitudinal artifacts for details."
+            else
+              echo "INCOMPLETE — longitudinal validation did not finish. Review the job logs for details."
+            fi
+            if [[ -f "$RESULTS/$SUBJECT/delta-svd_qc.html" ]]; then
+              echo
+              echo "HTML QC reports are available in the longitudinal-$SUBJECT-${{ github.run_attempt }} artifact for visual review."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   evidence:
     # Standalone comparisons may target older images without a run manifest.
     # Release builds must produce complete evidence before they can be attested.
     if: github.event_name == 'push'
     needs: longitudinal
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       IMAGE: ${{ inputs.image }}
     steps:
@@ -93,6 +115,10 @@ jobs:
           pattern: longitudinal-*-${{ github.run_attempt }}
           merge-multiple: true
           path: validation
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
 
       - name: Package release test evidence
         run: python3 tools/package_test_evidence.py validation/results evidence

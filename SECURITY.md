@@ -4,7 +4,7 @@
 
 Only the most recently published release is supported: security fixes land on `main` and go out in the next release, and older release lines are not maintained separately, so upgrading is the only way to get a fix.
 
-DELTA-SVD's endpoints are validated per-version (see [CONTRIBUTING.md](CONTRIBUTING.md#validation-status-read-this-first)), and results from different `MAJOR.MINOR` versions must not be pooled. A patch-only bump is defined as provably metric-identical, so results across patch versions of the same `MAJOR.MINOR` can be pooled.
+DELTA-SVD's endpoints are validated per-version (see [CONTRIBUTING.md](CONTRIBUTING.md#validation-status-read-this-first)), and results from different `MAJOR.MINOR` versions must not be pooled. A patch release is defined as provably metric-identical, so results across patch releases of the same `MAJOR.MINOR` can be pooled.
 
 ## Known residual vulnerabilities — 1.0.5
 

@@ -19,7 +19,7 @@ jobs:
   pytest:
     # Use the same Python packages and shared libraries as the container,
     # installed from explicit URLs without solving the environment.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Environment creation downloads the pinned packages from their channels.
     timeout-minutes: 30
     steps:
@@ -32,7 +32,7 @@ jobs:
     # 3.12). ast.parse(..., feature_version=(3, 11)) does NOT catch this - the
     # tokenizer runs before the feature-version check - so this needs a real
     # 3.11 interpreter compiling every module.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -41,7 +41,7 @@ jobs:
       - run: python -m compileall -q container/scripts tools tests
 
   hadolint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: hadolint/hadolint-action@v3.4.0

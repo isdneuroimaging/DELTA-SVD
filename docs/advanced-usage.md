@@ -21,6 +21,8 @@ Two parts of the pipeline use more than one core:
 
 Work is spread across the available cores automatically; you do not need to tune this by hand.
 
+`--threads` and `--para` affect only runtime and memory, never the results; see [Reproducibility](reproducibility.md#within-a-version) for why. The hidden `--itkThreads` option exists for method development. **Do not change it in production use**, because it does change the results.
+
 > [!NOTE]
 > When using `auto`, only physical cores are counted; hyperthreads are ignored, because registration gains little from them. To use them anyway, pass an explicit `--threads` value.
 
@@ -29,16 +31,6 @@ Work is spread across the available cores automatically; you do not need to tune
 - **Single subject on a workstation** — leave the default, or set `--threads` to the number of cores you want to devote to the run.
 - **Many subjects on a cluster** — see [Running on an HPC cluster](#running-on-an-hpc-cluster) below.
 - **Limited memory** — peak memory grows with the number of registrations running in parallel. Lower it with `--para` (`--para 1` runs one registration at a time, the lowest-memory setting).
-
-## Reproducibility
-
-Longitudinal ANTs registration divides its similarity metric across threads and sums the parts, so the thread count changes the order of that summation and with it the last bits of the result. That would normally be negligible, but the white matter skeleton is derived by thresholding an interpolated mask, which turns those last bits into whole voxels moving in or out of the skeleton, enough to shift the longitudinal metrics minimally, but measurably.
-
-DELTA-SVD therefore fixes the registration thread count at the value the method was validated with, instead of deriving it from the cores available. This is why `--threads` and `--para` affect only runtime and memory: they decide how many registrations run at once, never how each one is computed.
-
-Settings from your own environment cannot change the results either. Apptainer passes host environment variables that the image does not set into the container, such as a `PYTHONPATH` from an HPC module, and the image's own `FSLDIR`, `ANTSPATH` and `OPENBLAS_CORETYPE` can be replaced on purpose with `--env`. Either would select another FSL, ANTs, BLAS kernel or Python packages. DELTA-SVD resets these to the image's own values when it starts, and ignores Python packages in your home directory (`~/.local`).
-
-`--itkThreads` overrides that count. It exists for method development and is deliberately not listed in `--help`. **Do not change it in production use**: results produced with a different value cannot be compared with, or pooled with, results produced at the default.
 
 ## Running on an HPC cluster
 
@@ -50,7 +42,7 @@ For throughput, allocate **one core per subject** and run subjects side by side.
 
 ### Longitudinal runs
 
-**For throughput (the usual case), allocate one core per subject** and run many side by side. The registration still starts its 12 threads (to ensure full reproducibility, see above); the operating system time-slices them onto that one core at a cost of a few percent. This is much the cheapest in core-hours, because no cores sit idle through the single-threaded phases.
+**For throughput (the usual case), allocate one core per subject** and run many side by side. The registration still starts its 12 threads (to ensure [full reproducibility](reproducibility.md#within-a-version)); the operating system time-slices them onto that one core at a cost of a few percent. This is much the cheapest in core-hours, because no cores sit idle through the single-threaded phases.
 
 **For latency, use 12 to 24 cores**: 12 runs one registration at a time, 16 and above run two. Beyond that, returns fade fast: registration is capped at one job per timepoint, and the single-threaded part of the run takes the same time however many cores it has. Go higher only with many timepoints, and only after measuring that template construction dominates your runs.
 
@@ -88,17 +80,6 @@ docker run --rm --user "$(id -u):$(id -g)" \
 
 Apptainer and rootless Podman map your host identity into the container, so they need none of this: output is owned by you automatically.
 
-## Other options
-
-| Option | Description |
-| --- | --- |
-| `--reprocess [name]` | Allow reprocessing over existing output (otherwise a run refuses to overwrite). Optionally give an alternative results-CSV base name to preserve the previous `delta-svd_results.csv`; the aggregator then collects the new table only with `-f <name>`. |
-| `--debug` | Keep the `delta-svd_temp/` folder of intermediate files instead of deleting it. |
-| `--bRange LO HI` | b-value range used for tensor fitting (default `800 1200`). See [Selecting the b-values](#selecting-the-b-values) below. |
-| `--shells B [B ...]` | b-value shells used for tensor fitting, selected individually instead of as a range. Mutually exclusive with `--bRange`. |
-| `--skeletonMask <NIfTI>` | Use an alternative skeleton mask instead of the validated default. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default mask); otherwise DELTA-SVD stops before processing. Binarised on input: values greater than zero become 1; zero and negative values become 0. |
-| `--para <n>` | Number of ANTs registration jobs run at once during longitudinal template construction. Derived from the `--threads` budget by default and capped at the number of timepoints. Peak memory scales with it, so `--para 1` is the lowest-memory setting. |
-
 ## Selecting the b-values
 
 By default, DELTA-SVD fits the tensor using all shells in the 800–1200 s/mm² range, so multi-shell acquisitions need no special handling when they include a suitable shell. Two options change which volumes are selected, and only one of them can be given at a time.
@@ -123,3 +104,15 @@ A few things hold for both options:
 - **The limits are met with a tolerance**, because scanners report b-values that deviate from the nominal shell, through rounding and through cross-terms with the imaging gradients. A range limit is met within ±5 s/mm², so the default range accepts 795–1205; a shell is matched within ±25 s/mm², so `--shells 1000` accepts 975–1025. A shell needs the wider window because it is a point rather than an interval, where the tolerance is the whole acceptance window. If your data scatters further than that, use `--bRange`.
 - **Both are limited to 250–1800 s/mm².** Below that the diffusion signal is contaminated by perfusion, above it by non-Gaussian diffusion, so a tensor fitted there is not interpretable, and a request outside the window is refused rather than fitted. The window is deliberately wide: it marks where the model gives out, not how far from b ≈ 1000 it is sensible to go.
 - **A shell that matches no volume is an error**, as is a selection that leaves fewer than 12 distinct diffusion directions. See [Data requirements](requirements.md#acquisition) for what the fit needs.
+
+## Using an alternative skeleton mask
+
+`--skeletonMask <NIfTI>` uses an alternative skeleton mask instead of the validated default. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default mask); otherwise DELTA-SVD stops before processing. The mask is binarised on input: values greater than zero become 1; zero and negative values become 0.
+
+## Other options
+
+| Option | Description |
+| --- | --- |
+| `--reprocess [name]` | Allow reprocessing over existing output (otherwise a run refuses to overwrite). Optionally give an alternative results-CSV base name to preserve the previous `delta-svd_results.csv`; the aggregator then collects the new table only with `-f <name>`. |
+| `--debug` | Keep the `delta-svd_temp/` folder of intermediate files instead of deleting it. |
+| `--para <n>` | Number of ANTs registration jobs run at once during longitudinal template construction. Derived from the `--threads` budget by default and capped at the number of timepoints. Peak memory scales with it, so `--para 1` is the lowest-memory setting. |

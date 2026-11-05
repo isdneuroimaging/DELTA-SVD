@@ -3024,36 +3024,44 @@ def test_pipeline_rejects_an_off_grid_dwi_mask_before_processing(
 
 
 # ---------------------------------------------------------------------------
-# Whitespace in the output path breaks ANTs' template construction only.
+# ANTs' template construction uses its paths unquoted, so whitespace in the
+# output path must never reach its command line.
 
-def _two_timepoints_in(folder):
-    folder.mkdir(parents=True)
+def test_template_construction_keeps_the_output_path_out_of_the_ants_command(delta_svd, tmp_path, monkeypatch):
+    dirOut = tmp_path / "My Study"
+    dirOut.mkdir()
+    tp = tmp_path / "TP01"
+    tp.mkdir()
+    seen = {}
+
+    def record(cmd, *a, **k):
+        seen.update(cmd=cmd, cwd=Path.cwd())
+        raise _StopAfterCommand
+
+    monkeypatch.setattr(delta_svd, "run_subprocess", record)
+    monkeypatch.setattr(delta_svd, "copy2", lambda *a, **k: None)
+    before = Path.cwd()
+    with pytest.raises(_StopAfterCommand):
+        delta_svd.create_template(timepoints=[str(tp)], fnCoreg=[], dirOut=str(dirOut), coreBudget=1)
+    assert seen["cwd"] == dirOut.resolve()
+    assert Path.cwd() == before
+    assert "My Study" not in seen["cmd"]
+    assert seen["cmd"].endswith(" -o ./ TP01_fwc_wls_dti_FA_05.nii.gz")
+
+
+def test_longitudinal_run_accepts_whitespace_in_the_output_path(delta_svd, tmp_path, monkeypatch):
+    folder = tmp_path / "My Study"
+    folder.mkdir()
     dwis = []
     for tp in ["tp1", "tp2"]:
         for suffix in [".nii.gz", ".bval", ".bvec", "_brainmask.nii.gz"]:
             (folder / (tp + suffix)).touch()
         dwis.append(str(folder / (tp + ".nii.gz")))
-    return dwis
-
-
-def test_longitudinal_run_rejects_whitespace_in_the_output_path(delta_svd, tmp_path, monkeypatch):
-    dwis = _two_timepoints_in(tmp_path / "My Study")
     skel = tmp_path / "skel.nii.gz"
     skel.touch()
     monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", *dwis,
                                       "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
-    with pytest.raises(delta_svd.DeltaSvdError, match="whitespace") as excinfo:
-        delta_svd.pipeline_delta_svd()
-    assert "'--dirOutput'" in str(excinfo.value)
-
-
-def test_longitudinal_run_accepts_an_output_folder_without_whitespace(delta_svd, tmp_path, monkeypatch):
-    dwis = _two_timepoints_in(tmp_path / "My Study")
-    skel = tmp_path / "skel.nii.gz"
-    skel.touch()
-    monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", *dwis, "-o", str(tmp_path / "out"),
-                                      "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
-    # gets past the path check to the contradictory-options error that follows it
+    # gets past the path handling to the contradictory-options error that follows it
     with pytest.raises(delta_svd.DeltaSvdError, match="contradictory"):
         delta_svd.pipeline_delta_svd()
 
