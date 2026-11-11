@@ -25,13 +25,13 @@ jobs:
       SRC: ${{ github.event.inputs.image }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: imjasonh/setup-crane@v0.7
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
       # Version comes from the image's own labels, not a checkout: this re-check is
       # what stops a malformed or unvalidated digest reaching the production tag.
@@ -72,7 +72,7 @@ jobs:
             echo "attempt=${BASH_REMATCH[2]}"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: '3.12'
 
@@ -116,6 +116,18 @@ jobs:
               if evidence.get(key) != value:
                   raise SystemExit(f'Test evidence does not match promotion: {key}')
           PY
+
+      # A published version never moves: a re-run may only re-copy the same digest.
+      - name: Refuse to move a published version
+        env:
+          VERSION: ${{ steps.labels.outputs.version }}
+          DIGEST: ${{ steps.labels.outputs.digest }}
+        run: |
+          TAGS="$(crane ls ghcr.io/isdneuroimaging/delta-svd)" || { echo "::error::cannot list the production tags"; exit 1; }
+          if grep -qxF "$VERSION" <<< "$TAGS"; then
+            EXISTING="$(crane digest "ghcr.io/isdneuroimaging/delta-svd:$VERSION")"
+            [[ "$EXISTING" == "$DIGEST" ]] || { echo "::error::delta-svd:$VERSION is already published at $EXISTING"; exit 1; }
+          fi
 
       - name: Copy manifest to the production package
         run: crane copy "$SRC" "ghcr.io/isdneuroimaging/delta-svd:${{ steps.labels.outputs.version }}"

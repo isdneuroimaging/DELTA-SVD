@@ -362,3 +362,72 @@ def test_warns_about_a_csv_the_run_manifest_does_not_list(tmp_path, steps, outpu
 
     assert r.returncode == 0
     assert ("not listed in the run manifest" in r.stdout.lower()) == warned
+
+
+@pytest.mark.parametrize("versions, warned", [
+    (["1.0.7", "1.0.8"], True),
+    (["1.0.8", "1.0.8"], False),
+    (["1.0.8", None], False),           # a manifest without a version, or none at all
+])
+def test_warns_when_run_manifests_name_different_versions(tmp_path, versions, warned):
+    for i, version in enumerate(versions):
+        sub = tmp_path / f"sub0{i}"
+        _write_fixture_csv(sub, f"sub0{i}", 0.1, 0.2)
+        if version is not None:
+            (sub / "delta-svd_run_manifest.json").write_text(json.dumps({
+                "pipeline_version": version, "steps_completed": ["extract"],
+                "outputs": ["delta-svd_results.csv"],
+            }))
+
+    r = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
+
+    assert r.returncode == 0
+    assert ("different delta-svd versions" in r.stdout.lower()) == warned
+
+
+@pytest.mark.parametrize("orders, warned", [
+    ([{"BL": "LAS", "FU": "LAS"}, {"BL": "RAS", "FU": "RAS"}], True),
+    ([{"BL": "LAS", "FU": "RAS"}], True),               # mixed within one subject
+    ([{"BL": "LAS", "FU": "LAS"}, {"TP01": "RAS"}], False),   # cross-sectional: order irrelevant
+    ([{"TP01": "LAS"}, {"TP01": "RAS"}], False),
+    ([{"BL": "LAS", "FU": "LAS"}, None], False),        # older manifest without the field
+])
+def test_warns_when_run_manifests_name_different_voxel_orders(tmp_path, orders, warned):
+    for i, order in enumerate(orders):
+        sub = tmp_path / f"sub0{i}"
+        _write_fixture_csv(sub, f"sub0{i}", 0.1, 0.2)
+        mode = "longitudinal" if order and len(order) > 1 else "cross_sectional"
+        manifest = {} if order is None else {"voxel_order": order, "processing_mode": mode}
+        manifest.update(steps_completed=["extract"], outputs=["delta-svd_results.csv"])
+        (sub / "delta-svd_run_manifest.json").write_text(json.dumps(manifest))
+
+    r = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
+
+    assert r.returncode == 0
+    assert ("different voxel orders" in r.stdout.lower()) == warned
+
+
+@pytest.mark.parametrize("steps, outputs", [
+    (["extract"], ["other.csv"]),
+    (["qc"], ["delta-svd_qc.html"]),
+    (None, None),
+])
+def test_does_not_attribute_unmatched_manifest_provenance(tmp_path, steps, outputs):
+    for i, (version, order) in enumerate([("1.0.8", "LAS"), ("1.1.0", "RAS")]):
+        sub = tmp_path / f"sub0{i}"
+        _write_fixture_csv(sub, f"sub0{i}", 0.1, 0.2)
+        manifest = {
+            "pipeline_version": version, "processing_mode": "longitudinal",
+            "voxel_order": {"BL": order, "FU": order},
+            "steps_completed": ["extract"] if i == 0 else steps,
+            "outputs": ["delta-svd_results.csv"] if i == 0 else outputs,
+        }
+        (sub / "delta-svd_run_manifest.json").write_text(json.dumps(manifest))
+
+    r = _run(str(tmp_path), "-o", str(tmp_path / "agg.csv"))
+
+    assert r.returncode == 0, r.stderr
+    assert "different delta-svd versions" not in r.stdout.lower()
+    assert "different voxel orders" not in r.stdout.lower()
+    assert ("not listed in the run manifest" in r.stdout.lower()) == (steps == ["extract"])
+    assert len(_read_rows(tmp_path / "agg.csv")) == 4

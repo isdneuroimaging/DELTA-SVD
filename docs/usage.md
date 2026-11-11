@@ -42,6 +42,9 @@ apptainer run --no-home delta-svd.sif \
   --id sub-01
 ```
 
+> [!NOTE]
+> FSL's registration needs images stored in LAS or RAS voxel order. In cross-sectional runs with other orientations (e.g. LPS, as written by some preprocessing tools), DELTA-SVD reorders the voxels of the derived maps to LAS before TBSS, without resampling. The log and the QC report record when this happened.
+
 ## Longitudinal (multiple timepoints)
 
 List all the timepoints' images after a single `--dwi` (one image per timepoint). DELTA-SVD builds a within-subject template with ANTs and derives the skeleton on it, so metrics are directly comparable across timepoints:
@@ -72,7 +75,7 @@ All additional masks are optional. Per-timepoint masks are given in DWI space (o
 Written to the output folder:
 
 - **`delta-svd_results.csv`** — the results table. Endpoint metric rows contain the validated endpoints **MSMD** (mean skeletonised MD), **PSMD** (peak width of skeletonised MD) and **MSFW** (mean skeletonised free water), reported per timepoint and per region. The table also contains QC bookkeeping rows describing the analysed voxel sets; these have `metric=NA` and `value=NaN`.
-- **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version and all command-line arguments used for the run, including values containing spaces or quotes, so results remain traceable. Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, including separate binary maps for each DWI-space ROI label so overlaps remain visible, `0` skips both.
+- **`delta-svd_qc.html`** — a quality-control report (skeleton and masks overlaid on the data). It also records the DELTA-SVD version, the voxel order the input images are stored in, and all command-line arguments used for the run, including values containing spaces or quotes, so results remain traceable. Control it with `--qc`: `1` (default) writes the HTML, `2` also keeps the underlying NIfTI images in a `delta-svd_qc/` folder, including separate binary maps for each DWI-space ROI label so overlaps remain visible, `0` skips both.
 - **`delta-svd_run_manifest.json`** — a machine-readable record written after the requested processing steps and final cleanup succeed. It uses the versioned schema below and records the same command information as the QC report. The run manifest is completion and provenance information; it is not required by the aggregation script, which continues to aggregate any matching results CSV.
 
 Intermediate files are written under `delta-svd_temp/` and deleted on success; pass `--debug` to keep them.
@@ -120,6 +123,7 @@ Rows with `metric=NA` and `value=NaN` are QC-bookkeeping rows rather than endpoi
 | `steps_completed` | Requested processing steps completed before the manifest was written. |
 | `qc_mode` | Numeric `--qc` mode used for the run. |
 | `outputs` | Final result and QC filenames produced by the requested steps; the manifest does not list itself. |
+| `voxel_order` | Voxel order each timepoint's DWI is stored in (e.g. `LAS`), keyed by timepoint label. |
 
 ## Aggregating across subjects
 
@@ -130,7 +134,7 @@ apptainer exec delta-svd.sif \
   delta-svd_aggregate_results.py . -o study_aggregated.csv
 ```
 
-It searches the given directory recursively for `delta-svd_results.csv` and concatenates the matches. Useful options:
+It searches the given directory recursively for `delta-svd_results.csv` and concatenates the matches. Where run manifests are present, it warns if they name different DELTA-SVD versions, or different voxel orders for longitudinal runs. Useful options:
 
 | Option | Description |
 | --- | --- |

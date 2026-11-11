@@ -23,7 +23,7 @@ jobs:
     # Environment creation downloads the pinned packages from their channels.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: tests/run-in-locked-env.sh
 
   compileall:
@@ -34,8 +34,8 @@ jobs:
     # 3.11 interpreter compiling every module.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.11"
       - run: python -m compileall -q container/scripts tools tests
@@ -43,8 +43,8 @@ jobs:
   hadolint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: hadolint/hadolint-action@v3.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6 # v3.4.0
         with:
           dockerfile: container/Dockerfile
           failure-threshold: warning

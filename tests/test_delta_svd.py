@@ -29,6 +29,8 @@ def test_run_manifest_records_run_details_and_outputs(delta_svd, tmp_path, monke
         function_call="delta-svd.py --dwi ses-1.nii.gz ses-2.nii.gz",
         steps=["fwc", "template", "extract"],
         qc=0,
+        tp=["ses-1", "ses-2"],
+        voxelOrder=["LAS", "RAS"],
     )
     monkeypatch.setattr(delta_svd, "__source_revision__", "abc1234")
     started = datetime.datetime(2026, 9, 16, 10, 15, 22,
@@ -54,6 +56,7 @@ def test_run_manifest_records_run_details_and_outputs(delta_svd, tmp_path, monke
         "steps_completed": ["fwc", "template", "extract"],
         "qc_mode": 0,
         "outputs": ["delta-svd_results.csv"],
+        "voxel_order": {"ses-1": "LAS", "ses-2": "RAS"},
     }
     assert not (tmp_path / "delta-svd_run_manifest.json.tmp").exists()
 
@@ -880,6 +883,28 @@ def test_filter_b_values_drops_volumes_outside_brange(delta_svd, tmp_path):
     kept = nib.load(fnDataO).get_fdata()
     assert kept.shape == (2, 2, 2, 21)
     assert kept[0, 0, 0].tolist() == list(range(21))
+
+
+@pytest.mark.parametrize("length", [0.0, 0.98, 2.0, float("nan")])
+def test_filter_b_values_refuses_non_unit_bvecs(delta_svd, tmp_path, length):
+    # dipy's gradient_table() would raise later, with a traceback
+    bvals = [0] + [1000] * 20
+    bvecs = np.vstack([np.zeros((1, 3)), _directions(20)])
+    bvecs[5] *= length
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(tmp_path, bvals, bvecs)
+    with pytest.raises(delta_svd.DeltaSvdError, match="unit vector") as excinfo:
+        delta_svd.filter_b_values(fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+                                  out_dir=outDir, bIntervals=DEFAULT_INTERVALS)
+    assert "Volume(s): 6 " in str(excinfo.value)
+
+
+def test_filter_b_values_accepts_bvecs_within_dipys_tolerance(delta_svd, tmp_path):
+    bvals = [0] + [1000] * 20 + [2000]
+    bvecs = np.vstack([np.zeros((1, 3)), _directions(20) * 1.009, [[0, 0, 5]]])
+    fnData, fnBval, fnBvec, outDir = _write_dwi_set(tmp_path, bvals, bvecs)
+    # the b = 2000 volume is dropped, so its bvec does not matter
+    delta_svd.filter_b_values(fn_data=fnData, fn_bval=fnBval, fn_bvec=fnBvec,
+                              out_dir=outDir, bIntervals=DEFAULT_INTERVALS)
 
 
 # selected_volumes_float32() replaces get_fdata()[..., sel] in filter_b_values()
@@ -1993,6 +2018,116 @@ def test_coreg_merge_masks_normalises_uncompressed_input_to_nii_gz(delta_svd, tm
         assert nib.load(fnOut).get_data_dtype() == img.dtype
 
 
+# ---------------------------------------------------------------------------
+# reorient_to_fsl_standard(): non-LAS/RAS input is reordered to LAS without
+# changing any voxel's value or world position; LAS and RAS are untouched.
+
+def _oriented(axcodes, shape=(4, 5, 6), dtype="int16", slope=None):
+    """A random image stored in the voxel order 'axcodes', 2 mm voxels."""
+    rng = np.random.default_rng(0)
+    ornt = nib.orientations.axcodes2ornt(axcodes)
+    affine = np.zeros((4, 4))
+    affine[3, 3] = 1
+    for i, (axis, flip) in enumerate(ornt.astype(int)):
+        affine[axis, i] = 2.0 * flip
+    affine[:3, 3] = [-10, 20, 5]
+    data = rng.integers(0, 1000, shape).astype(dtype)
+    nii = nib.Nifti1Image(data, affine)
+    nii.header.set_dim_info(freq=0, phase=1, slice=2)
+    if slope is not None:
+        nii.header.set_slope_inter(slope, 3)
+    return nii
+
+
+def _world_values(nii):
+    """Each voxel's value, keyed by its world coordinate."""
+    data = np.asanyarray(nii.dataobj)
+    idx = np.indices(data.shape).reshape(3, -1)
+    world = (nii.affine @ np.vstack([idx, np.ones(idx.shape[1])]))[:3].T.round(6)
+    return dict(zip(map(tuple, world), data.ravel()))
+
+
+@pytest.mark.parametrize("axcodes", [("L", "P", "S"), ("R", "P", "I"), ("A", "L", "S"),
+                                     ("S", "R", "A"), ("L", "A", "I")])
+@pytest.mark.parametrize("dtype,slope", [("int16", None), ("int16", 0.5), ("float32", None)])
+def test_reorient_reorders_voxels_without_changing_them(delta_svd, tmp_path, axcodes, dtype, slope):
+    nii = _oriented(axcodes, dtype=dtype, slope=slope)
+    fn = tmp_path / "map.nii.gz"
+    nib.save(nii, str(fn))
+    # read now: nib.load() is lazy and the file is rewritten in place
+    before = nib.load(str(fn))
+    values, dtype_, scaling = _world_values(before), before.get_data_dtype(), (before.dataobj.slope, before.dataobj.inter)
+    codes = (int(before.header["sform_code"]), int(before.header["qform_code"]))
+    zooms = before.header.get_zooms()
+
+    assert delta_svd.reorient_to_fsl_standard(str(fn)) is True
+
+    after = nib.load(str(fn))
+    assert nib.aff2axcodes(after.affine) == ("L", "A", "S")
+    assert np.allclose(after.header.get_sform(), after.affine)
+    assert np.allclose(after.header.get_qform(), after.affine)
+    assert after.get_data_dtype() == dtype_
+    assert (after.dataobj.slope, after.dataobj.inter) == scaling
+    assert np.allclose(after.header.get_zooms(), 2.0)
+    assert _world_values(after) == values
+    # header fields kept exactly, not recomputed from the affine
+    assert (int(after.header["sform_code"]), int(after.header["qform_code"])) == codes
+    assert sorted(after.header.get_zooms()) == sorted(zooms)
+    # the frequency/phase/slice axes follow their data
+    ornt = nib.orientations.ornt_transform(nib.orientations.io_orientation(nii.affine),
+                                           nib.orientations.axcodes2ornt(("L", "A", "S")))
+    assert after.header.get_dim_info() == tuple(int(ornt[d, 0]) for d in (0, 1, 2))
+    # idempotent
+    assert delta_svd.reorient_to_fsl_standard(str(fn)) is False
+
+
+@pytest.mark.parametrize("axcodes", [("L", "A", "S"), ("R", "A", "S")])
+def test_reorient_leaves_las_and_ras_untouched(delta_svd, tmp_path, axcodes):
+    fn = tmp_path / "map.nii.gz"
+    nib.save(_oriented(axcodes), str(fn))
+    before = fn.read_bytes()
+    assert delta_svd.reorient_to_fsl_standard(str(fn)) is False
+    assert fn.read_bytes() == before
+
+
+def test_needs_fsl_reorientation(delta_svd):
+    for axcodes, expected in [(("L", "A", "S"), False), (("R", "A", "S"), False),
+                              (("L", "P", "S"), True), (("R", "A", "I"), True),
+                              (("A", "R", "S"), True)]:
+        assert delta_svd.needs_fsl_reorientation(_oriented(axcodes).affine) is expected
+
+
+@pytest.mark.parametrize("axcodes, expected", [
+    ([("L", "P", "S")], "LPS"),                       # cross-sectional, reordered
+    ([("R", "A", "S")], None),                        # cross-sectional, standard
+    ([("L", "A", "S")], None),
+    ([("L", "P", "S"), ("L", "P", "S")], None),       # longitudinal: never reordered
+    ([("L", "A", "S"), ("L", "P", "S")], None),
+])
+def test_fsl_reorientation_source(delta_svd, axcodes, expected):
+    affines = [_oriented(a).affine for a in axcodes]
+    assert delta_svd.fsl_reorientation_source(affines) == expected
+
+
+@pytest.mark.parametrize("binarise", [True, False])
+def test_coreg_merge_masks_reorients_a_single_timepoint_mask(delta_svd, tmp_path, binarise):
+    tp_dir = tmp_path / "TP01"
+    tp_dir.mkdir()
+    src = tmp_path / "roi.nii.gz"
+    nii = _oriented(("L", "P", "S"), dtype="uint16")
+    nib.save(nii, str(src))
+
+    fnOut = delta_svd.coreg_merge_masks(
+        timepoints=[str(tp_dir)], masks=[str(src)], label="mask_test",
+        dirTemplate=str(tmp_path), binarise=binarise,
+    )
+
+    out = nib.load(fnOut)
+    assert nib.aff2axcodes(out.affine) == ("L", "A", "S")
+    expected = {k: int(v > 0) if binarise else v for k, v in _world_values(nii).items()}
+    assert _world_values(out) == expected
+
+
 def test_dwi_and_mni_paths_reject_the_same_invalid_roi_labels(delta_svd, tmp_path):
     invalid = np.array([0, 1.5], dtype=float).reshape(2, 1, 1)
     dwi_roi = tmp_path / "dwi-roi.nii.gz"
@@ -3087,3 +3222,67 @@ def test_tbss_lookups_take_the_output_path_literally(delta_svd, tmp_path):
     fn = stats / "skel_intersection_Rmask-01.nii.gz"
     fn.touch()
     assert delta_svd.qc_label_maps(str(stats.parent)) == [str(fn)]
+
+
+# ---------------------------------------------------------------------------
+# run_subprocess(): displayed output is streamed; hidden output only on failure.
+
+@pytest.mark.parametrize("display", [True, False])
+def test_run_subprocess_success(delta_svd, capsys, display):
+    delta_svd.run_subprocess("echo hello; echo oops >&2", display, "demo")
+    out = capsys.readouterr().out
+    assert ("hello\noops\n" in out) == display
+
+
+@pytest.mark.parametrize("display", [True, False])
+def test_run_subprocess_failure_shows_the_output(delta_svd, capsys, display):
+    with pytest.raises(delta_svd.DeltaSvdError, match="'demo' command failed with exit code 3"):
+        delta_svd.run_subprocess("echo partial; echo why >&2; exit 3", display, "demo")
+    out = capsys.readouterr().out
+    assert "partial\nwhy\n" in out
+
+
+def test_mixed_voxel_order_warning(delta_svd):
+    assert delta_svd.mixed_voxel_order_warning(["LAS"], ["TP01"]) is None
+    assert delta_svd.mixed_voxel_order_warning(["RAS", "RAS"], ["BL", "FU"]) is None
+    msg = delta_svd.mixed_voxel_order_warning(["LAS", "RAS"], ["BL", "FU"])
+    assert "WARNING" in msg and "LAS (BL), RAS (FU)" in msg
+
+
+def test_reorient_round_trip_restores_the_header_bytes(delta_svd, tmp_path):
+    # oblique, 2.1 mm slices: pixdim recomputed from the affine moved by a float32
+    # ULP, which FSL and ANTs amplify into the metrics; it has to be copied exactly
+    # as a scanner writes it: a qform (rotation + qfac) and an sform derived from it
+    hdr = nib.Nifti1Header()
+    hdr.set_data_shape((4, 5, 6))
+    hdr.set_data_dtype("float32")
+    hdr["pixdim"][:4] = [-1, 2.0, 2.0, 2.1]
+    hdr["quatern_b"], hdr["quatern_c"], hdr["quatern_d"] = -0.054617215, 0.9684012, 0.24286464
+    hdr["qoffset_x"], hdr["qoffset_y"], hdr["qoffset_z"] = 122.79986, -79.5609, -97.24512
+    hdr["qform_code"] = 1
+    hdr.set_sform(hdr.get_qform(), 1)
+    las = nib.Nifti1Image(np.arange(4 * 5 * 6, dtype="float32").reshape(4, 5, 6), hdr.get_sform(), hdr)
+    fnLas, fnLps = tmp_path / "las.nii.gz", tmp_path / "lps.nii.gz"
+    nib.save(las, str(fnLas))
+    las = nib.load(str(fnLas))
+    assert nib.aff2axcodes(las.affine) == ("L", "A", "S")
+    # the same image stored as LPS, header fields kept exactly
+    flip = np.eye(4)
+    flip[1, 1], flip[1, 3] = -1, las.shape[1] - 1
+    lpsAffine = las.affine @ flip
+    lps = nib.Nifti1Image(np.asanyarray(las.dataobj)[:, ::-1], lpsAffine, las.header)
+    lps.header.set_sform(lpsAffine, int(las.header["sform_code"]))
+    lps.header.set_qform(lpsAffine, int(las.header["qform_code"]))
+    lps.header.set_zooms(las.header.get_zooms())
+    nib.save(lps, str(fnLps))
+
+    assert delta_svd.reorient_to_fsl_standard(str(fnLps)) is True
+
+    back = nib.load(str(fnLps))
+    assert np.array_equal(np.asanyarray(back.dataobj), np.asanyarray(las.dataobj))
+    for field in ("pixdim", "sform_code", "qform_code", "dim", "datatype", "scl_slope", "scl_inter"):
+        assert back.header[field].tobytes() == las.header[field].tobytes(), field
+    # the quaternion is recomputed from the reordered matrix and may move by a
+    # float32 ULP; FSL reads the sform here, which matches to rounding
+    assert np.allclose(back.header.get_sform(), las.header.get_sform(), atol=1e-4)
+    assert np.allclose(back.header.get_qform(), las.header.get_qform(), atol=1e-4)

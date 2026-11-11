@@ -19,8 +19,13 @@ def dockerfile_env():
     return dict(re.findall(r'(\w+)="?([^"\s\\]*)"?', block))
 
 
+#--- what '$PATH' expands to in the Dockerfile's ENV: the Ubuntu base image's PATH
+BASE_IMAGE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 def test_image_environment_matches_the_dockerfile():
     env = dockerfile_env()
+    env["PATH"] = env["PATH"].replace("$PATH", BASE_IMAGE_PATH)
     for name, value in c.IMAGE_ENVIRONMENT.items():
         assert env.get(name) == value, name
 
@@ -39,6 +44,7 @@ def test_pin_overrides_host_tool_selection(delta_svd):
         "ANTSPATH": "/home/user/bin/ants/",
         "OPENBLAS_CORETYPE": "SkylakeX",
         "FSLOUTPUTTYPE": "NIFTI",
+        "PATH": "/home/user/fsl/bin:/usr/bin:/bin",
         "HOME": "/home/user",
     }
     delta_svd.pin_image_environment(environ, fslSubConfig=lambda d: None)
@@ -169,3 +175,16 @@ def test_image_copy_hands_the_pinned_environment_to_subprocesses(tmp_path):
         assert child[name] == value, name
     assert child.get("FSLSUB_CONF") != "/host/.fsl_sub.yml"
     assert "PYTHONUSERBASE" not in child
+
+
+def test_locked_env_helper_pins_match_the_dockerfile():
+    # PR CI tests in the helper's environment, so it must be the image's
+    docker = (REPO_ROOT / "container" / "Dockerfile").read_text()
+    helper = (REPO_ROOT / "tests" / "run-in-locked-env.sh").read_text()
+    pins = (re.findall(r"ubuntu:[\w.-]+@sha256:[0-9a-f]{64}", helper)
+            + re.findall(r"\b[a-z0-9][a-z0-9.+-]*=[0-9][^\s\\]*", helper)    # apt pins
+            + re.findall(r"https://\S+?\.(?:sh|whl)\b", helper)
+            + re.findall(r"\b[0-9a-f]{64}\b", helper))
+    assert len(pins) >= 10
+    for pin in pins:
+        assert pin in docker, pin

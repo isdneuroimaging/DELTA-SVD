@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import re, os
+import re
 import numpy as np
 from scipy import ndimage
 import nibabel as nib
@@ -16,8 +16,8 @@ colourExclusions = 'blue'
 cmap = ListedColormap(["red", colourExclusions, "magenta"])
 
 
-def crop_nonzero(images, mask, border, thr=0, verbose = True):
-    
+def crop_nonzero(images, mask, border, thr=0):
+
     nz =np.nonzero(mask > thr)
     if not all([len(x) for x in nz]):
         print('Warning: Mask is empty!')
@@ -27,17 +27,11 @@ def crop_nonzero(images, mask, border, thr=0, verbose = True):
     else:
         idxLow  = np.asarray([min(nz[0]),min(nz[1]),min(nz[2])])
         idxHigh = np.asarray([max(nz[0]),max(nz[1]),max(nz[2])])
-    
-    if verbose: print("index low: ", idxLow)
-    if verbose: print("index high:", idxHigh)
 
     if border is not None:
-        if verbose: print(f"Adding border of {border} voxels")
         idxLow  = np.maximum(idxLow-border, [0,0,0])
         idxHigh = np.minimum(idxHigh+border, np.array(mask.shape[0:3])-1)
-        if verbose: print("index low: ", idxLow)
-        if verbose: print("index high:", idxHigh)
-    
+
     ranges = idxHigh - idxLow + 1
     
     if ranges[2]<6:
@@ -48,28 +42,20 @@ def crop_nonzero(images, mask, border, thr=0, verbose = True):
         images[iImg] = img[idxLow[0]:idxHigh[0]+1,
                         idxLow[1]:idxHigh[1]+1,
                         idxLow[2]:idxHigh[2]+1]
-    
-    return images, idxLow, idxHigh
+
+    return images
 
 
-def create_qc_image(fnamesBG, vlim, labels=None, fnameMask=None, fnameBmask=None, fnameCropMask=None, animate=True, depth=1, addLegends=(0,0)):
+def create_qc_image(fnamesBG, vlim, labels, fnameMask, fnameBmask, fnameCropMask=None, animate=True, addLegends=(0,0)):
 
-    
     nBG = len(fnamesBG)
-    if fnameMask is None:
-        raise ValueError('Currently the use without an overlay mask is not implemented! Please provide argument "fnameMask"!')
-    if fnameBmask is None:
-        fnames = fnamesBG + [fnameMask]
-    else:
-        if not isinstance(fnameBmask, list):
-            fnameBmask = [fnameBmask]
-        fnames = fnamesBG + [fnameMask] + fnameBmask
+    if not isinstance(fnameBmask, list):
+        fnameBmask = [fnameBmask]
+    fnames = fnamesBG + [fnameMask] + fnameBmask
     images = []
     for fn in fnames:
         nii = nib.load(fn)
         images.append( nii.get_fdata() )
-    if fnameBmask is None:
-        images.append( (images[0]>0).astype(np.uint8) )
 
     border=1
     if fnameCropMask:
@@ -77,7 +63,7 @@ def create_qc_image(fnamesBG, vlim, labels=None, fnameMask=None, fnameBmask=None
         imgCropMask = niiCropMask.get_fdata()
     else:
         imgCropMask = images[-1]
-    images, _, _ = crop_nonzero(images, imgCropMask, border=border, thr=0, verbose = False)
+    images = crop_nonzero(images, imgCropMask, border=border, thr=0)
 
     # equally spaced slices, half a gap from the image border
     nSlices = 8
@@ -127,12 +113,7 @@ def create_qc_image(fnamesBG, vlim, labels=None, fnameMask=None, fnameBmask=None
             ax.contour(imgBmaskT, levels=[0.5], colors='cyan', linestyles='solid', linewidths=1, alpha=1, antialiased = True)
         fontSz = np.ceil(imgBmaskT.shape[0]/25)
         dist = np.ceil(imgBmaskT.shape[0]/40)
-        if labels is not None:
-            label = labels[iBG]
-        else:
-            label = fnamesBG[iBG].split(os.path.sep)
-            label = os.path.sep.join(label[-depth:])
-        ax.text(dist, fontSz+dist, label, fontsize=fontSz, color='white')
+        ax.text(dist, fontSz+dist, labels[iBG], fontsize=fontSz, color='white')
         if iBG<addLegends[0]:
             legend_elements = [patches.Rectangle((0, 0), 0.1, 0.1, facecolor='red', edgecolor='k', alpha=0.7, label='white matter skeleton'),
                                patches.Rectangle((0, 0), 0.1, 0.1, facecolor=colourExclusions, edgecolor='k', alpha=0.7, label='excluded areas'),

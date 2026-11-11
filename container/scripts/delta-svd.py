@@ -9,7 +9,7 @@ from pathlib import Path
 
 from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
                                  BRANGE_TOL, SHELL_TOL, MIN_DIRECTIONS, RECOMMENDED_DIRECTIONS,
-                                 IMAGE_SCRIPT_DIR, IMAGE_ENVIRONMENT)
+                                 IMAGE_SCRIPT_DIR, IMAGE_ENVIRONMENT, ANTS_TEMPLATE_INIT)
 
 
 def running_in_image(scriptPath=None):
@@ -171,8 +171,8 @@ def cgroup_cpu_limit(procCgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
 
 
 def resolve_thread_budget(argv):
-    """Core budget from --threads, auto-detected when absent or 'auto'. Kept
-    dependency-free so it can run *before* numpy/OpenBLAS are imported."""
+    """Core budget from --threads, auto-detected when absent or 'auto'.
+    Resolved at import, ahead of the full parser, alongside the ITK count below."""
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--threads', default=None)
     ns, _ = pre.parse_known_args(argv)
@@ -265,6 +265,8 @@ if _missing:
 
 import nibabel as nib
 from nibabel.volumeutils import apply_read_scaling
+from nibabel.orientations import (io_orientation, axcodes2ornt, ornt_transform,
+                                  apply_orientation, inv_ornt_aff)
 import numpy as np
 import pandas as pd
 
@@ -429,6 +431,9 @@ DESIGN_MATRIX_RANK = 7
 #    this can only ever merge genuine repeats.
 DIRECTION_COS_TOL = 0.999
 
+#--- How far a b-vector's length may deviate from 1; dipy's gradient_table() default.
+BVEC_UNIT_TOL = 1e-2
+
 
 def resolve_b_intervals(bRange=None, shells=None):
     """The accepted non-zero b-value windows, tolerance included.
@@ -554,6 +559,16 @@ def filter_b_values(fn_data = 'data.nii.gz',
         raise DeltaSvdError(f"No volume with a b-value close to zero (b <= {B0_MAX}) was found. The "
                             f"fits need at least one to estimate S0. b-values in the data: "
                             f"{format_b_values(bvals)}.\n bval: {fn_bval}")
+
+    #--- dipy's own rule (gradient_table, atol 1e-2), checked here to fail legibly
+    norms = np.linalg.norm(bvecs, axis=1)
+    notUnit = np.flatnonzero(selBRange & ~(np.abs(norms - 1) <= BVEC_UNIT_TOL))   # NaN fails too
+    if notUnit.size:
+        shown = ', '.join(f'{i+1} (length {norms[i]:.3g})' for i in notUnit[:MAX_LINES_REPORTED])
+        raise DeltaSvdError(f"Every b-vector of a diffusion-weighted volume has to be a unit vector, "
+                            f"but {notUnit.size} are not. Volume(s): {shown}"
+                            f"{', ...' if notUnit.size > MAX_LINES_REPORTED else ''}\n"
+                            f" bvec: {fn_bvec}")
 
     nDirections, rank = describe_directions(bvals[sel], bvecs[sel])
     print(f' unique diffusion directions   : n={nDirections}')
@@ -811,7 +826,7 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1
     cmd = (f"export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS={itkThreads}; "
            "export ANTS_RANDOM_SEED=1; "
            f"antsMultivariateTemplateConstruction2.sh -d 3 -i {int(numRegistrations)} -f 4x2x1 -s 2x1x0vox -q {shlex.quote(iterations)} -t SyN -m CC "
-           f" -r 1 -z /opt/scripts/FMRIB58_FA_2mm_crop.nii.gz -y 0 {control} -o ./ {' '.join(shlex.quote(basename(f)) for f in fnFA)}")
+           f" -r 1 -z {ANTS_TEMPLATE_INIT} -y 0 {control} -o ./ {' '.join(shlex.quote(basename(f)) for f in fnFA)}")
     with contextlib.chdir(dirOut):
         run_subprocess(cmd, False, 'antsMultivariateTemplateConstruction2.sh')
 
@@ -820,7 +835,7 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1
         tpB = basename(tp)
         for iFn, fn in enumerate(fnCoreg):
             fnIn = join(tp, fn)
-            fnOut = re.sub(r'\.nii(\.gz)?$','_to_template.nii.gz', fnIn)
+            fnOut = strip_nifti_ext(fnIn) + '_to_template.nii.gz'
             ref = join(dirOut, 'template0.nii.gz')
             warp = join(dirOut, f'{tpB}_fwc_wls_dti_FA_05{iTP}1Warp.nii.gz')
             affine = join(dirOut, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
@@ -862,7 +877,10 @@ def coreg_merge_masks(timepoints = [], masks = [], label=None, dirTemplate = Non
                     nii = nib.load(fnIn)
                     validate_roi_labels(nii.get_fdata(), 'ROI mask in DWI space', fnIn)
                     copy_as_nii_gz(fnIn, fnOut)
-                if len(timepoints)>1:
+                if len(timepoints)==1:
+                    # on the DWI grid, so reoriented like the maps
+                    reorient_to_fsl_standard(fnOut)
+                else:
                     fnIn = fnOut
                     fnOut = join(tp, label+'_to_template.nii.gz')
                     ref = join(dirTemplate, 'template0.nii.gz')
@@ -940,7 +958,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
     
     tpAll = [basename(tp) for tp in dirTP]
     
-    skelBase = re.sub(r'\.nii(\.gz)?$','',basename(skelMask))
+    skelBase = strip_nifti_ext(basename(skelMask))
     niiMask = nib.load(skelMask)
     mask = binarise_mask(niiMask.get_fdata(), 'skeleton mask', skelMask)
 
@@ -971,7 +989,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         timeptT = tpAll[0]
 
     skelSuffix = 'intersection'
-    save_nifti(join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'.nii.gz'), maskIntersection, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
+    save_nifti(join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'.nii.gz'), maskIntersection, niiMask.affine, niiMask.header, dtype='uint8')
 
     voxelsIntersection = np.count_nonzero(maskIntersection)
     voxels.append(voxelsIntersection)
@@ -997,11 +1015,11 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         # label-2 version is only used for the QC image
         skelSuffixL2 = skelSuffix + '_Emask-as-label2'
         pnameSkelIntersExcLabelled = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixL2+'.nii.gz')
-        save_nifti(pnameSkelIntersExcLabelled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
+        save_nifti(pnameSkelIntersExcLabelled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8')
 
         skelSuffix = skelSuffix + '_Emask'
         pnameSkelIntersExc = join(dirTBSS, 'stats', skelBase+'_'+skelSuffix+'.nii.gz')
-        save_nifti(pnameSkelIntersExc, maskIntersection, niiMask.affine, niiMask.header, dtype='uint8', scale=False)
+        save_nifti(pnameSkelIntersExc, maskIntersection, niiMask.affine, niiMask.header, dtype='uint8')
 
         voxels.append(np.count_nonzero(maskIntersection))
         timept.append(timeptT)
@@ -1106,7 +1124,7 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
 
 def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None):
     
-    skelBase = re.sub(r'\.nii(\.gz)?$','', basename(skelMask))
+    skelBase = strip_nifti_ext(basename(skelMask))
     skelMaskInters = join(dirTBSS, 'stats', skelBase+'_intersection_Emask.nii.gz')
     if not exists(skelMaskInters):
         skelMaskInters = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
@@ -1129,7 +1147,7 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
         
         niiROI = nib.load(fnR)
         roi = niiROI.get_fdata()
-        roiBase = re.sub(r'\.nii(\.gz)?$','', basename(fnR))
+        roiBase = strip_nifti_ext(basename(fnR))
         roiSuffix = roiBase.removeprefix(skelBase+'_')
 
         for mapName, _ in fnNonFA.items():
@@ -1201,14 +1219,14 @@ def deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP, relabel=False):
     renumbered 1..K for the deprojection and restored afterwards. The
     renumbering keeps their order, so where labels meet, the one that wins is
     the same as without it."""
-    fnameFAt = "FA-for-tbss-long" if len(dirTP) > 1 else "fwc_wls_dti_FA_05"
+    fnameFAt = tbss_fa_name(len(dirTP))
     fnBase = basename(fn)
     labels = None
     src = fn
     if relabel:
         nii = nib.load(fn)
         consecutive, labels = consecutive_labels(nii.get_fdata())
-        src = re.sub(r'\.nii(\.gz)?$', '_consecutive.nii.gz', fn)
+        src = strip_nifti_ext(fn) + '_consecutive.nii.gz'
         save_nifti(src, consecutive, nii.affine, nii.header, ROI_LABEL_DTYPE)
 
     with contextlib.chdir(join(dirTBSS,'stats')):
@@ -1239,7 +1257,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
     from create_qc_image import create_qc_image
     from create_html_with_png import create_html_with_png
     
-    skelBase = re.sub(r'\.nii(\.gz)?$','', basename(skelMask))
+    skelBase = strip_nifti_ext(basename(skelMask))
     skelMask = join(dirTBSS, 'stats', skelBase+'_intersection_Emask-as-label2.nii.gz')
     emaskExists = 1
     if not exists(skelMask):
@@ -1249,10 +1267,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
     # ROI maps are kept for inspection with '--qc 2', not shown in the report.
     fnROI = [skelMask] + (qc_label_maps(dirTBSS) if args.qc >= 2 else [])
 
-    if len(dirTP)>1:
-        fnameFAt = "FA-for-tbss-long"
-    else:
-        fnameFAt = "fwc_wls_dti_FA_05"
+    fnameFAt = tbss_fa_name(len(dirTP))
 
     for fn in fnROI:
         deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP,
@@ -1313,7 +1328,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
         fnames.append(join(dirTBSS, 'stats', f'all_{tpB}_MD.nii.gz'))
         fnamesBmask.append(join(dirTBSS, 'stats', f'all_{tpB}_bmask.nii.gz'))
 
-    fnROI_base = re.sub(r'\.nii(\.gz)?$','', basename(fnROI[0]))
+    fnROI_base = strip_nifti_ext(basename(fnROI[0]))
     fnSkeleton = join(dirTBSS, 'stats', fnROI_base+'_to_all_FA.nii.gz')
     fnameCmask = join(dirTBSS, 'stats', 'mean_FA_mask.nii.gz')
     fnPNG = fnPNG + [create_qc_image(fnames, vlim, labels, fnSkeleton, fnamesBmask, fnameCmask)]
@@ -1321,7 +1336,7 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
 
     print('\nSaving QC to:\n ', fnHTML)
 
-    create_html_with_png(fnHTML, fnPNG, captions, None, fnCSV, args)
+    create_html_with_png(fnHTML, fnPNG, captions, fnCSV, args)
 
     if args.qc < 2:
         safe_rmtree(dirQC, args.dirOutput)
@@ -1330,12 +1345,21 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
 ###########################################################################
 # Helper functions
 
-def save_nifti(fname, arr, affine, header, dtype='float32', scale=False):
-    niiNew = nib.Nifti1Image(arr, affine, header)    
+def save_nifti(fname, arr, affine, header, dtype='float32'):
+    niiNew = nib.Nifti1Image(arr, affine, header)
     niiNew.set_data_dtype(dtype)
-    if not scale:
-        niiNew.header.set_slope_inter(1, 0)
+    niiNew.header.set_slope_inter(1, 0)
     nib.save(niiNew, fname)
+
+
+def strip_nifti_ext(fn):
+    """'fn' without a trailing '.nii' or '.nii.gz'."""
+    return re.sub(r'\.nii(\.gz)?$', '', fn)
+
+
+def tbss_fa_name(nTP):
+    """Base name of the FA image TBSS is run on."""
+    return "FA-for-tbss-long" if nTP > 1 else "fwc_wls_dti_FA_05"
 
 
 def binarise_mask(img, label, fname):
@@ -1414,38 +1438,102 @@ def validate_roi_labels(img, label, fname):
     return labels.astype(ROI_LABEL_DTYPE)
 
 
-def copy_as_nii_gz(fnIn, fnOut, dtype=None):
+def copy_as_nii_gz(fnIn, fnOut):
     """Place 'fnIn' at 'fnOut', whose name always ends in '.nii.gz'. A gzipped
     input is copied verbatim; an uncompressed one is re-encoded, because nibabel,
-    FSL and ANTs pick the codec from the file *name*. 'dtype' defaults to the
-    input's own. With no dtype override, both the raw stored values and NIfTI
-    slope/intercept are retained so the decoded values stay exactly equal."""
+    FSL and ANTs pick the codec from the file *name*. Raw stored values and
+    slope/intercept are kept, so the decoded values stay exactly equal."""
     if fnIn.endswith('.nii.gz'):
         copy2(fnIn, fnOut)
     else:
         nii = nib.load(fnIn)
-        if dtype is None:
-            raw = np.asanyarray(nii.dataobj.get_unscaled())
-            niiNew = nib.Nifti1Image(raw, nii.affine, nii.header)
-            niiNew.set_data_dtype(nii.get_data_dtype())
-            niiNew.header.set_slope_inter(nii.dataobj.slope, nii.dataobj.inter)
-            nib.save(niiNew, fnOut)
-        else:
-            save_nifti(fnOut, nii.get_fdata(), nii.affine, nii.header, dtype)
+        raw = np.asanyarray(nii.dataobj.get_unscaled())
+        niiNew = nib.Nifti1Image(raw, nii.affine, nii.header)
+        niiNew.set_data_dtype(nii.get_data_dtype())
+        niiNew.header.set_slope_inter(nii.dataobj.slope, nii.dataobj.inter)
+        nib.save(niiNew, fnOut)
+
+
+#--- FSL's standard voxel order. LAS and RAS (validated; FSL handles the x flip)
+#    are left alone; any other order starts FLIRT 90-180 degrees off, and FNIRT
+#    then ran >15 min instead of ~1 on the reference subject stored as LPS.
+FSL_STANDARD_AXCODES = ('L', 'A', 'S')
+
+#--- Per-timepoint maps used by TBSS and QC in a cross-sectional run.
+FSL_REORIENTED_MAPS = ('wls_dti_FA.nii.gz', 'wls_dti_MD.nii.gz', 'wls_dti_FW.nii.gz',
+                       'fwc_wls_dti_FA.nii.gz', 'fwc_wls_dti_FA_05.nii.gz',
+                       'brain_mask.nii.gz')
+
+
+def needs_fsl_reorientation(affine):
+    """True unless 'affine' stores voxels as LAS or RAS."""
+    return nib.aff2axcodes(affine)[1:] != FSL_STANDARD_AXCODES[1:]
+
+
+def fsl_reorientation_source(affines):
+    """The voxel order (e.g. 'LPS') the maps are reordered from, or None. Only a
+    cross-sectional run is reordered: the longitudinal template works in world space."""
+    if len(affines) != 1 or not needs_fsl_reorientation(affines[0]):
+        return None
+    return ''.join(nib.aff2axcodes(affines[0]))
+
+
+def mixed_voxel_order_warning(voxelOrder, tp):
+    """A warning when the timepoints' voxel orders differ, else None."""
+    if len(set(voxelOrder)) < 2:
+        return None
+    shown = ', '.join(f'{o} ({t})' for o, t in zip(voxelOrder, tp))
+    return (f'\nWARNING: the timepoints are stored in different voxel orders: {shown}.\n'
+            f' This affects the longitudinal change. Convert and preprocess all timepoints identically.')
+
+
+def reorient_to_fsl_standard(fn):
+    """Rewrite 'fn' in place in LAS order if needs_fsl_reorientation(); returns
+    whether it did. Pure voxel permutation: values, dtype, scaling and world
+    positions are kept, nothing is resampled."""
+    nii = nib.load(fn)
+    if not needs_fsl_reorientation(nii.affine):
+        return False
+    ornt = ornt_transform(io_orientation(nii.affine), axcodes2ornt(FSL_STANDARD_AXCODES))
+    raw = apply_orientation(np.asanyarray(nii.dataobj.get_unscaled()), ornt)
+    affine = nii.affine @ inv_ornt_aff(ornt, nii.shape)
+    niiNew = nib.Nifti1Image(raw, affine, nii.header)
+    niiNew.set_data_dtype(nii.get_data_dtype())
+    niiNew.header.set_slope_inter(nii.dataobj.slope, nii.dataobj.inter)
+    # keep the codes, and the voxel sizes exactly: recomputed from the affine they
+    # can move by a float32 ULP, which FSL and ANTs amplify into the metrics
+    niiNew.header.set_sform(affine, int(nii.header['sform_code']))
+    niiNew.header.set_qform(affine, int(nii.header['qform_code']))
+    zooms = list(nii.header.get_zooms())
+    for i, (j, _) in enumerate(ornt.astype(int)):
+        zooms[j] = nii.header.get_zooms()[i]
+    niiNew.header.set_zooms(zooms)
+    # freq/phase/slice axes move too, as in nibabel's as_reoriented()
+    niiNew.header.set_dim_info(*[None if d is None else int(ornt[d, 0])
+                                 for d in nii.header.get_dim_info()])
+    nib.save(niiNew, fn)
+    return True
 
 
 def run_subprocess(cmd, displayStdout, label):
     print(f"Calling {label} command with:")
     print(cmd, '\n')
-    output = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True)
-    if output.returncode != 0:
-        print("STDOUT/STDERR:")
-        print(output.stdout.decode("utf-8"))
-        raise DeltaSvdError(f"The '{label}' command failed with exit code {output.returncode}. "
+    # streamed when displayed; otherwise kept for the failure report only
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True,
+                            text=True, encoding='utf-8', errors='replace')
+    held = []
+    for line in proc.stdout:
+        if displayStdout:
+            print(line, end='')
+        else:
+            held.append(line)
+    proc.wait()
+    if proc.returncode != 0:
+        if held:
+            print("STDOUT/STDERR:")
+            print(''.join(held))
+        raise DeltaSvdError(f"The '{label}' command failed with exit code {proc.returncode}. "
                             f"Its stdout/stderr is printed above.")
-    else:
-        stdout = output.stdout.decode("utf-8")
-        if displayStdout and len(stdout)>0 and not stdout.isspace(): print(stdout)
 
 
 def section_header(text, startPrevious = None):
@@ -1487,6 +1575,8 @@ def write_run_manifest(fname, args, startedAt, outputs, completedAt=None):
         'steps_completed': list(args.steps),
         'qc_mode': args.qc,
         'outputs': list(outputs),
+        # stored voxel order of each timepoint's DWI, before any reordering
+        'voxel_order': dict(zip(args.tp, args.voxelOrder)),
     }
     temporary = fname + '.tmp'
     try:
@@ -1657,34 +1747,22 @@ def safe_rmtree(path, parent):
                             f"directory: {path}")
     rmtree(path)
     
-def assertPositiveJobs(s):
-    try:
-        v = int(s)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"--para (number of parallel ANTs registration jobs) must be a positive integer; you provided '{s}'")
-    if v < 1:
-        raise argparse.ArgumentTypeError(f'--para (number of parallel ANTs registration jobs) must be at least 1; you provided {s}')
-    return v
+def positive_int(option):
+    """An argparse 'type' accepting integers >= 1, naming 'option' in its errors."""
+    def check(s):
+        try:
+            v = int(s)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{option} must be a positive integer; you provided '{s}'")
+        if v < 1:
+            raise argparse.ArgumentTypeError(f'{option} must be at least 1; you provided {s}')
+        return v
+    return check
 
 
-def assertPositiveRegistrations(s):
-    try:
-        v = int(s)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"--numRegistrations (iterations of the template construction) must be a positive integer; you provided '{s}'")
-    if v < 1:
-        raise argparse.ArgumentTypeError(f'--numRegistrations (iterations of the template construction) must be at least 1; you provided {s}')
-    return v
-
-
-def assertPositiveItkThreads(s):
-    try:
-        v = int(s)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"--itkThreads (ITK threads per ANTs registration job) must be a positive integer; you provided '{s}'")
-    if v < 1:
-        raise argparse.ArgumentTypeError(f'--itkThreads (ITK threads per ANTs registration job) must be at least 1; you provided {s}')
-    return v
+assertPositiveJobs = positive_int('--para (number of parallel ANTs registration jobs)')
+assertPositiveRegistrations = positive_int('--numRegistrations (iterations of the template construction)')
+assertPositiveItkThreads = positive_int('--itkThreads (ITK threads per ANTs registration job)')
 
 
 def assertBValue(s):
@@ -1747,7 +1825,7 @@ def iniParser():
     group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s) and on their grid (same dimensions and affine). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
     group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all timepoints. Number of arguments should correspond to number of DWI image(s). Labels must be plain names without path separators, traversal or whitespace and must not collide with internal working directories. Labels have to be unique, and 'all' is reserved for the rows summarising all timepoints. If argument not provided, timepoints are labelled consecutively as TP01, TP02, and so on.")
     group0.add_argument("--id", metavar='label', type=str, help="optional subject ID. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple subjects.")
-    group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'. For longitudinal input, its path must not contain whitespace.")
+    group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
     group1 = parser.add_argument_group('additional masking')
     group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, i.e. on the grid of the DWI image (same dimensions and affine), used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. A bare file name (without a folder) is looked for next to the DWI image of that timepoint; a path containing a folder is used as given. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
     group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space, i.e. on the grid of the DWI image (same dimensions and affine). One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
@@ -1805,7 +1883,7 @@ def pipeline_delta_svd():
         flist = getattr(args,attr)
         inferred = flist is None
         if inferred:
-            flist = [re.sub(r'\.nii(\.gz)?$', ext, fn) for fn in args.dwi]
+            flist = [strip_nifti_ext(fn) + ext for fn in args.dwi]
         elif len(flist) != len(args.dwi):
             if len(flist) == 1:
                 flist = flist * len(args.dwi)
@@ -1938,7 +2016,20 @@ def pipeline_delta_svd():
     check_mni_grid(args.skeletonMask, 'skeleton mask')
     if args.RmaskMNI is not None:
         check_mni_grid(args.RmaskMNI, 'ROI mask in MNI space')
-    
+
+    # Carried on 'args' for the QC report and manifest: storage order affects
+    # the results. The masks share the DWI grid.
+    affines = [nib.load(dwi).affine for dwi in args.dwi]
+    args.voxelOrder = [''.join(nib.aff2axcodes(a)) for a in affines]
+    warning = mixed_voxel_order_warning(args.voxelOrder, args.tp)
+    if warning:
+        print(warning)
+    args.reorientedFrom = fsl_reorientation_source(affines)
+    if args.reorientedFrom is not None:
+        print(f'\nNOTE: the DWI image stores its voxels as {args.reorientedFrom}. The maps '
+              f'will be reordered to {"".join(FSL_STANDARD_AXCODES)} (no resampling) '
+              f'before TBSS, whose registration needs LAS or RAS input.')
+
     dirTemp = join(args.dirOutput, 'delta-svd_temp')
     dirTP = [join(dirTemp, tp) for tp in args.tp] #-- folders for all timepoints
     dirTemplate = join(dirTemp,'template')
@@ -2094,6 +2185,13 @@ def pipeline_delta_svd():
                 imgBmask[imgFAt==0] = 0
             save_nifti(join(dirTP[i],'brain_mask.nii.gz'), imgBmask, niiBmask.affine, niiBmask.header, dtype='uint8')
 
+            # cross-sectional only: the ANTs template works in world space
+            if len(dirTP) == 1 and args.reorientedFrom is not None:
+                print(f'Reordering the voxels of the maps from {args.reorientedFrom} to '
+                      f'{"".join(FSL_STANDARD_AXCODES)} for TBSS.')
+                for fn in FSL_REORIENTED_MAPS:
+                    reorient_to_fsl_standard(join(dirTP[i], fn))
+
     
     
     
@@ -2112,10 +2210,10 @@ def pipeline_delta_svd():
 
     # Run TBSS
     if len(dirTP)>1:
-        fnameFAt = join(dirTemplate, "FA-for-tbss-long.nii.gz")
+        fnameFAt = join(dirTemplate, tbss_fa_name(len(dirTP)) + ".nii.gz")
         tempText = ["template created from ","s"]
     else:
-        fnameFAt = join(dirTP[0], "fwc_wls_dti_FA_05.nii.gz")
+        fnameFAt = join(dirTP[0], tbss_fa_name(len(dirTP)) + ".nii.gz")
         tempText = ["",""]
     if 'tbss' in args.steps:
         startTime = section_header('TBSS on {}FA image{}'.format(*tempText), startTime)
@@ -2155,7 +2253,7 @@ def pipeline_delta_svd():
             for roi in uROI:
                 imgT = imgROI.copy()
                 imgT[imgROI!=roi] = 0
-                fnOut = re.sub(r'\.nii(\.gz)?$','-{:02d}.nii.gz'.format(roi), Rmask)
+                fnOut = strip_nifti_ext(Rmask) + '-{:02d}.nii.gz'.format(roi)
                 save_nifti(fnOut, imgT>0, niiROI.affine, niiROI.header, 'uint8')
                 run_tbss_non_fa(fnOut, 'ROI-{:02d}'.format(roi), dirTBSS)
             flagAdditionalMasks = True

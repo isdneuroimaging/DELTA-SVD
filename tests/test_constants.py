@@ -12,6 +12,7 @@ def test_constants_pinned_to_their_validated_values():
     assert c.SHELL_TOL == 25
     assert c.MIN_DIRECTIONS == 12
     assert c.RECOMMENDED_DIRECTIONS == 20
+    assert c.ANTS_TEMPLATE_INIT == "/opt/scripts/FMRIB58_FA_2mm_crop.nii.gz"
 
 
 def test_pipeline_and_report_share_the_constants(delta_svd):

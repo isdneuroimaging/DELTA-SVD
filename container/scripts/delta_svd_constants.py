@@ -28,6 +28,9 @@ SHELL_TOL = 25
 #    identifies a run inside the image.
 IMAGE_SCRIPT_DIR = "/opt/scripts"
 
+#--- Initial target of the longitudinal template construction (ANTs '-z').
+ANTS_TEMPLATE_INIT = IMAGE_SCRIPT_DIR + "/FMRIB58_FA_2mm_crop.nii.gz"
+
 #--- Environment the image's FSL, ANTs and BLAS are selected by. The Dockerfile
 #    sets the same values as ENV (a test keeps the two in step). Apptainer keeps
 #    those over host variables of the same name, but they can still be replaced
@@ -36,8 +39,11 @@ IMAGE_SCRIPT_DIR = "/opt/scripts"
 #    FSLDIR or ANTSPATH would run another FSL or ANTs, and another
 #    OPENBLAS_CORETYPE another BLAS kernel, all of which change the metrics.
 #    PYTHONNOUSERSITE keeps the Python subprocesses (e.g. fsl_sub) off
-#    ~/.local in a home that Apptainer mounts.
+#    ~/.local in a home that Apptainer mounts. PATH selects the FSL and ANTs
+#    entry commands, which are called by name; its tail is the base image's.
 IMAGE_ENVIRONMENT = {
+    "PATH": "/opt/scripts:/opt/conda/bin:/opt/ants-2.4.3/bin:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "FSLDIR": "/opt/conda",
     "FSLOUTPUTTYPE": "NIFTI_GZ",
     "ANTSPATH": "/opt/ants-2.4.3/bin",
