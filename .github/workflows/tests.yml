@@ -24,17 +24,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # TEMPORARY: diagnose container DNS failure; remove before merge.
-      - name: Diagnose Ubuntu archive DNS
-        continue-on-error: true
-        run: |
-          grep -rh '^URIs:\|^deb ' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | sort -u || true
-          for name in archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com ports.ubuntu.com registry-1.docker.io; do
-            for srv in 168.63.129.16 1.1.1.1 8.8.8.8; do
-              echo "== $name @ $srv: $(dig +short +time=3 +tries=1 "$name" @"$srv" | tr '\n' ' ') status=$(dig +time=3 +tries=1 "$name" @"$srv" | grep -o 'status: [A-Z]*')"
-            done
-          done
-          dig +time=3 +tries=1 archive.ubuntu.com @168.63.129.16 || true
       - run: tests/run-in-locked-env.sh
 
   compileall:
