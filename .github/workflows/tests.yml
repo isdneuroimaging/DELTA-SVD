@@ -24,6 +24,24 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # TEMPORARY: diagnose container DNS failure; remove before merge.
+      - name: Diagnose container DNS
+        continue-on-error: true
+        run: |
+          set -x
+          cat /etc/resolv.conf
+          resolvectl status || true
+          getent hosts archive.ubuntu.com || true
+          docker version --format '{{.Server.Version}}'
+          cat /etc/docker/daemon.json || true
+          docker network inspect bridge --format '{{json .IPAM.Config}} {{json .Options}}'
+          sudo iptables -S FORWARD | head -20 || true
+          sudo iptables -t nat -S POSTROUTING || true
+          for net in bridge host; do
+            echo "=== --network $net"
+            docker run --rm --network "$net" ubuntu:noble bash -c \
+              'cat /etc/resolv.conf; getent hosts archive.ubuntu.com || echo RESOLVE_FAIL; (exec 3<>/dev/tcp/1.1.1.1/53 && echo TCP53_OK) 2>&1 || echo TCP53_FAIL; (exec 3<>/dev/tcp/91.189.91.82/80 && echo IP80_OK) 2>&1 || echo IP80_FAIL' || true
+          done
       - run: tests/run-in-locked-env.sh
 
   compileall:
