@@ -39,7 +39,7 @@ exec docker run --rm -i --platform linux/amd64 --user 0:0 --entrypoint bash \
     "${TEST_IMAGE}" -seu -- "$@" <<'BASH'
 set -o pipefail
 if [ -z "$DELTA_SVD_TEST_IMAGE" ]; then
-    apt-get update -qq
+    apt-get update -qq -o APT::Update::Error-Mode=any
     apt-get install -y -q --no-install-recommends \
         ca-certificates=20260816* \
         libc6=2.39-0ubuntu8.9 \
