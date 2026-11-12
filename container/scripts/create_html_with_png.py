@@ -57,7 +57,7 @@ def define_notes(args):
   return notes
   
 
-def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, args=None):
+def create_html_with_png(fnHTML, fnamesPNG, captions=None, df=None, args=None):
     
   current_date = datetime.datetime.now()
   date_string = current_date.strftime("%Y-%m-%d %H:%M:%S")
@@ -130,6 +130,19 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
                    'metrics are noisy. Do not pool with results from data with more '
                    'directions.">few</span>')
         meta_rows.append(('Diffusion directions', f'{shown}{caution}'))
+    #--- always shown: the storage order affects the results
+    voxelOrder = getattr(args, 'voxelOrder', None)
+    if voxelOrder:
+        shown = (html.escape(voxelOrder[0]) if len(set(voxelOrder)) == 1 else
+                 ', '.join(f'{html.escape(o)} ({html.escape(str(tp))})'
+                           for o, tp in zip(voxelOrder, args.tp)))
+        if getattr(args, 'reorientedFrom', None):
+            shown += ', reordered to LAS for TBSS (no resampling)'
+        if len(set(voxelOrder)) > 1:
+            shown += (' <span class="tag tag--alt tag--tip" tabindex="0" data-default="The '
+                      'timepoints are stored in different voxel orders, which affects the '
+                      'longitudinal change. Convert and preprocess them identically.">mixed</span>')
+        meta_rows.append(('Voxel order', shown))
     if args.RmaskMNI is not None:
         meta_rows.append(('ROI mask (MNI)', path_code(args.RmaskMNI)))
     if args.hemispheres:
@@ -171,25 +184,15 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
     function_call = f'<p class="label">DELTA-SVD call</p><pre class="code">{html.escape(args.function_call)}</pre>'
 
   #--- notes, shown below the pictures
-  if notes is None:
-     notes = define_notes(args)
-  else:
-     notes = '<br>'.join(notes)
-     notes = f'<p class="text">{notes}</p>'
+  notes = define_notes(args)
   if notes:
      notes = '<p class="label">Method summary</p>' + notes
 
-  fnCSV = None
-  if df is None:
-      fnCSV = os.path.splitext(fnHTML)[0] + '.csv'
-  elif isinstance(df, str):
-      fnCSV = df
-  if fnCSV is not None:
-    if os.path.exists(fnCSV):
-        # keep '007' / '01' as written; a missing ID column (no --id) is fine
-        df = pd.read_csv(fnCSV, converters={'ID': str, 'timepoint': str})
-    else:
-        df = None
+  #--- 'df' is a results table or the path of one, which may not exist
+  if isinstance(df, str):
+    fnCSV = df
+    # keep '007' / '01' as written; a missing ID column (no --id) is fine
+    df = pd.read_csv(fnCSV, converters={'ID': str, 'timepoint': str}) if os.path.exists(fnCSV) else None
   if df is None:
       dfHTML = ''
   else:
@@ -206,7 +209,7 @@ def create_html_with_png(fnHTML, fnamesPNG, captions=None, notes=None, df=None, 
      captions = [''] * len(fnamesPNG)
   else:
      captions = [captions[i] if i<len(captions) else '' for i,_ in enumerate(fnamesPNG)]
-  captions = [f'<p class="label">{cap}</p>' if len(cap)>0 else '' for cap in captions]
+  captions = [f'<p class="label">{html.escape(cap)}</p>' if len(cap)>0 else '' for cap in captions]
 
   images = []
   for iPng, fnPNG in enumerate(fnamesPNG):

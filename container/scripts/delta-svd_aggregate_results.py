@@ -142,6 +142,8 @@ if __name__ == "__main__":
     dfs = list()
     nRows = list()
     fnamesOk = list()
+    versions = dict()           # pipeline_version -> files, from the run manifests present
+    voxelOrders = dict()        # stored voxel order -> files, longitudinal runs only
     for file in fnames:
         try:
             dfT = pd.read_csv(file, converters={'ID': str, 'timepoint': str})
@@ -162,11 +164,34 @@ if __name__ == "__main__":
             with open(os.path.join(os.path.dirname(file), 'delta-svd_run_manifest.json')) as fh:
                 manifest = json.load(fh)
             outputs, steps = manifest.get('outputs'), manifest.get('steps_completed')
+            version = manifest.get('pipeline_version')
+            # cross-sectional results do not depend on the storage order
+            orders = manifest.get('voxel_order') if manifest.get('processing_mode') == 'longitudinal' else None
         except (OSError, ValueError, AttributeError):
-            outputs, steps = None, None
+            outputs, steps, version, orders = None, None, None, None
+        # Only attribute provenance to a CSV this manifest says it extracted.
+        if (isinstance(outputs, list) and isinstance(steps, list) and 'extract' in steps
+                and os.path.basename(file) in outputs):
+            if isinstance(version, str):
+                versions.setdefault(version, []).append(file)
+            if isinstance(orders, dict):
+                for order in set(orders.values()):
+                    voxelOrders.setdefault(str(order), []).append(file)
         if (isinstance(outputs, list) and isinstance(steps, list) and 'extract' in steps
                 and os.path.basename(file) not in outputs):
             print('WARNING: Not listed in the run manifest next to it, so it may be from an earlier run:', file)
+    if len(versions) > 1:
+        print('\nWARNING: The run manifests name different DELTA-SVD versions. Results from '
+              'different MAJOR.MINOR versions must not be pooled; for patch versions, check the '
+              'release notes for compatibility notes:')
+        for version, files in sorted(versions.items()):
+            print(f'  {version}: {len(files)} file(s), e.g. {files[0]}')
+    if len(voxelOrders) > 1:
+        print('\nWARNING: The run manifests of longitudinal runs name different voxel orders of '
+              'the input images. Longitudinal results depend on the storage order, so do not pool '
+              'them across orders:')
+        for order, files in sorted(voxelOrders.items()):
+            print(f'  {order}: {len(files)} file(s), e.g. {files[0]}')
     if len(fnamesOk)>0:
         fnames = fnamesOk
     else:

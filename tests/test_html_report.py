@@ -37,6 +37,25 @@ def _args(**overrides):
 # ---------------------------------------------------------------------------
 # define_notes() branch matrix
 
+@pytest.mark.parametrize("tp, voxelOrder, reorientedFrom, expected", [
+    (["TP01"], ["LAS"], None, "<td>LAS</td>"),
+    (["TP01"], ["LPS"], "LPS", "<td>LPS, reordered to LAS for TBSS (no resampling)</td>"),
+    (["BL", "FU"], ["RAS", "RAS"], None, "<td>RAS</td>"),
+    (["BL", "FU"], ["LAS", "RAS"], None, "LAS (BL), RAS (FU) <span"),
+])
+def test_report_always_records_the_voxel_order(tmp_path, tiny_png, tp, voxelOrder, reorientedFrom, expected):
+    fnHTML = tmp_path / "qc.html"
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
+                             _args(tp=tp, voxelOrder=voxelOrder, reorientedFrom=reorientedFrom,
+                                   dwi=[f"/data/{t}.nii.gz" for t in tp],
+                                   bmask=[f"/data/{t}_brainmask.nii.gz" for t in tp],
+                                   Emask=[None] * len(tp), Rmask=[None] * len(tp)))
+    body = fnHTML.read_text().split("</style>")[1]
+    assert "Voxel order" in body
+    assert expected in body
+    assert (">mixed</span>" in body) == (len(set(voxelOrder)) > 1)
+
+
 def test_define_notes_none_args_returns_empty_string():
     assert chp.define_notes(None) == ""
 
@@ -92,7 +111,7 @@ def metrics_df():
 
 def test_create_html_with_png_smoke(tmp_path, tiny_png, metrics_df):
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, metrics_df, _args())
+    chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], metrics_df, _args())
 
     html = fnHTML.read_text()
     for token in ["PSMD", "MSMD", "MSFW", "Results table", "DELTA-SVD", "P01"]:
@@ -110,7 +129,7 @@ def test_create_html_with_png_without_args_or_df(tmp_path, tiny_png):
 def test_create_html_with_png_omits_the_id_row_when_no_id_was_given(tmp_path, tiny_png):
     # '--id' is optional; str(None) used to reach the tab and table as "None"
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, None, _args(id=None))
+    chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, _args(id=None))
 
     html = fnHTML.read_text()
     body = html.split("</style>")[1]                    # the CSS mentions "Subject ID"
@@ -124,7 +143,7 @@ def test_create_html_with_png_omits_the_default_itk_thread_count(tmp_path, tiny_
     # the validated 12 is the norm and stays out of the table, like every other
     # default -- only a deviation is worth the reader's attention
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(tp=["TP01", "TP02"], dwi=["a.nii.gz"] * 2,
                                    bmask=["m.nii.gz"] * 2, Emask=[None] * 2, Rmask=[None] * 2))
     body = fnHTML.read_text().split("</style>")[1]
@@ -134,7 +153,7 @@ def test_create_html_with_png_omits_the_default_itk_thread_count(tmp_path, tiny_
 
 def test_create_html_with_png_flags_a_non_default_itk_thread_count(tmp_path, tiny_png):
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(tp=["TP01", "TP02"], itkThreads=6, dwi=["a.nii.gz"] * 2,
                                    bmask=["m.nii.gz"] * 2, Emask=[None] * 2, Rmask=[None] * 2))
     body = fnHTML.read_text().split("</style>")[1]
@@ -145,7 +164,7 @@ def test_create_html_with_png_flags_a_non_default_itk_thread_count(tmp_path, tin
 def test_create_html_with_png_omits_itk_threads_cross_sectionally(tmp_path, tiny_png):
     # a cross-sectional run invokes no ANTs at all, so the setting is meaningless
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None, _args())
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, _args())
     assert "ITK threads" not in fnHTML.read_text().split("</style>")[1]
 
 
@@ -153,7 +172,7 @@ def test_create_html_with_png_records_the_version(tmp_path, tiny_png):
     # results from different versions must not be pooled, so the report has to
     # say which release produced it
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None, _args())
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, _args())
 
     body = fnHTML.read_text().split("</style>")[1]
     assert "<td class=\"key\">DELTA-SVD version</td>" in body
@@ -166,7 +185,7 @@ def test_create_html_with_png_omits_the_version_row_when_unknown(tmp_path, tiny_
     fnHTML = tmp_path / "report.html"
     args = _args()
     del args.version
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None, args)
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, args)
 
     body = fnHTML.read_text().split("</style>")[1]
     assert "DELTA-SVD version" not in body
@@ -175,7 +194,7 @@ def test_create_html_with_png_omits_the_version_row_when_unknown(tmp_path, tiny_
 
 def test_create_html_with_png_omits_the_default_b_value_range(tmp_path, tiny_png):
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None, _args())
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, _args())
 
     body = fnHTML.read_text().split("</style>")[1]
     assert "b-value range" not in body
@@ -183,7 +202,7 @@ def test_create_html_with_png_omits_the_default_b_value_range(tmp_path, tiny_png
 
 def test_create_html_with_png_flags_a_custom_b_value_range(tmp_path, tiny_png):
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(bRange=[900, 1100]))
 
     body = fnHTML.read_text().split("</style>")[1]
@@ -195,7 +214,7 @@ def test_create_html_with_png_records_requested_shells(tmp_path, tiny_png):
     # '--shells' selects the data as much as '--bRange' does, so a report that
     # showed only the (untouched, default) range would misdescribe the run
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(shells=[700, 1000]))
 
     body = fnHTML.read_text().split("</style>")[1]
@@ -207,7 +226,7 @@ def test_create_html_with_png_records_requested_shells(tmp_path, tiny_png):
 def test_create_html_with_png_records_the_direction_count(tmp_path, tiny_png):
     # the angular sampling qualifies every metric in the report
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(nDirections=[30]))
 
     body = fnHTML.read_text().split("</style>")[1]
@@ -220,7 +239,7 @@ def test_create_html_with_png_flags_a_low_direction_count(tmp_path, tiny_png):
     # above the hard floor the run goes through, so the caution has to reach
     # whoever reads the results rather than only the log
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(nDirections=[15]))
 
     body = fnHTML.read_text().split("</style>")[1]
@@ -232,7 +251,7 @@ def test_create_html_with_png_flags_a_low_direction_count(tmp_path, tiny_png):
 def test_create_html_with_png_lists_direction_counts_per_timepoint(tmp_path, tiny_png):
     # timepoints can differ - a single number would hide the weaker one
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(tp=["TP01", "TP02"], nDirections=[30, 24],
                                    dwi=["a.nii.gz"] * 2, bmask=["m.nii.gz"] * 2,
                                    Emask=[None] * 2, Rmask=[None] * 2))
@@ -244,7 +263,7 @@ def test_create_html_with_png_lists_direction_counts_per_timepoint(tmp_path, tin
 def test_create_html_with_png_omits_the_direction_row_when_unknown(tmp_path, tiny_png):
     # the count is only known when the fit step ran; '--steps' can skip it
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None, _args())
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, _args())
 
     body = fnHTML.read_text().split("</style>")[1]
     assert "Diffusion directions" not in body
@@ -253,7 +272,7 @@ def test_create_html_with_png_omits_the_direction_row_when_unknown(tmp_path, tin
 
 def test_create_html_with_png_keeps_the_id_row_when_an_id_was_given(tmp_path, tiny_png):
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, None, _args(id="P01"))
+    chp.create_html_with_png(str(fnHTML), [tiny_png], ["Timepoint TP01"], None, _args(id="P01"))
 
     body = fnHTML.read_text().split("</style>")[1]
     assert "<td class=\"key\">Subject ID</td>" in body
@@ -262,7 +281,7 @@ def test_create_html_with_png_keeps_the_id_row_when_an_id_was_given(tmp_path, ti
 
 def test_create_html_with_png_scopes_hemisphere_metadata_to_skeleton(tmp_path, tiny_png):
     fnHTML = tmp_path / "report.html"
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, None,
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None,
                              _args(hemispheres=True))
 
     body = fnHTML.read_text().split("</style>")[1]
@@ -284,8 +303,16 @@ def test_create_html_with_png_keeps_leading_zeros_in_csv_id_and_timepoint(tmp_pa
         "value": [0.00045, 0.0007],
     }).to_csv(fnCSV, index=False)
 
-    chp.create_html_with_png(str(fnHTML), [tiny_png], None, None, str(fnCSV))
+    chp.create_html_with_png(str(fnHTML), [tiny_png], None, str(fnCSV))
 
     table = fnHTML.read_text().split("Results table")[1]
     assert "<td>007</td>" in table
     assert "<td>01</td>" in table
+
+
+def test_captions_are_escaped(tmp_path, tiny_png):
+    fnHTML = tmp_path / "qc.html"
+    chp.create_html_with_png(str(fnHTML), [tiny_png], ['Timepoint "<b>x</b>"'], None, _args())
+    body = fnHTML.read_text().split("</style>")[1]
+    assert "<b>x</b>" not in body
+    assert "&lt;b&gt;x&lt;/b&gt;" in body

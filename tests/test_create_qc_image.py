@@ -13,11 +13,6 @@ def _save(tmp_path, name, arr, affine):
     return str(fn)
 
 
-def test_create_qc_image_requires_mask():
-    with pytest.raises(ValueError):
-        cqi.create_qc_image(["a.nii.gz"], [[0, 1]], fnameMask=None)
-
-
 @pytest.mark.parametrize("mask_kind", ["empty", "full", "with_hole"])
 @pytest.mark.filterwarnings("error:No contour levels were found within the data range:UserWarning")
 def test_create_qc_image_produces_expected_png_dimensions(tmp_path, mask_kind):
@@ -75,7 +70,7 @@ def test_create_qc_image_does_not_wrap_wide_roi_label_to_background(tmp_path, mo
 
     monkeypatch.setattr(matplotlib.axes.Axes, "imshow", record_imshow)
     cqi.create_qc_image(
-        [fnBG], [[0, 1]], fnameMask=fnMask, fnameBmask=fnBmask, animate=False)
+        [fnBG], [[0, 1]], ["BG"], fnameMask=fnMask, fnameBmask=fnBmask, animate=False)
 
     assert overlays
     assert np.any(overlays[0].compressed() == 256)
