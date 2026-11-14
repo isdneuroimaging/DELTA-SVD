@@ -1,7 +1,14 @@
 # Refactoring plan: `delta-svd.py`
 
 Working document for the refactoring session(s). Not part of the product:
-remove it in the last pull request (step 11).
+removed in the last commit (step 11).
+
+All work happens on one branch, one commit per step, and goes to `main` as a
+single pull request. That PR must be merged with **rebase** or a **merge
+commit**, not squash (the repository's recent PRs were squashed): squashing
+would collapse the steps into one commit, so `git bisect` could no longer find
+the step that caused a regression and the per-step verbatim proof would be
+lost.
 
 Baseline: `main` at `b090b67` (v1.0.7). Line numbers below refer to that commit
 and shift as soon as step 1 lands, so locate code by function name.
@@ -51,9 +58,10 @@ them without asking.
 
 ## 2. Rules
 
-1. **One concern per pull request.** A PR either edits code in place or moves
-   code, never both.
-2. **Move PRs are verbatim.** Function bodies, class bodies and constants are
+1. **One step per commit, one concern per commit.** A commit either edits code
+   in place or moves code, never both. Every commit must pass the checks in
+   section 3 on its own, so that each one is a working state.
+2. **Move commits are verbatim.** Function bodies, class bodies and constants are
    not edited. Only import lines, the new file's header, and test patch targets
    change. `tools/check_verbatim_move.py` must report `only verbatim moves`
    (see section 3).
@@ -75,16 +83,22 @@ them without asking.
    sites are listed per step.
 7. **Tests move verbatim too**, apart from the fixture name and patch targets.
    The number of collected cases must not drop.
-8. `PLAN.md`: tick the step in section 5 in the PR that completes it.
+8. `PLAN.md`: tick the step in section 5 in the commit that completes it.
+9. **Commit messages** name the step (`Step 6: move gradient handling to
+   delta_svd_gradients.py`) and, for move commits, include the checker's
+   output.
 
-## 3. Checks for every pull request
+## 3. Checks for every commit
+
+PR CI only tests the branch head, so the first three checks are run locally on
+each commit before the next step starts.
 
 | Check | Command | Expectation |
 | --- | --- | --- |
 | Lint | `python -m pyflakes container/scripts/*.py tools/*.py` | No output for the DELTA-SVD scripts. The vendored `markvcid_fw_mrn.py` is not held to this |
 | Unit tests, local | `python -m pytest -q` in a venv from `tests/requirements.txt` | Baseline 484 cases (see note) plus any added |
-| Verbatim proof (move PRs) | `tools/check_verbatim_move.py --base origin/main` | `RESULT: only verbatim moves.` Paste the output into the PR description |
-| Pinned stack | PR CI (`tests.yml`: `run-in-locked-env.sh`, `compileall`, `hadolint`) | Green |
+| Verbatim proof | `tools/check_verbatim_move.py` (compares with the parent commit, `HEAD~1`) | `RESULT: only verbatim moves.` Paste the output into the commit message of move commits |
+| Pinned stack | PR CI (`tests.yml`: `run-in-locked-env.sh`, `compileall`, `hadolint`) on the branch head. Locally `tests/run-in-locked-env.sh` where Docker is available | Green |
 | Longitudinal, exact | See below | `RESULT: no metric value and no voxel count changed.` for both subjects |
 
 Notes:
@@ -100,18 +114,18 @@ Notes:
   top-level statements of `delta-svd.py`. It does not prove that a moved
   function still resolves the same names: a missing import shows up in
   pyflakes or the tests, and a *different* object under the same name would
-  not. So in a move PR, review the import block of the new module by hand
+  not. So in a move commit, review the import block of the new module by hand
   against the names the moved functions use.
-- **`--allow NAME`** exempts definitions an in-place PR is meant to change.
-  Never use it in a move PR, with one exception noted in step 4.
+- **`--allow NAME`** exempts definitions an in-place commit is meant to change.
+  Never use it in a move commit, with one exception noted in step 4.
 - **Longitudinal comparison.** The unit tests do not check metric values. The
   planning session ran in a cloud container without a Docker daemon, and the
   `longitudinal-tests` workflow only accepts a `ghcr.io` image digest, which
   only a version tag produces. So this check has to be run by a maintainer on a
   machine with Docker (`container/build.sh delta-svd:dev`, then
   `tests/run-longitudinal.sh DATASET delta-svd:dev OUT`, as in
-  `CONTRIBUTING.md`), or the PRs are stacked and the release pipeline is the
-  gate. See open decision A. Steps marked **L** in section 5 need it.
+  `CONTRIBUTING.md`), or the release pipeline is the gate. See open decision
+  A. Steps marked **L** in section 5 need it.
 - **QC outputs** are not in the results table. For step 9 compare a `--qc 2`
   run before and after: the NIfTI files in `delta-svd_qc/` byte for byte, and
   `delta-svd_qc.html` ignoring the creation timestamp.
@@ -120,16 +134,18 @@ Notes:
 
 Defaults apply unless the maintainer says otherwise.
 
-- **A. Longitudinal runs.** Default: run locally at three checkpoints (after
-  step 3, after step 6, after step 10), and treat the tagged patch release
-  (`release-build.yml`) as the final gate. Stricter alternative: before merging
-  every **L** step.
-- **B. Where `PLAN.md` lives.** Default: it reaches `main` with step 0 and is
-  deleted in step 11. It is outside the image (`.dockerignore` admits only
-  `container/`, `LICENSE`, `NOTICE`).
-- **C. Number of pull requests.** `main` requires an approving review. Default:
-  one PR per step (12 small PRs). Steps 1 to 3 may be combined into one PR with
-  separate commits if review time is short. Move steps stay separate.
+- **A. Longitudinal runs.** Default: run locally on the commits of step 3,
+  step 6 and step 10, and treat the tagged patch release (`release-build.yml`)
+  as the final gate. If a checkpoint fails, the commits since the previous
+  checkpoint are the suspects; bisect over them. Stricter alternative: on every
+  **L** commit.
+- **B. Where `PLAN.md` lives.** Only on the branch: it is added in the first
+  commit and deleted in the last, so it never stands on `main` on its own. It
+  is outside the image (`.dockerignore` admits only `container/`, `LICENSE`,
+  `NOTICE`).
+- **C. Pull request.** Decided: one PR for all steps, one commit per step,
+  reviewed commit by commit, merged by rebase or merge commit (see top of
+  file). Open it as a draft early so CI runs on every push.
 - **D. Step 10** (`integrate_masks`) rewrites code that writes the masks and
   voxel counts. Default: do it, last and alone. Skipping it is acceptable.
 - **E. Release.** The result ships as a patch release, because the endpoints
@@ -339,7 +355,7 @@ earlier ones.
 
 ```python
 #!/usr/bin/env python3
-"""Prove that a refactoring PR only moved code between the pipeline scripts.
+"""Prove that a refactoring commit only moved code between the pipeline scripts.
 
 Compares every top-level function, class and constant of container/scripts/*.py
 at a base git revision with the working tree, by syntax tree (so comments and
@@ -348,6 +364,8 @@ top-level statements of delta-svd.py (environment and thread pinning, the CPU
 check, the __main__ guard) are unchanged and in the same order.
 
 Usage: tools/check_verbatim_move.py [--base REF] [--allow NAME ...]
+       REF defaults to HEAD~1, the parent of the commit being checked; run it
+       after committing, or with --base HEAD before.
 Exit status: 0 = only moves (plus allowed names), 1 = something changed.
 """
 import argparse, ast, pathlib, subprocess, sys
@@ -384,9 +402,9 @@ def definitions(sources):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--base', default='origin/main')
+    parser.add_argument('--base', default='HEAD~1')
     parser.add_argument('--allow', nargs='*', default=[], metavar='NAME',
-                        help='definitions that are expected to change in this PR')
+                        help='definitions that are expected to change in this commit')
     args = parser.parse_args()
     root = pathlib.Path(subprocess.check_output(
         ['git', 'rev-parse', '--show-toplevel'], text=True).strip())
