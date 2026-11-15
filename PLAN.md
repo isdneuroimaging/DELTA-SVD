@@ -259,7 +259,7 @@ the guard test of step 0 cover those.
     `tests/test_inputs.py`. Tests that call `pipeline_delta_svd()` stay with
     the main script even when they exercise input errors.
 
-- [ ] **Step 6. `delta_svd_qc.py`.** `qc_label_maps`, `consecutive_labels`,
+- [x] **Step 6. `delta_svd_qc.py`.** `qc_label_maps`, `consecutive_labels`,
   `restore_labels`, `deproject_to_native`, `prepare_qc`.
   - `prepare_qc` keeps importing `create_qc_image` and `create_html_with_png`
     inside the function, so the existing patches on those two modules keep

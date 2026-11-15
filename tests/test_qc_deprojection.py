@@ -7,21 +7,22 @@ import pytest
 
 import create_html_with_png
 import create_qc_image
+import delta_svd_qc
 
 
-def test_consecutive_labels_round_trip(delta_svd):
+def test_consecutive_labels_round_trip():
     img = np.array([[[0, 3, 1000], [65535, 3, 0]]], dtype=float)
-    consecutive, labels = delta_svd.consecutive_labels(img)
+    consecutive, labels = delta_svd_qc.consecutive_labels(img)
     assert list(labels) == [3, 1000, 65535]
     assert consecutive.max() == 3
-    assert np.array_equal(delta_svd.restore_labels(consecutive.astype(float), labels), img)
+    assert np.array_equal(delta_svd_qc.restore_labels(consecutive.astype(float), labels), img)
 
 
-def test_consecutive_labels_keep_their_order(delta_svd):
+def test_consecutive_labels_keep_their_order():
     # where deprojected labels meet, tbss_deproject keeps the highest; a
     # monotone renumbering keeps that choice unchanged
     img = np.array([[[5, 700, 20]]], dtype=float)
-    consecutive, _ = delta_svd.consecutive_labels(img)
+    consecutive, _ = delta_svd_qc.consecutive_labels(img)
     assert list(consecutive.ravel()) == [1, 3, 2]
 
 
@@ -35,7 +36,7 @@ def _tbss(tmp_path, labels):
 
 
 @pytest.mark.parametrize("relabel", [True, False])
-def test_deproject_to_native_renumbers_label_maps(delta_svd, tmp_path, monkeypatch, relabel):
+def test_deproject_to_native_renumbers_label_maps(tmp_path, monkeypatch, relabel):
     labels = np.array([[[0, 7, 1000], [0, 7, 3]]])
     fn = _tbss(tmp_path, labels)
     tp = tmp_path / "TP01"
@@ -53,9 +54,9 @@ def test_deproject_to_native_renumbers_label_maps(delta_svd, tmp_path, monkeypat
         seen["max"] = int(img.get_fdata().max())
         nib.save(img, os.path.join("..", "FA", "fwc_wls_dti_FA_05_FA_" + name))
 
-    monkeypatch.setattr(delta_svd, "run_subprocess", fake_run)
-    delta_svd.deproject_to_native(fn, str(dirQC), str(tmp_path / "TBSS"), str(tmp_path / "template"),
-                                  [str(tp)], relabel=relabel)
+    monkeypatch.setattr(delta_svd_qc, "run_subprocess", fake_run)
+    delta_svd_qc.deproject_to_native(fn, str(dirQC), str(tmp_path / "TBSS"), str(tmp_path / "template"),
+                                     [str(tp)], relabel=relabel)
 
     assert seen["max"] == (3 if relabel else 1000)
     out = nib.load(str(dirQC / "TP01_skel_intersection_RmaskMNI.nii.gz")).get_fdata()
@@ -69,7 +70,7 @@ def test_deproject_to_native_renumbers_label_maps(delta_svd, tmp_path, monkeypat
          ("skel_intersection_Rmask-65535.nii.gz", False),
          ("skel_intersection_RmaskMNI.nii.gz", True)]),
 ])
-def test_prepare_qc_deprojects_label_maps_only_when_kept(delta_svd, tmp_path, monkeypatch, qc, expected):
+def test_prepare_qc_deprojects_label_maps_only_when_kept(tmp_path, monkeypatch, qc, expected):
     # DWI-space ROI masks are kept separately so overlaps remain visible in QC 2.
     # A merged '_Rmask.nii.gz' (written by older versions) must be ignored.
     stats = tmp_path / "TBSS" / "stats"
@@ -90,13 +91,23 @@ def test_prepare_qc_deprojects_label_maps_only_when_kept(delta_svd, tmp_path, mo
     dirQC = tmp_path / "delta-svd_qc"
     dirQC.mkdir()
     deprojected = []
-    monkeypatch.setattr(delta_svd, "deproject_to_native",
+    monkeypatch.setattr(delta_svd_qc, "deproject_to_native",
                         lambda fn, *a, relabel=False: deprojected.append((os.path.basename(fn), relabel)))
     monkeypatch.setattr(create_qc_image, "create_qc_image",
                         lambda *a, animate=True, **k: "x.png" if animate else [])
     monkeypatch.setattr(create_html_with_png, "create_html_with_png", lambda *a, **k: None)
 
-    delta_svd.prepare_qc(str(dirQC), str(tmp_path / "qc.html"), "/opt/scripts/skel.nii.gz",
-                         str(tmp_path / "TBSS"), str(tmp_path / "template"), [str(tp)],
-                         "results.csv", SimpleNamespace(qc=qc, dirOutput=str(tmp_path)))
+    delta_svd_qc.prepare_qc(str(dirQC), str(tmp_path / "qc.html"), "/opt/scripts/skel.nii.gz",
+                            str(tmp_path / "TBSS"), str(tmp_path / "template"), [str(tp)],
+                            "results.csv", SimpleNamespace(qc=qc, dirOutput=str(tmp_path)))
     assert deprojected == expected
+
+
+def test_tbss_lookups_take_the_output_path_literally(tmp_path):
+    # '[1]' in the output path is a glob character class; unescaped, every
+    # lookup under it found nothing and the run failed hours in
+    stats = tmp_path / "out[1]" / "TBSS" / "stats"
+    stats.mkdir(parents=True)
+    fn = stats / "skel_intersection_Rmask-01.nii.gz"
+    fn.touch()
+    assert delta_svd_qc.qc_label_maps(str(stats.parent)) == [str(fn)]

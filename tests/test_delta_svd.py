@@ -338,6 +338,7 @@ def test_prepare_qc_deprojects_the_roi_maps_integrate_masks_writes(delta_svd, tm
     # together rather than against hand-named placeholder files.
     import create_html_with_png
     import create_qc_image
+    import delta_svd_qc
 
     kwargs, stats = _tbss_tree(
         tmp_path,
@@ -354,15 +355,15 @@ def test_prepare_qc_deprojects_the_roi_maps_integrate_masks_writes(delta_svd, tm
     dirQC = tmp_path / "delta-svd_qc"
     dirQC.mkdir()
     deprojected = []
-    monkeypatch.setattr(delta_svd, "deproject_to_native",
+    monkeypatch.setattr(delta_svd_qc, "deproject_to_native",
                         lambda fn, *a, relabel=False: deprojected.append((os.path.basename(fn), relabel)))
     monkeypatch.setattr(create_qc_image, "create_qc_image",
                         lambda *a, animate=True, **k: "x.png" if animate else [])
     monkeypatch.setattr(create_html_with_png, "create_html_with_png", lambda *a, **k: None)
 
-    delta_svd.prepare_qc(str(dirQC), str(tmp_path / "qc.html"), kwargs["skelMask"],
-                         kwargs["dirTBSS"], str(tmp_path / "template"), kwargs["dirTP"],
-                         "results.csv", SimpleNamespace(qc=2, dirOutput=str(tmp_path)))
+    delta_svd_qc.prepare_qc(str(dirQC), str(tmp_path / "qc.html"), kwargs["skelMask"],
+                            kwargs["dirTBSS"], str(tmp_path / "template"), kwargs["dirTP"],
+                            "results.csv", SimpleNamespace(qc=2, dirOutput=str(tmp_path)))
 
     # every binary ROI map as written, without relabelling; only the merged MNI map is relabelled
     assert deprojected == [
@@ -1873,16 +1874,6 @@ def test_cross_sectional_run_accepts_whitespace_in_the_output_path(delta_svd, tm
                                       "--skeletonMask", str(skel), "--steps", "qc", "--qc", "0"])
     with pytest.raises(delta_svd.DeltaSvdError, match="contradictory"):
         delta_svd.pipeline_delta_svd()
-
-
-def test_tbss_lookups_take_the_output_path_literally(delta_svd, tmp_path):
-    # '[1]' in the output path is a glob character class; unescaped, every
-    # lookup under it found nothing and the run failed hours in
-    stats = tmp_path / "out[1]" / "TBSS" / "stats"
-    stats.mkdir(parents=True)
-    fn = stats / "skel_intersection_Rmask-01.nii.gz"
-    fn.touch()
-    assert delta_svd.qc_label_maps(str(stats.parent)) == [str(fn)]
 
 
 def test_mixed_voxel_order_warning(delta_svd):
