@@ -230,7 +230,7 @@ the guard test of step 0 cover those.
     *effect* of the start-up statements (`BLAS_THREADS`, `ITK_THREADS`, the
     environment variables) stay with the main script.
 
-- [ ] **Step 4. `delta_svd_gradients.py`.** `MAX_LINES_REPORTED`,
+- [x] **Step 4. `delta_svd_gradients.py`.** `MAX_LINES_REPORTED`,
   `first_non_numeric`, `read_bval_or_bvec`, `write_bval_or_bvec`, `B0_MAX`,
   `BVAL_MIN`, `BVAL_MAX`, `DESIGN_MATRIX_RANK`, `DIRECTION_COS_TOL`,
   `BVEC_UNIT_TOL`, `resolve_b_intervals`, `describe_directions`,
