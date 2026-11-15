@@ -240,7 +240,7 @@ the guard test of step 0 cover those.
     still reads that name in `delta-svd.py`: leave that patch as it is.
   - Tests: `tests/test_gradients.py`.
 
-- [ ] **Step 5. `delta_svd_inputs.py`.** `NIFTI_EXTENSIONS`, `nifti_sibling`,
+- [x] **Step 5. `delta_svd_inputs.py`.** `NIFTI_EXTENSIONS`, `nifti_sibling`,
   `isNIfTI`, `per_timepoint_path`, `candidate_paths`, `missing_input_message`,
   `isCSV`, `validate_timepoint_labels`, `positive_int`, `assertPositiveJobs`,
   `assertPositiveRegistrations`, `assertPositiveItkThreads`, `assertBValue`,

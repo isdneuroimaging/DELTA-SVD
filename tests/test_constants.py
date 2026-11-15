@@ -1,6 +1,7 @@
 import create_html_with_png as chp
 import delta_svd_constants as c
 import delta_svd_gradients
+import delta_svd_inputs
 
 
 # Changing any of these changes the output or the report: update the pin
@@ -17,9 +18,10 @@ def test_constants_pinned_to_their_validated_values():
 
 
 def test_pipeline_and_report_share_the_constants(delta_svd):
+    assert delta_svd.ITK_THREADS_DEFAULT == c.ITK_THREADS_DEFAULT
     for name in ("SKELETON_MASK_DEFAULT", "ITK_THREADS_DEFAULT", "BRANGE_DEFAULT",
                  "BRANGE_TOL", "SHELL_TOL"):
-        assert getattr(delta_svd, name) == getattr(c, name)
+        assert getattr(delta_svd_inputs, name) == getattr(c, name)
     for name in ("BRANGE_DEFAULT", "BRANGE_TOL", "SHELL_TOL", "MIN_DIRECTIONS",
                  "RECOMMENDED_DIRECTIONS"):
         assert getattr(delta_svd_gradients, name) == getattr(c, name)

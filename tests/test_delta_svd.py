@@ -1,4 +1,3 @@
-import argparse
 import datetime
 import json
 import os
@@ -13,6 +12,10 @@ import pytest
 from dipy.core.gradients import gradient_table
 from dipy.reconst.dti import decompose_tensor, design_matrix, from_lower_triangular
 import dipy.reconst.dti as dti
+
+import delta_svd_inputs
+# grid helpers shared with the pipeline-level tests; _mni_reference is a fixture
+from test_inputs import _DWI_AFFINE, _mni_reference, _save_dwi, _save_grid
 
 
 def test_utc_timestamp_uses_rfc3339_z_suffix(delta_svd):
@@ -58,88 +61,6 @@ def test_run_manifest_records_run_details_and_outputs(delta_svd, tmp_path, monke
         "voxel_order": {"ses-1": "LAS", "ses-2": "RAS"},
     }
     assert not (tmp_path / "delta-svd_run_manifest.json.tmp").exists()
-
-
-# ---------------------------------------------------------------------------
-# Argparse validators
-
-def test_isNIfTI_accepts_existing_file_with_extension(delta_svd, tmp_path):
-    fn = tmp_path / "sub01.nii.gz"
-    fn.touch()
-    assert delta_svd.isNIfTI(str(fn)) == str(fn)
-
-
-def test_isNIfTI_appends_extension_if_missing(delta_svd, tmp_path):
-    fn = tmp_path / "sub01.nii"
-    fn.touch()
-    base = str(tmp_path / "sub01")
-    assert delta_svd.isNIfTI(base) == base + ".nii"
-
-
-def test_isNIfTI_missing_file_aborts_by_default(delta_svd, tmp_path):
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.isNIfTI(str(tmp_path / "missing"))
-
-
-def test_isNIfTI_missing_file_returns_none_without_abort(delta_svd, tmp_path):
-    assert delta_svd.isNIfTI(str(tmp_path / "missing"), abort=False) is None
-
-
-def test_isCSV_accepts_overwrite_keyword(delta_svd):
-    assert delta_svd.isCSV("overwrite") == "overwrite"
-
-
-@pytest.mark.parametrize("name", ["results.csv", "results.CSV"])
-def test_isCSV_accepts_csv_extension(delta_svd, name):
-    assert delta_svd.isCSV(name) == name
-
-
-def test_isCSV_rejects_other_extensions(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
-        delta_svd.isCSV("results.txt")
-    # every other type= validator names its own option; this one used to be the
-    # odd one out, leaving the reader to guess which flag it meant
-    assert "--reprocess" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("name", ["../results.csv", "./results.csv", "/tmp/results.csv",
-                                         r"..\results.csv"])
-def test_isCSV_rejects_paths_instead_of_base_names(delta_svd, name):
-    with pytest.raises(argparse.ArgumentTypeError, match="base name"):
-        delta_svd.isCSV(name)
-
-
-def test_assertPositiveJobs_accepts_values_at_or_above_one(delta_svd):
-    assert delta_svd.assertPositiveJobs("1") == 1
-    assert delta_svd.assertPositiveJobs("5") == 5
-
-
-def test_assertPositiveJobs_below_one_raises(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.assertPositiveJobs("0")
-
-
-def test_assertPositiveJobs_non_integer_raises(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.assertPositiveJobs("two")
-
-
-def test_threadBudget_accepts_auto(delta_svd):
-    assert delta_svd.threadBudget("auto") == "auto"
-    assert delta_svd.threadBudget("AUTO") == "auto"
-
-
-def test_threadBudget_accepts_positive_integer(delta_svd):
-    assert delta_svd.threadBudget("8") == 8
-
-
-def test_threadBudget_rejects_invalid(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.threadBudget("0")
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.threadBudget("-1")
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.threadBudget("lots")
 
 
 # ---------------------------------------------------------------------------
@@ -216,182 +137,6 @@ def test_itk_thread_count_is_exported_to_every_ants_call(delta_svd):
     # assigned, not setdefault: a value forwarded in from the host must not be
     # able to change the metrics (Apptainer passes the host environment through)
     assert os.environ["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] == str(delta_svd.ITK_THREADS)
-
-
-def test_assertPositiveItkThreads_rejects_non_positive_and_non_integer(delta_svd):
-    assert delta_svd.assertPositiveItkThreads("12") == 12
-    for bad in ("0", "-1", "auto", "1.5"):
-        with pytest.raises(argparse.ArgumentTypeError):
-            delta_svd.assertPositiveItkThreads(bad)
-
-
-# ---------------------------------------------------------------------------
-# CustomArgumentParser single-dash rule
-
-def _minimal_parser(delta_svd):
-    parser = delta_svd.CustomArgumentParser()
-    parser.add_argument("-o", "--dirOutput")
-    return parser
-
-
-def test_custom_parser_allows_single_dash_with_space(delta_svd):
-    parser = _minimal_parser(delta_svd)
-    ns = parser.parse_args(["-o", "foo"])
-    assert ns.dirOutput == "foo"
-
-
-def test_custom_parser_rejects_attached_single_dash_argument(delta_svd, capsys):
-    parser = _minimal_parser(delta_svd)
-    with pytest.raises(SystemExit) as excinfo:
-        parser.parse_args(["-ofoo"])
-    assert excinfo.value.code == 2
-    assert "-ofoo" in capsys.readouterr().err
-
-
-def test_custom_parser_allows_double_dash_attached_form(delta_svd):
-    parser = _minimal_parser(delta_svd)
-    ns = parser.parse_args(["--dirOutput=foo"])
-    assert ns.dirOutput == "foo"
-
-
-def test_custom_parser_falls_back_to_the_command_line(delta_svd, monkeypatch):
-    # the argparse default: parse_args() with no argument reads sys.argv[1:],
-    # which the single-dash check used to iterate as None
-    parser = _minimal_parser(delta_svd)
-    monkeypatch.setattr(sys, "argv", ["delta-svd.py", "-o", "foo"])
-
-    assert parser.parse_args().dirOutput == "foo"
-
-
-def test_custom_parser_suggests_the_double_dash_form_when_known(delta_svd, capsys):
-    # the likeliest real-world case: '--shells' mistyped with one dash
-    parser = _minimal_parser(delta_svd)
-    parser.add_argument("--shells", nargs="+")
-    with pytest.raises(SystemExit):
-        parser.parse_args(["-shells", "700"])
-    assert 'Did you mean "--shells"?' in capsys.readouterr().err
-
-
-def test_custom_parser_suggests_the_double_dash_form_with_attached_value(delta_svd, capsys):
-    # '=' attaches a value to a long option; the suggestion must strip it first
-    parser = _minimal_parser(delta_svd)
-    with pytest.raises(SystemExit):
-        parser.parse_args(["-dirOutput=foo"])
-    assert 'Did you mean "--dirOutput"?' in capsys.readouterr().err
-
-
-def test_custom_parser_omits_suggestion_for_unknown_options(delta_svd, capsys):
-    # a typo that doesn't match any registered option gets the plain message
-    parser = _minimal_parser(delta_svd)
-    with pytest.raises(SystemExit):
-        parser.parse_args(["-bogus"])
-    assert "Did you mean" not in capsys.readouterr().err
-
-
-# ---------------------------------------------------------------------------
-# iniParser() defaults
-
-def test_iniparser_defaults(delta_svd):
-    parser = delta_svd.iniParser()
-    assert parser.get_default("qc") == 1
-    assert parser.get_default("para") is None
-    assert parser.get_default("threads") == "auto"
-    assert parser.get_default("itkThreads") == delta_svd.ITK_THREADS_DEFAULT
-    assert parser.get_default("bRange") == [800, 1200]
-    assert parser.get_default("shells") is None
-    assert parser.get_default("skeletonMask") == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
-    assert parser.get_default("adjustBmaskForFW") is True
-    assert parser.get_default("debug") is False
-    assert parser.get_default("hemispheres") is False
-
-
-# Anything that actually parses arguments has to pass an explicit
-# '--skeletonMask': argparse runs string defaults through their 'type=', and the
-# default here is the in-container path '/opt/scripts/delta-svd_skeletonmask_v1.nii.gz',
-# which isNIfTI() rejects outside the image. Defaults are asserted via
-# parser.get_default() instead (see test_iniparser_defaults above).
-def _touch_dwi_and_skeleton(tmp_path):
-    dwi = tmp_path / "sub01.nii.gz"
-    skel = tmp_path / "skel.nii.gz"
-    dwi.touch()
-    skel.touch()
-    return dwi, skel
-
-
-def test_iniparser_para_one_is_accepted_by_cli(delta_svd, tmp_path):
-    # '--para 1' is now valid (serial registration); only non-positive is rejected
-    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
-    parser = delta_svd.iniParser()
-    ns = parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel), "--para", "1"])
-    assert ns.para == 1
-
-
-def test_iniparser_para_zero_is_rejected_by_cli(delta_svd, tmp_path, capsys):
-    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
-    parser = delta_svd.iniParser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel), "--para", "0"])
-    # assert the exit really came from '--para', not from some other argument
-    assert "--para" in capsys.readouterr().err
-
-
-# ---------------------------------------------------------------------------
-# assertBValue(): the window the diffusion tensor model is valid in
-#
-# Outside it the tensor is not interpretable - below the floor the signal is
-# contaminated by perfusion, above the ceiling by non-Gaussian diffusion - so
-# such a request is refused before anything runs rather than fitted.
-
-@pytest.mark.parametrize("value", ["250", "1000", "1800"])
-def test_assertBValue_accepts_the_valid_window(delta_svd, value):
-    assert delta_svd.assertBValue(value) == int(value)
-
-
-@pytest.mark.parametrize("value", ["249", "1801", "0", "-100"])
-def test_assertBValue_rejects_b_values_outside_the_window(delta_svd, value):
-    with pytest.raises(argparse.ArgumentTypeError, match="have to lie between 250 and 1800"):
-        delta_svd.assertBValue(value)
-
-
-def test_assertBValue_points_a_zero_at_the_b0_rule(delta_svd):
-    # the mistake this catches: passing 0 as the lower limit to 'keep the b0s',
-    # which they never needed - it only drags every shell below the upper limit
-    # into the fit
-    with pytest.raises(argparse.ArgumentTypeError, match="always included"):
-        delta_svd.assertBValue("0")
-
-
-def test_assertBValue_rejects_non_numeric(delta_svd):
-    with pytest.raises(argparse.ArgumentTypeError, match="whole numbers"):
-        delta_svd.assertBValue("1000.5")
-
-
-def test_iniparser_shells_accepts_several_shells(delta_svd, tmp_path):
-    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
-    parser = delta_svd.iniParser()
-    ns = parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel),
-                            "--shells", "700", "1000", "1500"])
-    assert ns.shells == [700, 1000, 1500]
-
-
-def test_iniparser_rejects_brange_and_shells_together(delta_svd, tmp_path, capsys):
-    # they answer the same question in two ways; taking both would leave it
-    # undefined which one selected the data
-    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
-    parser = delta_svd.iniParser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel),
-                           "--bRange", "800", "1200", "--shells", "1000"])
-    assert "not allowed with argument" in capsys.readouterr().err
-
-
-def test_iniparser_brange_outside_the_valid_window_is_rejected_by_cli(delta_svd, tmp_path, capsys):
-    dwi, skel = _touch_dwi_and_skeleton(tmp_path)
-    parser = delta_svd.iniParser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--dwi", str(dwi), "--skeletonMask", str(skel),
-                           "--bRange", "800", "2500"])
-    assert "--bRange" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1494,20 +1239,6 @@ def test_pipeline_rejects_all_as_a_longitudinal_timepoint_label(delta_svd, tmp_p
         delta_svd.pipeline_delta_svd()
 
 
-@pytest.mark.parametrize(
-    ("label", "message"),
-    [("../other", "path traversal"), ("visit/one", "path separator"),
-     (r"visit\one", "path separator"), ("template", "internal working directory"),
-     ("intermediateTemplates", "internal working directory"),
-     ("TBSS", "internal working directory"),
-     # FSL's tbss_non_FA and ANTs' template script split names at whitespace
-     ("visit one", "whitespace"), ("visit\tone", "whitespace")],
-)
-def test_rejects_unsafe_timepoint_labels(delta_svd, label, message):
-    with pytest.raises(ValueError, match=message):
-        delta_svd.validate_timepoint_labels([label])
-
-
 @pytest.mark.parametrize("kind", ["absolute", "traversal"])
 def test_unsafe_reprocessing_leaves_unrelated_files_untouched(
         delta_svd, tmp_path, monkeypatch, kind):
@@ -1529,11 +1260,6 @@ def test_unsafe_reprocessing_leaves_unrelated_files_untouched(
     assert sentinel.read_text() == "untouched"
 
 
-@pytest.mark.parametrize("label", ["TP01", "ses-1", "visit.1"])
-def test_accepts_plain_timepoint_labels(delta_svd, label):
-    delta_svd.validate_timepoint_labels([label])
-
-
 def test_valid_timepoint_reprocessing_only_replaces_its_working_directory(
         delta_svd, tmp_path, monkeypatch):
     dwi, skel = _minimal_pipeline_inputs(tmp_path)
@@ -1548,7 +1274,7 @@ def test_valid_timepoint_reprocessing_only_replaces_its_working_directory(
         [dwi], skel, "--tp", "V1", "--dirOutput", str(output),
         "--steps", "fwc", "--reprocess"))
     # the touched skeleton mask is no NIfTI; the grid check has its own tests
-    monkeypatch.setattr(delta_svd, "check_mni_grid", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delta_svd_inputs, "check_mni_grid", lambda *args, **kwargs: None)
     monkeypatch.setattr(delta_svd, "filter_b_values",
                         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("stop")))
 
@@ -1586,7 +1312,7 @@ def test_qc_zero_does_not_erode_the_module_level_step_list(delta_svd, tmp_path, 
         with pytest.raises(ValueError, match="have to be contiguous"):
             delta_svd.pipeline_delta_svd()
 
-    assert "qc" in delta_svd.stepsImplemented
+    assert "qc" in delta_svd_inputs.stepsImplemented
     # and '--steps qc' is still an accepted choice afterwards
     ns = delta_svd.iniParser().parse_args(
         ["--dwi", str(dwi), "--skeletonMask", str(skel), "--steps", "qc"])
@@ -1596,16 +1322,6 @@ def test_qc_zero_does_not_erode_the_module_level_step_list(delta_svd, tmp_path, 
 # ---------------------------------------------------------------------------
 # --numRegistrations reaches an ANTs shell command, so it is validated like the
 # other numeric options rather than accepting any int.
-
-def test_numRegistrations_accepts_positive_integer(delta_svd):
-    assert delta_svd.assertPositiveRegistrations("5") == 5
-
-
-@pytest.mark.parametrize("bad", ["0", "-2", "many"])
-def test_numRegistrations_rejects_non_positive_and_non_integer(delta_svd, bad):
-    with pytest.raises(argparse.ArgumentTypeError):
-        delta_svd.assertPositiveRegistrations(bad)
-
 
 class _StopAfterCommand(Exception):
     """Abort create_template once the ANTs command has been captured."""
@@ -1778,27 +1494,6 @@ def test_inferred_path_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path,
                       "Notch004/BL/diffusion/data_brainmask.nii"]
 
 
-def test_candidate_paths_anchors_only_a_bare_name(delta_svd):
-    dwi = "study/sub01/data.nii.gz"
-    # inferred: already carries the folder, so it is probed as-is only
-    assert delta_svd.candidate_paths("study/sub01/data_brainmask", dwi, True) == [
-        "study/sub01/data_brainmask.nii.gz", "study/sub01/data_brainmask.nii"]
-    # a bare name is probed next to the DWI only, never in the working directory
-    assert delta_svd.candidate_paths("m.nii.gz", dwi, True) == ["study/sub01/m.nii.gz"]
-    # a name carrying a folder is probed as given only
-    assert delta_svd.candidate_paths("./m.nii.gz", dwi, True) == ["./m.nii.gz"]
-
-
-def test_per_timepoint_path(delta_svd):
-    dwi = "/data/ses-2/data.nii.gz"
-    assert delta_svd.per_timepoint_path("bvals", dwi) == "/data/ses-2/bvals"
-    assert delta_svd.per_timepoint_path("./bvals", dwi) == "./bvals"
-    assert delta_svd.per_timepoint_path("ses-1/bvals", dwi) == "ses-1/bvals"
-    assert delta_svd.per_timepoint_path("/abs/bvals", dwi) == "/abs/bvals"
-    # a DWI given as a bare name lives in the working directory, so does its file
-    assert delta_svd.per_timepoint_path("bvals", "data.nii.gz") == "bvals"
-
-
 def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_path, monkeypatch, capsys):
     # relative DWI path, so the DWI folder differs from the working directory
     sub = tmp_path / "study" / "sub01"
@@ -1897,55 +1592,6 @@ def test_path_with_a_folder_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_
     ])
     with pytest.raises(delta_svd.DeltaSvdError, match="'--bval'"):
         delta_svd.pipeline_delta_svd()
-
-
-# ---------------------------------------------------------------------------
-# The extension probing appends to the name as given, so for 'data.nii' it looks
-# for 'data.nii.nii.gz' -- it never reaches 'data.nii.gz'. The message must not
-# claim otherwise, and the sibling that is actually there is worth naming.
-
-def test_isNIfTI_names_the_sibling_with_the_other_extension(delta_svd, tmp_path):
-    (tmp_path / "data.nii.gz").touch()
-    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
-        delta_svd.isNIfTI(str(tmp_path / "data.nii"))
-
-    msg = str(excinfo.value)
-    assert "also tried" not in msg
-    assert str(tmp_path / "data.nii.gz") in msg
-
-
-def test_isNIfTI_names_the_sibling_in_the_other_direction(delta_svd, tmp_path):
-    (tmp_path / "data.nii").touch()
-    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
-        delta_svd.isNIfTI(str(tmp_path / "data.nii.gz"))
-
-    assert str(tmp_path / "data.nii") in str(excinfo.value)
-
-
-def test_isNIfTI_does_not_claim_probes_it_did_not_make(delta_svd, tmp_path):
-    # nothing there at all, and the name already carries an extension
-    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
-        delta_svd.isNIfTI(str(tmp_path / "data.nii"))
-
-    assert "also tried" not in str(excinfo.value)
-
-
-def test_isNIfTI_still_reports_the_probes_for_an_extensionless_name(delta_svd, tmp_path):
-    # here the probes are real, and naming them tells the user what was searched
-    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
-        delta_svd.isNIfTI(str(tmp_path / "data"))
-
-    msg = str(excinfo.value)
-    assert str(tmp_path / "data.nii.gz") in msg
-    assert str(tmp_path / "data.nii") in msg
-
-
-def test_nifti_sibling_returns_none_without_a_counterpart(delta_svd, tmp_path):
-    (tmp_path / "data.nii.gz").touch()
-    assert delta_svd.nifti_sibling(str(tmp_path / "other.nii")) is None
-    assert delta_svd.nifti_sibling(str(tmp_path / "notes.txt")) is None
-    # the file asked for is never substituted, only reported
-    assert delta_svd.nifti_sibling(str(tmp_path / "data.nii")) == str(tmp_path / "data.nii.gz")
 
 
 def test_explicit_bmask_with_wrong_extension_names_the_sibling(delta_svd, tmp_path, monkeypatch):
@@ -2136,63 +1782,6 @@ def test_extract_stats_strips_the_skeleton_name_literally(delta_svd, tmp_path, s
     assert set(df["region"]) == {"intersection", "intersection_LH"}
 
 
-# ---------------------------------------------------------------------------
-# check_mni_grid(). The reference is a stand-in with the shipped mask's header,
-# since '/opt/scripts' only exists in the image.
-
-_MNI_AFFINE = np.array([[-1., 0, 0, 90], [0, 1, 0, -126], [0, 0, 1, -72], [0, 0, 0, 1]])
-_MNI_SHAPE = (182, 218, 182)
-
-
-def _save_grid(path, shape=_MNI_SHAPE, affine=_MNI_AFFINE):
-    nib.save(nib.Nifti1Image(np.zeros(shape, dtype="uint8"), affine), str(path))
-    return str(path)
-
-
-@pytest.fixture
-def _mni_reference(delta_svd, tmp_path, monkeypatch):
-    ref = _save_grid(tmp_path / "reference.nii.gz")
-    monkeypatch.setattr(delta_svd, "SKELETON_MASK_DEFAULT", ref)
-    return ref
-
-
-def test_mni_reference_matches_the_shipped_skeleton_mask():
-    from conftest import CONTAINER_FILES
-    img = nib.load(str(CONTAINER_FILES / "delta-svd_skeletonmask_v1.nii.gz"))
-    assert img.shape == _MNI_SHAPE
-    assert np.allclose(img.affine, _MNI_AFFINE)
-
-
-def test_check_mni_grid_accepts_a_matching_grid(delta_svd, tmp_path, _mni_reference):
-    affine = _MNI_AFFINE.copy()
-    affine[0, 3] += 1e-6                          # float32 header round-off
-    delta_svd.check_mni_grid(_save_grid(tmp_path / "mask.nii.gz", affine=affine), "skeleton mask")
-
-
-def test_check_mni_grid_is_a_no_op_for_the_default_mask(delta_svd, tmp_path, monkeypatch):
-    # the default path is never even opened
-    missing = str(tmp_path / "not-there.nii.gz")
-    monkeypatch.setattr(delta_svd, "SKELETON_MASK_DEFAULT", missing)
-    delta_svd.check_mni_grid(missing, "skeleton mask")
-
-
-def test_check_mni_grid_rejects_a_flipped_x_axis(delta_svd, tmp_path, _mni_reference):
-    affine = _MNI_AFFINE.copy()
-    affine[0, 0], affine[0, 3] = 1, -91           # RAS storage of the same space
-    fn = _save_grid(tmp_path / "mask.nii.gz", affine=affine)
-    with pytest.raises(delta_svd.DeltaSvdError, match="affine") as excinfo:
-        delta_svd.check_mni_grid(fn, "skeleton mask")
-    assert fn in str(excinfo.value)
-
-
-def test_check_mni_grid_rejects_a_wrong_shape(delta_svd, tmp_path, _mni_reference):
-    fn = _save_grid(tmp_path / "mask.nii.gz", shape=(91, 109, 91))
-    with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions") as excinfo:
-        delta_svd.check_mni_grid(fn, "ROI mask in MNI space")
-    assert "ROI mask in MNI space" in str(excinfo.value)
-    assert fn in str(excinfo.value)
-
-
 @pytest.mark.parametrize("option", ["--skeletonMask", "--RmaskMNI"])
 def test_pipeline_rejects_an_off_grid_mask_before_processing(
         delta_svd, tmp_path, monkeypatch, _mni_reference, option):
@@ -2209,44 +1798,6 @@ def test_pipeline_rejects_an_off_grid_mask_before_processing(
     with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions"):
         delta_svd.pipeline_delta_svd()
     assert not (tmp_path / "delta-svd_temp").exists()
-
-
-# ---------------------------------------------------------------------------
-# check_dwi_grid(): masks given in DWI space have to be on their DWI's grid.
-
-_DWI_AFFINE = np.diag([2.0, 2.0, 2.5, 1.0])
-_DWI_AFFINE[:3, 3] = [-100.0, -120.0, -60.0]
-
-
-def _save_dwi(path, shape=(8, 9, 7, 3), affine=_DWI_AFFINE):
-    nib.save(nib.Nifti1Image(np.zeros(shape, dtype="float32"), affine), str(path))
-    return str(path)
-
-
-def test_check_dwi_grid_accepts_a_matching_grid(delta_svd, tmp_path):
-    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
-    affine = _DWI_AFFINE.copy()
-    affine[0, 3] += 1e-6                          # float32 header round-off
-    delta_svd.check_dwi_grid(_save_grid(tmp_path / "mask.nii.gz", (8, 9, 7), affine),
-                             "brain mask", "bmask", dwi)
-
-
-def test_check_dwi_grid_rejects_a_wrong_shape(delta_svd, tmp_path):
-    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
-    fn = _save_grid(tmp_path / "lesion.nii.gz", (16, 18, 14), _DWI_AFFINE)
-    with pytest.raises(delta_svd.DeltaSvdError, match="image dimensions") as excinfo:
-        delta_svd.check_dwi_grid(fn, "exclusion mask", "Emask", dwi)
-    msg = str(excinfo.value)
-    assert fn in msg and dwi in msg and "'--Emask'" in msg
-
-
-def test_check_dwi_grid_rejects_a_shifted_affine(delta_svd, tmp_path):
-    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
-    affine = _DWI_AFFINE.copy()
-    affine[2, 3] += 2.5                           # one slice off
-    fn = _save_grid(tmp_path / "roi.nii.gz", (8, 9, 7), affine)
-    with pytest.raises(delta_svd.DeltaSvdError, match="affine"):
-        delta_svd.check_dwi_grid(fn, "ROI mask in DWI space", "Rmask", dwi)
 
 
 @pytest.mark.parametrize("option", ["--bmask", "--Emask", "--Rmask"])
