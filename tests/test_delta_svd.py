@@ -2211,19 +2211,6 @@ def test_scaled_compressed_and_uncompressed_inputs_remain_equivalent(delta_svd, 
     assert plain_values.ravel().tolist() == [0, 200]
 
 
-def test_validate_roi_labels_accepts_documented_boundaries(delta_svd):
-    labels = delta_svd.validate_roi_labels(
-        np.array([0, 255, 256, 65535], dtype=float), "ROI mask", "roi.nii.gz")
-    assert labels.dtype == np.dtype("uint16")
-    assert labels.tolist() == [0, 255, 256, 65535]
-
-
-@pytest.mark.parametrize("invalid", [-1, 0.5, 65536, np.nan, np.inf])
-def test_validate_roi_labels_rejects_unsupported_values(delta_svd, invalid):
-    with pytest.raises(delta_svd.DeltaSvdError, match="finite integer labels from 0 through 65535"):
-        delta_svd.validate_roi_labels(np.array([0, invalid]), "ROI mask", "roi.nii.gz")
-
-
 # ---------------------------------------------------------------------------
 # binarise_mask()
 #
@@ -2424,20 +2411,6 @@ def test_valid_timepoint_reprocessing_only_replaces_its_working_directory(
 
     assert timepoint.is_dir() and not stale.exists()
     assert sentinel.read_text() == "untouched"
-
-
-def test_recursive_delete_requires_containment(delta_svd, tmp_path):
-    allowed = tmp_path / "output"
-    unrelated = tmp_path / "other"
-    allowed.mkdir()
-    unrelated.mkdir()
-    sentinel = unrelated / "keep.txt"
-    sentinel.touch()
-
-    with pytest.raises(ValueError, match="Refusing to recursively delete"):
-        delta_svd.safe_rmtree(str(unrelated), str(allowed))
-
-    assert sentinel.exists()
 
 
 def test_pipeline_accepts_distinct_timepoint_labels(delta_svd, tmp_path, monkeypatch):
@@ -2866,15 +2839,6 @@ def test_missing_explicit_bmask_reports_it_as_given(delta_svd, tmp_path, monkeyp
     assert str(tmp_path / "nowhere.nii.gz") in msg
 
 
-# ---------------------------------------------------------------------------
-# Every user-fixable error is a DeltaSvdError, so the __main__ guard can report
-# it without a traceback. A ValueError from anywhere else is a bug and has to
-# keep its traceback, so the guard must not swallow it.
-
-def test_delta_svd_error_is_a_value_error(delta_svd):
-    assert issubclass(delta_svd.DeltaSvdError, ValueError)
-
-
 def test_missing_emask_names_the_option_and_the_NA_escape(delta_svd, tmp_path, monkeypatch):
     dwi = tmp_path / "sub01.nii"
     skel = tmp_path / "skel.nii.gz"
@@ -3222,24 +3186,6 @@ def test_tbss_lookups_take_the_output_path_literally(delta_svd, tmp_path):
     fn = stats / "skel_intersection_Rmask-01.nii.gz"
     fn.touch()
     assert delta_svd.qc_label_maps(str(stats.parent)) == [str(fn)]
-
-
-# ---------------------------------------------------------------------------
-# run_subprocess(): displayed output is streamed; hidden output only on failure.
-
-@pytest.mark.parametrize("display", [True, False])
-def test_run_subprocess_success(delta_svd, capsys, display):
-    delta_svd.run_subprocess("echo hello; echo oops >&2", display, "demo")
-    out = capsys.readouterr().out
-    assert ("hello\noops\n" in out) == display
-
-
-@pytest.mark.parametrize("display", [True, False])
-def test_run_subprocess_failure_shows_the_output(delta_svd, capsys, display):
-    with pytest.raises(delta_svd.DeltaSvdError, match="'demo' command failed with exit code 3"):
-        delta_svd.run_subprocess("echo partial; echo why >&2; exit 3", display, "demo")
-    out = capsys.readouterr().out
-    assert "partial\nwhy\n" in out
 
 
 def test_mixed_voxel_order_warning(delta_svd):

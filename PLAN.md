@@ -205,7 +205,7 @@ the guard test of step 0 cover those.
     proof passed and the unit tests were unchanged (482 passed, the same 2
     failures).
 
-- [ ] **Step 2. `delta_svd_common.py`.** `DeltaSvdError`, `ROI_LABEL_DTYPE`,
+- [x] **Step 2. `delta_svd_common.py`.** `DeltaSvdError`, `ROI_LABEL_DTYPE`,
   `ROI_LABEL_MAX`, `save_nifti`, `strip_nifti_ext`, `validate_roi_labels`,
   `run_subprocess`, `safe_rmtree`, `tbss_fa_name`.
   - Nothing else from the "Helper functions" section: `binarise_mask`,

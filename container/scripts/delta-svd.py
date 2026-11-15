@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime, contextlib
+import os, sys, argparse, re, time, glob, shlex, multiprocessing, json, datetime, contextlib
 import importlib.util
 from os.path import join, exists, dirname, basename
-from shutil import copy2, rmtree
+from shutil import copy2
 from pathlib import Path
 
 from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
@@ -270,8 +270,6 @@ from nibabel.orientations import (io_orientation, axcodes2ornt, ornt_transform,
 import numpy as np
 import pandas as pd
 
-ROI_LABEL_DTYPE = 'uint16'
-ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
 # absorbs float32 header round-off in check_mni_grid()
 GRID_AFFINE_ATOL = 1e-4
 
@@ -285,27 +283,10 @@ from scipy.ndimage import gaussian_filter
 
 from markvcid_fw_mrn import wls_fit_tensor_fw, wls_fit_dti
 from delta_svd_version import __version__, __source_revision__
+from delta_svd_common import (DeltaSvdError, ROI_LABEL_DTYPE, save_nifti,
+                              strip_nifti_ext, tbss_fa_name, validate_roi_labels,
+                              run_subprocess, safe_rmtree)
 
-
-class DeltaSvdError(ValueError):
-    """A problem with the input or with what was asked for -- not a bug.
-
-    Raised for everything a user can fix by changing the command line or the
-    data, and caught in the __main__ guard at the bottom of this file, which
-    reports it the way argparse reports its own errors: one message on stderr,
-    no traceback. Anything else that escapes is a fault in the pipeline and
-    keeps its traceback, which is what makes it debuggable.
-
-    An exception rather than a direct sys.exit() because these checks live in
-    functions that are unit-tested directly and called as a library; exiting
-    from inside them would make that impossible. It derives from ValueError
-    because that is what they raised before, and callers may still catch it
-    as one.
-
-    delta-svd_aggregate_results.py has no such structure -- every check there
-    sits in one linear script-level flow -- so it calls sys.exit() directly
-    instead of importing this. Both produce the same 'ERROR: ...' on stderr.
-    """
 
 ###########################################################################
 # Functions for reading/writing bval/bvec files
@@ -1345,23 +1326,6 @@ def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args
 ###########################################################################
 # Helper functions
 
-def save_nifti(fname, arr, affine, header, dtype='float32'):
-    niiNew = nib.Nifti1Image(arr, affine, header)
-    niiNew.set_data_dtype(dtype)
-    niiNew.header.set_slope_inter(1, 0)
-    nib.save(niiNew, fname)
-
-
-def strip_nifti_ext(fn):
-    """'fn' without a trailing '.nii' or '.nii.gz'."""
-    return re.sub(r'\.nii(\.gz)?$', '', fn)
-
-
-def tbss_fa_name(nTP):
-    """Base name of the FA image TBSS is run on."""
-    return "FA-for-tbss-long" if nTP > 1 else "fwc_wls_dti_FA_05"
-
-
 def binarise_mask(img, label, fname):
     """Return 'img' as a strict {0,1} mask, reporting anything it had to change.
     Masks are thresholded strictly above 0 after resampling and written as uint8, neither of
@@ -1419,23 +1383,6 @@ def check_dwi_grid(fname, label, attr, dwi):
                             f"line up with the DWI data:\n  {fname}\n  Affine:\n"
                             f"{np.array2string(img.affine, precision=4)}\n  DWI affine:\n"
                             f"{np.array2string(ref.affine, precision=4)}\n  DWI: {dwi}\n{fix}")
-
-
-def validate_roi_labels(img, label, fname):
-    """Return sorted ROI labels after enforcing the public label contract."""
-    labels = np.unique(np.asarray(img))
-    invalid = labels[(~np.isfinite(labels)) |
-                     (labels < 0) |
-                     (labels > ROI_LABEL_MAX) |
-                     (labels != np.floor(labels))]
-    if invalid.size:
-        shown = ', '.join(str(value) for value in invalid[:5])
-        if invalid.size > 5:
-            shown += ', ...'
-        raise DeltaSvdError(
-            f"The provided {label} must contain only finite integer labels from 0 through "
-            f"{ROI_LABEL_MAX}:\n  {fname}\n  Unsupported value(s): {shown}")
-    return labels.astype(ROI_LABEL_DTYPE)
 
 
 def copy_as_nii_gz(fnIn, fnOut):
@@ -1513,27 +1460,6 @@ def reorient_to_fsl_standard(fn):
                                  for d in nii.header.get_dim_info()])
     nib.save(niiNew, fn)
     return True
-
-
-def run_subprocess(cmd, displayStdout, label):
-    print(f"Calling {label} command with:")
-    print(cmd, '\n')
-    # streamed when displayed; otherwise kept for the failure report only
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True,
-                            text=True, encoding='utf-8', errors='replace')
-    held = []
-    for line in proc.stdout:
-        if displayStdout:
-            print(line, end='')
-        else:
-            held.append(line)
-    proc.wait()
-    if proc.returncode != 0:
-        if held:
-            print("STDOUT/STDERR:")
-            print(''.join(held))
-        raise DeltaSvdError(f"The '{label}' command failed with exit code {proc.returncode}. "
-                            f"Its stdout/stderr is printed above.")
 
 
 def section_header(text, startPrevious = None):
@@ -1735,18 +1661,6 @@ def validate_timepoint_labels(labels):
                             "Use a plain label such as 'TP01' or 'ses-1', not a path, an "
                             "internal directory name or a name containing spaces.")
 
-def safe_rmtree(path, parent):
-    pathReal = os.path.realpath(os.path.abspath(path))
-    parentReal = os.path.realpath(os.path.abspath(parent))
-    try:
-        contained = os.path.commonpath([pathReal, parentReal]) == parentReal
-    except ValueError:
-        contained = False
-    if not contained or pathReal == parentReal:
-        raise DeltaSvdError(f"Refusing to recursively delete path outside its intended output "
-                            f"directory: {path}")
-    rmtree(path)
-    
 def positive_int(option):
     """An argparse 'type' accepting integers >= 1, naming 'option' in its errors."""
     def check(s):
