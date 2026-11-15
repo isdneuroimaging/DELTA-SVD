@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import delta_svd_constants as c
+import delta_svd_runtime
 from conftest import CONTAINER_FILES, REPO_ROOT
 
 
@@ -38,7 +39,7 @@ def test_entrypoint_isolates_the_interpreter():
 # ---------------------------------------------------------------------------
 # pin_image_environment(): host values forwarded by Apptainer must not survive.
 
-def test_pin_overrides_host_tool_selection(delta_svd):
+def test_pin_overrides_host_tool_selection():
     environ = {
         "FSLDIR": "/home/user/fsl",
         "ANTSPATH": "/home/user/bin/ants/",
@@ -47,13 +48,13 @@ def test_pin_overrides_host_tool_selection(delta_svd):
         "PATH": "/home/user/fsl/bin:/usr/bin:/bin",
         "HOME": "/home/user",
     }
-    delta_svd.pin_image_environment(environ, fslSubConfig=lambda d: None)
+    delta_svd_runtime.pin_image_environment(environ, fslSubConfig=lambda d: None)
     for name, value in c.IMAGE_ENVIRONMENT.items():
         assert environ[name] == value
     assert environ["HOME"] == "/home/user"          # unrelated variables stay
 
 
-def test_pin_drops_host_python_and_fsl_sub_variables(delta_svd):
+def test_pin_drops_host_python_and_fsl_sub_variables():
     environ = {
         "PYTHONPATH": "/home/user/lib/python3.11/site-packages",
         "PYTHONHOME": "/usr",
@@ -62,7 +63,7 @@ def test_pin_drops_host_python_and_fsl_sub_variables(delta_svd):
         "FSLSUB_PARALLEL": "8",
         "FSLSUB_PLUGINPATH": "/home/user/plugins",
     }
-    delta_svd.pin_image_environment(environ, fslSubConfig=lambda d: None)
+    delta_svd_runtime.pin_image_environment(environ, fslSubConfig=lambda d: None)
     for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE",
                  "FSLSUB_CONF", "FSLSUB_PARALLEL", "FSLSUB_PLUGINPATH"):
         assert name not in environ
@@ -70,24 +71,24 @@ def test_pin_drops_host_python_and_fsl_sub_variables(delta_svd):
     assert environ["PYTHONUNBUFFERED"] == "1"
 
 
-def test_pin_sets_the_image_fsl_sub_config(delta_svd):
+def test_pin_sets_the_image_fsl_sub_config():
     environ = {"FSLSUB_CONF": "/home/user/.fsl_sub.yml"}
     seen = []
-    delta_svd.pin_image_environment(
+    delta_svd_runtime.pin_image_environment(
         environ, fslSubConfig=lambda d: seen.append(d) or "/opt/conda/etc/fslconf/fsl_sub.yml")
     assert seen == [c.IMAGE_ENVIRONMENT["FSLDIR"]]
     assert environ["FSLSUB_CONF"] == "/opt/conda/etc/fslconf/fsl_sub.yml"
 
 
-def test_fsl_sub_config_prefers_the_fsldir_file(delta_svd, tmp_path, monkeypatch):
+def test_fsl_sub_config_prefers_the_fsldir_file(tmp_path, monkeypatch):
     conf = tmp_path / "etc" / "fslconf" / "fsl_sub.yml"
     conf.parent.mkdir(parents=True)
     conf.write_text("method: shell\n")
-    monkeypatch.setattr(delta_svd.importlib.util, "find_spec", lambda name: None)
-    assert delta_svd.fsl_sub_config(str(tmp_path)) == str(conf)
+    monkeypatch.setattr(delta_svd_runtime.importlib.util, "find_spec", lambda name: None)
+    assert delta_svd_runtime.fsl_sub_config(str(tmp_path)) == str(conf)
 
 
-def test_fsl_sub_config_falls_back_to_the_package_shell_config(delta_svd, tmp_path, monkeypatch):
+def test_fsl_sub_config_falls_back_to_the_package_shell_config(tmp_path, monkeypatch):
     # an empty file is skipped, as fsl_sub itself skips it
     empty = tmp_path / "fsl" / "etc" / "fslconf" / "fsl_sub.yml"
     empty.parent.mkdir(parents=True)
@@ -96,28 +97,28 @@ def test_fsl_sub_config_falls_back_to_the_package_shell_config(delta_svd, tmp_pa
     shell.parent.mkdir(parents=True)
     shell.write_text("method: shell\n")
     spec = SimpleNamespace(submodule_search_locations=[str(tmp_path / "pkg" / "fsl_sub")])
-    monkeypatch.setattr(delta_svd.importlib.util, "find_spec", lambda name: spec)
-    assert delta_svd.fsl_sub_config(str(tmp_path / "fsl")) == str(shell)
+    monkeypatch.setattr(delta_svd_runtime.importlib.util, "find_spec", lambda name: spec)
+    assert delta_svd_runtime.fsl_sub_config(str(tmp_path / "fsl")) == str(shell)
 
 
-def test_fsl_sub_config_none_without_any_file(delta_svd, tmp_path, monkeypatch):
-    monkeypatch.setattr(delta_svd.importlib.util, "find_spec", lambda name: None)
-    assert delta_svd.fsl_sub_config(str(tmp_path)) is None
+def test_fsl_sub_config_none_without_any_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(delta_svd_runtime.importlib.util, "find_spec", lambda name: None)
+    assert delta_svd_runtime.fsl_sub_config(str(tmp_path)) is None
 
 
 # ---------------------------------------------------------------------------
 # Interpreter isolation.
 
-def test_running_in_image(delta_svd):
-    assert delta_svd.running_in_image(c.IMAGE_SCRIPT_DIR + "/delta-svd.py")
-    assert not delta_svd.running_in_image(str(CONTAINER_FILES / "delta-svd.py"))
+def test_running_in_image():
+    assert delta_svd_runtime.running_in_image(c.IMAGE_SCRIPT_DIR + "/delta-svd.py")
+    assert not delta_svd_runtime.running_in_image(str(CONTAINER_FILES / "delta-svd.py"))
 
 
 @pytest.mark.parametrize("ignoreEnv, noUserSite, restart", [
     (0, 0, True), (1, 0, True), (0, 1, True), (1, 1, False)])
-def test_isolated_interpreter_argv(delta_svd, ignoreEnv, noUserSite, restart):
+def test_isolated_interpreter_argv(ignoreEnv, noUserSite, restart):
     flags = SimpleNamespace(ignore_environment=ignoreEnv, no_user_site=noUserSite)
-    argv = delta_svd.isolated_interpreter_argv(flags, ["--dwi", "x.nii.gz"], "/opt/scripts/delta-svd.py")
+    argv = delta_svd_runtime.isolated_interpreter_argv(flags, ["--dwi", "x.nii.gz"], "/opt/scripts/delta-svd.py")
     if restart:
         assert argv == [sys.executable, "-E", "-s", "-u", "/opt/scripts/delta-svd.py",
                         "--dwi", "x.nii.gz"]

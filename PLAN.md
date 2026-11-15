@@ -213,7 +213,7 @@ the guard test of step 0 cover those.
     functions are used by the main script only and stay there.
   - Tests: `tests/test_common.py`.
 
-- [ ] **Step 3. `delta_svd_runtime.py`.** `running_in_image`,
+- [x] **Step 3. `delta_svd_runtime.py`.** `running_in_image`,
   `fsl_sub_config`, `pin_image_environment`, `isolated_interpreter_argv`,
   `detect_physical_cores`, `cgroup_cpu_limit`, `resolve_thread_budget`,
   `resolve_itk_threads`, `CORETYPE_REQUIRED_FLAGS`,
