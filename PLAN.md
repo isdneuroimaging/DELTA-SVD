@@ -270,7 +270,7 @@ the guard test of step 0 cover those.
   - Tests: `tests/test_qc_deprojection.py` addresses the new module; the QC
     test in `tests/test_delta_svd.py` joins it.
 
-- [ ] **Step 7. Split the rest of `tests/test_delta_svd.py`.** Tests only.
+- [x] **Step 7. Split the rest of `tests/test_delta_svd.py`.** Tests only.
   Pipeline-level tests (those calling `pipeline_delta_svd()`, with their
   helpers) go to `tests/test_pipeline.py`; method tests (fit, template, masks,
   statistics) stay.
