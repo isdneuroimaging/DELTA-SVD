@@ -1850,30 +1850,9 @@ def iniParser():
     return parser
 
 
-###########################################################################
-# Pipeline
-
-def pipeline_delta_svd():
-
-    start_script = time.time()
-    started_at = datetime.datetime.now(datetime.timezone.utc)
-    parser = iniParser()
-    if len(sys.argv)<2:
-        parser.print_usage()
-        print(f'\nDELTA-SVD {__version__}\n'
-              'Run "delta-svd.py -h" for detailed help\n'
-              'Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"\n')
-        parser.exit()
-    else:
-        args = parser.parse_args(sys.argv[1::])
-
-    # On its own line, so it survives a log truncated on the long call below.
-    # Carried on 'args' too, for the QC report to record.
-    args.version = __version__
-    print(f"DELTA-SVD {__version__}")
-    args.function_call = shlex.join([basename(sys.argv[0])]+sys.argv[1::])
-    print("Running: " + args.function_call,'\n')
-
+def resolve_inputs(args):
+    """Resolve and validate the inputs on 'args', in place. Returns the steps
+    available to this run, in order."""
     # Check bval, bvec and bmask files. The brain mask may be '.nii.gz' or '.nii',
     # so it is resolved through isNIfTI(), which probes both (gzip first) and also
     # completes a path with no extension; bval/bvec are matched verbatim.
@@ -2016,6 +1995,35 @@ def pipeline_delta_svd():
     check_mni_grid(args.skeletonMask, 'skeleton mask')
     if args.RmaskMNI is not None:
         check_mni_grid(args.RmaskMNI, 'ROI mask in MNI space')
+
+    return stepsAvailable
+
+
+###########################################################################
+# Pipeline
+
+def pipeline_delta_svd():
+
+    start_script = time.time()
+    started_at = datetime.datetime.now(datetime.timezone.utc)
+    parser = iniParser()
+    if len(sys.argv)<2:
+        parser.print_usage()
+        print(f'\nDELTA-SVD {__version__}\n'
+              'Run "delta-svd.py -h" for detailed help\n'
+              'Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"\n')
+        parser.exit()
+    else:
+        args = parser.parse_args(sys.argv[1::])
+
+    # On its own line, so it survives a log truncated on the long call below.
+    # Carried on 'args' too, for the QC report to record.
+    args.version = __version__
+    print(f"DELTA-SVD {__version__}")
+    args.function_call = shlex.join([basename(sys.argv[0])]+sys.argv[1::])
+    print("Running: " + args.function_call,'\n')
+
+    stepsAvailable = resolve_inputs(args)
 
     # Carried on 'args' for the QC report and manifest: storage order affects
     # the results. The masks share the DWI grid.

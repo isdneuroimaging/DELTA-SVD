@@ -189,7 +189,7 @@ the guard test of step 0 cover those.
     2. `delta_svd_constants.py`, and `delta_svd_runtime.py` once it exists,
        import the standard library and `delta_svd_constants` only.
 
-- [ ] **Step 1. Extract `resolve_inputs(args)` from `pipeline_delta_svd()`.**
+- [x] **Step 1. Extract `resolve_inputs(args)` from `pipeline_delta_svd()`.**
   The only non-move change to pipeline code.
   - The block runs from the comment "Check bval, bvec and bmask files"
     through the second `check_mni_grid` call (lines 1877 to 2018), 25
