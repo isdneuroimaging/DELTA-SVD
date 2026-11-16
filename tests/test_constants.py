@@ -9,6 +9,9 @@ import delta_svd_inputs
 def test_constants_pinned_to_their_validated_values():
     assert c.SKELETON_MASK_DEFAULT == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
     assert c.ITK_THREADS_DEFAULT == 12
+    assert c.ITERATIONS_DEFAULT == "30x30x8"
+    assert c.NUM_REGISTRATIONS_DEFAULT == 3
+    assert c.B0_MAX == 5
     assert c.BRANGE_DEFAULT == (800, 1200)
     assert c.BRANGE_TOL == 5
     assert c.SHELL_TOL == 25
@@ -18,11 +21,13 @@ def test_constants_pinned_to_their_validated_values():
 
 
 def test_pipeline_and_report_share_the_constants(delta_svd):
-    assert delta_svd.ITK_THREADS_DEFAULT == c.ITK_THREADS_DEFAULT
+    for name in ("ITK_THREADS_DEFAULT", "ITERATIONS_DEFAULT", "NUM_REGISTRATIONS_DEFAULT"):
+        assert getattr(delta_svd, name) == getattr(c, name)
     for name in ("SKELETON_MASK_DEFAULT", "ITK_THREADS_DEFAULT", "BRANGE_DEFAULT",
-                 "BRANGE_TOL", "SHELL_TOL"):
+                 "BRANGE_TOL", "SHELL_TOL", "ITERATIONS_DEFAULT",
+                 "NUM_REGISTRATIONS_DEFAULT", "B0_MAX"):
         assert getattr(delta_svd_inputs, name) == getattr(c, name)
-    for name in ("BRANGE_DEFAULT", "BRANGE_TOL", "SHELL_TOL", "MIN_DIRECTIONS",
+    for name in ("B0_MAX", "BRANGE_DEFAULT", "BRANGE_TOL", "SHELL_TOL", "MIN_DIRECTIONS",
                  "RECOMMENDED_DIRECTIONS"):
         assert getattr(delta_svd_gradients, name) == getattr(c, name)
     for name in ("SKELETON_MASK_DEFAULT", "ITK_THREADS_DEFAULT", "BRANGE_DEFAULT",

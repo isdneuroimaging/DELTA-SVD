@@ -15,12 +15,25 @@ SKELETON_MASK_DEFAULT = "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
 #    moves delta-PSMD by ~23%). 12 is the validated value; see CONTRIBUTING.md.
 ITK_THREADS_DEFAULT = 12
 
+#--- Template construction (ANTs): iterations per resolution level of each
+#    pairwise registration ('-q') and number of template iterations ('-i').
+#    Both are validated values; see CONTRIBUTING.md.
+ITERATIONS_DEFAULT = "30x30x8"
+NUM_REGISTRATIONS_DEFAULT = 3
+
+#--- b-values at or below this count as b = 0: they carry no usable diffusion
+#    weighting, and are what S0 is averaged from. Always kept, whatever b-value
+#    selection the user asks for.
+B0_MAX = 5
+
 #--- The default '--bRange'.
 BRANGE_DEFAULT = (800, 1200)
 
 #--- Tolerances for scanner b-values off the nominal shell. A range only needs
 #    to absorb rounding; for a shell the tolerance is the whole acceptance
 #    window, so it is wider. Neither merges adjacent shells (>= 100 s/mm2 apart).
+#    They widen the '--bRange' / '--shells' windows only: b = 0 is decided by
+#    B0_MAX alone, with no tolerance on top.
 BRANGE_TOL = 5
 SHELL_TOL = 25
 

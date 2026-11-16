@@ -6,7 +6,8 @@ from os.path import join, exists, basename
 from shutil import copy2
 from pathlib import Path
 
-from delta_svd_constants import ITK_THREADS_DEFAULT, ANTS_TEMPLATE_INIT
+from delta_svd_constants import (ITK_THREADS_DEFAULT, ANTS_TEMPLATE_INIT,
+                                 ITERATIONS_DEFAULT, NUM_REGISTRATIONS_DEFAULT)
 
 from delta_svd_runtime import (running_in_image, pin_image_environment,
                                isolated_interpreter_argv, resolve_thread_budget,
@@ -257,7 +258,7 @@ def plan_ants_parallelism(nTP, coreBudget, paraOverride=None, itkThreads=ITK_THR
     return para, itkThreads, ("-c 0" if para == 1 else f"-c 2 -j {para}")
 
 
-def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1, paraOverride = None, iterations="30x30x8", numRegistrations=3, itkThreads=ITK_THREADS_DEFAULT):
+def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1, paraOverride = None, iterations=ITERATIONS_DEFAULT, numRegistrations=NUM_REGISTRATIONS_DEFAULT, itkThreads=ITK_THREADS_DEFAULT):
 
     fnFA = []
     for i,tp in enumerate(timepoints):

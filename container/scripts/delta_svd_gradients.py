@@ -8,8 +8,8 @@ pinned the threads and the BLAS kernel.
 
 from os.path import join, basename
 
-from delta_svd_constants import (BRANGE_DEFAULT, BRANGE_TOL, SHELL_TOL, MIN_DIRECTIONS,
-                                 RECOMMENDED_DIRECTIONS)
+from delta_svd_constants import (B0_MAX, BRANGE_DEFAULT, BRANGE_TOL, SHELL_TOL,
+                                 MIN_DIRECTIONS, RECOMMENDED_DIRECTIONS)
 
 import nibabel as nib
 from nibabel.volumeutils import apply_read_scaling
@@ -98,11 +98,6 @@ def write_bval_or_bvec(arrStr, fname):
             line = " ".join([x for x in arrStr])+'\n'
             file.write(line)
 
-
-#--- b-values at or below this count as b = 0: they carry no usable diffusion
-#    weighting, and are what S0 is averaged from. Always kept, whatever b-value
-#    selection the user asks for.
-B0_MAX = 5
 
 #--- The window the diffusion-tensor model is valid in. Below the floor the
 #    signal is contaminated by perfusion (IVIM), above the ceiling by

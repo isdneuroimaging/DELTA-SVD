@@ -11,14 +11,15 @@ import os, sys, argparse, re
 from os.path import join, exists, dirname
 
 from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
-                                 BRANGE_TOL, SHELL_TOL)
+                                 BRANGE_TOL, SHELL_TOL, ITERATIONS_DEFAULT,
+                                 NUM_REGISTRATIONS_DEFAULT, B0_MAX)
 
 import nibabel as nib
 import numpy as np
 
 from delta_svd_version import __version__
 from delta_svd_common import DeltaSvdError, strip_nifti_ext, validate_roi_labels
-from delta_svd_gradients import B0_MAX, BVAL_MIN, BVAL_MAX
+from delta_svd_gradients import BVAL_MIN, BVAL_MAX
 
 
 ###########################################################################
@@ -263,8 +264,8 @@ def iniParser():
     group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of timepoints either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
     group2.add_argument("--threads", metavar='cores', type=threadBudget, default='auto', help="number of physical CPU cores DELTA-SVD may use. Two steps are multi-core: the diffusion tensor / free-water fit, and (for longitudinal input only) the within-subject template construction; TBSS and the remaining steps are single-threaded. Defaults to 'auto', which detects the cores available to the process, honouring an HPC scheduler's allocation and a container CPU limit (e.g. Docker's '--cpus'). It has no effect on the results, only on runtime, so it can be tuned freely.")
     group2.add_argument("--itkThreads", metavar='threads', type=assertPositiveItkThreads, default=ITK_THREADS_DEFAULT, help=argparse.SUPPRESS) #--- "Expert override for the ITK threads used per ANTs registration job. WARNING: this changes the computed metrics -- ITK sums the registration metric per thread, so a different count sums in a different order. Defaults to 12, the value DELTA-SVD was validated at. Results produced with different values must not be compared or pooled."
-    group2.add_argument("--iterations", type=str, default='30x30x8', help=argparse.SUPPRESS) #--- "Iterations at each resolution level of the pairwise ANTs registrations during template creation. Must be three levels and specified in the format: 'L1xL2xL3'. Defaults to '30x30x8'."
-    group2.add_argument("--numRegistrations", type=assertPositiveRegistrations, default=3, help=argparse.SUPPRESS) #--- "Iterations of the template construction. Each iteration comprises averaging of images and pairwise registrations of each timepoint to the template. Defaults to 3 iterations."
+    group2.add_argument("--iterations", type=str, default=ITERATIONS_DEFAULT, help=argparse.SUPPRESS) #--- "Iterations at each resolution level of the pairwise ANTs registrations during template creation. Must be three levels and specified in the format: 'L1xL2xL3'. Defaults to '30x30x8'."
+    group2.add_argument("--numRegistrations", type=assertPositiveRegistrations, default=NUM_REGISTRATIONS_DEFAULT, help=argparse.SUPPRESS) #--- "Iterations of the template construction. Each iteration comprises averaging of images and pairwise registrations of each timepoint to the template. Defaults to 3 iterations."
     group2.add_argument("--qc", type=int, choices=[0,1,2], default=1, help="create (with argument 1; the default) a HTML file (delta-svd_qc.html) for quality checking and create (with argument 2) additionally a subfolder 'delta-svd_qc' with a series of NIfTI images showing skeleton and masks in native space, or (with argument 0) skip creation of both.")
     group2.add_argument("--debug", action='store_true', help="don't delete temporary folder 'delta-svd_temp', containing intermediate files created during processing.")
     group2.add_argument("--steps", choices = stepsImplemented, nargs="+", action='extend', help=argparse.SUPPRESS) #--- "choose step(s) to be conducted. By default all steps will be conducted. If the output for preceding steps is missing, an error will be raised. If different masks are provided, step 'tbss_non_fa' and following have to be repeated."
