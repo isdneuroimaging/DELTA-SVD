@@ -20,7 +20,7 @@ class DeltaSvdError(ValueError):
     """A problem with the input or with what was asked for -- not a bug.
 
     Raised for everything a user can fix by changing the command line or the
-    data, and caught in the __main__ guard at the bottom of this file, which
+    data, and caught in the __main__ guard at the bottom of delta-svd.py, which
     reports it the way argparse reports its own errors: one message on stderr,
     no traceback. Anything else that escapes is a fault in the pipeline and
     keeps its traceback, which is what makes it debuggable.

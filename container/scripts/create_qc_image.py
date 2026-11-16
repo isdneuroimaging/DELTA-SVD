@@ -103,7 +103,7 @@ def create_qc_image(fnamesBG, vlim, labels, fnameMask, fnameBmask, fnameCropMask
         ax.set_yticks([])
         ax.set_frame_on(False)
         ax.imshow(imgBG, cmap=plt.cm.gray, aspect='equal', interpolation='nearest', vmin=vlimVol[0], vmax=vlimVol[1])
-        ax.imshow(imgMask, cmap=cmap, aspect='equal', interpolation='nearest', vmin=0.5, vmax=3.5, alpha = 0.4) #--- plt.cm.bwr
+        ax.imshow(imgMask, cmap=cmap, aspect='equal', interpolation='nearest', vmin=0.5, vmax=3.5, alpha = 0.4)
         if iBG<len(imgBmask):
             imgBmaskT = imgBmask[iBG]
         else:

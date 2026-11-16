@@ -318,7 +318,7 @@ def test_aggregate_appends_date_suffix_to_output_filename(tmp_path):
 # ---------------------------------------------------------------------------
 # Errors go to stderr with an 'ERROR:' prefix and no traceback, matching
 # delta-svd.py. Every check here sits in one linear script-level flow, so this
-# uses sys.exit() directly rather than delta-svd.py's DeltaSvdError.
+# uses sys.exit() directly rather than the pipeline's DeltaSvdError (delta_svd_common.py).
 
 def test_aggregate_errors_go_to_stderr_without_a_traceback(tmp_path):
     _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")

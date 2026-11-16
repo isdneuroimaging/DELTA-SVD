@@ -637,7 +637,7 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
 
 
 ###########################################################################
-# Helper functions
+# Helper functions used by this script only (shared ones: delta_svd_common.py)
 
 def binarise_mask(img, label, fname):
     """Return 'img' as a strict {0,1} mask, reporting anything it had to change.
@@ -783,7 +783,7 @@ def write_run_manifest(fname, args, startedAt, outputs, completedAt=None):
 
 
 ###########################################################################
-# Pipeline
+# Pipeline (parser and input checks: delta_svd_inputs.py, QC: delta_svd_qc.py)
 
 def pipeline_delta_svd():
 

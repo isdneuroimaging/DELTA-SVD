@@ -53,6 +53,6 @@ IMAGE_ENVIRONMENT = {
 }
 
 #--- Fewer unique directions than the minimum are refused, fewer than the
-#    recommended count warned about; see DESIGN_MATRIX_RANK in delta-svd.py.
+#    recommended count warned about; see DESIGN_MATRIX_RANK in delta_svd_gradients.py.
 MIN_DIRECTIONS = 12
 RECOMMENDED_DIRECTIONS = 20

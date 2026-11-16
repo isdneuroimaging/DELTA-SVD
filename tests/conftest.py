@@ -7,8 +7,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONTAINER_FILES = REPO_ROOT / "container" / "scripts"
 
-# create_html_with_png.py and create_qc_image.py import each other by plain
-# module name (not via importlib), so they need to be importable normally.
+# The delta_svd_*.py modules, create_html_with_png.py and create_qc_image.py
+# import each other by plain module name (not via importlib), and the tests
+# import them the same way, so they need to be importable normally.
 sys.path.insert(0, str(CONTAINER_FILES))
 
 
