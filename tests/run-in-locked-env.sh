@@ -42,8 +42,8 @@ if [ -z "$DELTA_SVD_TEST_IMAGE" ]; then
     apt-get update -qq -o APT::Update::Error-Mode=any
     apt-get install -y -q --no-install-recommends \
         ca-certificates=20260816* \
-        libc6=2.39-0ubuntu8.9 \
-        libc-bin=2.39-0ubuntu8.9 \
+        libc6=2.39-0ubuntu8.12 \
+        libc-bin=2.39-0ubuntu8.12 \
         wget=1.21.4*
     wget -q https://repo.anaconda.com/miniconda/Miniconda3-py311_25.5.1-0-Linux-x86_64.sh -O /tmp/mc.sh
     echo "a921abd74e16f5dee8a4d79b124635fac9b939c465ba2e942ea61b3fcd1451d8  /tmp/mc.sh" | sha256sum -c -

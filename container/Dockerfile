@@ -74,9 +74,9 @@ ENV OPENBLAS_CORETYPE="Haswell" \
 RUN apt-get update -qq && apt-get install -y -q --no-install-recommends \
         ca-certificates=20260816* \
         dc=1.07.1* \
-        libc6=2.39-0ubuntu8.9 \
-        libc-bin=2.39-0ubuntu8.9 \
-        locales=2.39-0ubuntu8.9 \
+        libc6=2.39-0ubuntu8.12 \
+        libc-bin=2.39-0ubuntu8.12 \
+        locales=2.39-0ubuntu8.12 \
         wget=1.21.4* \
  && groupadd --system --gid 999 nonroot \
  && useradd --system --uid 999 --gid 999 \
