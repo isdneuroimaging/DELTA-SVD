@@ -54,10 +54,8 @@ def isNIfTI(s, abort=True):
         return s+'.nii'
     else:
         if abort:
-            # An existing file that is merely named wrong needs a different fix
-            # from one that is not there at all, so the two are told apart. This
-            # stays an ArgumentTypeError: argparse calls it as a 'type' and turns
-            # that into its own clean 'error:' line.
+            # A misnamed file needs a different fix from a missing one. Kept an
+            # ArgumentTypeError so argparse reports it as a clean 'error:' line.
             if os.path.isfile(s):
                 raise argparse.ArgumentTypeError(
                     f"file is not a NIfTI image -- its name ends in neither '.nii' nor "
@@ -67,10 +65,8 @@ def isNIfTI(s, abort=True):
                 raise argparse.ArgumentTypeError(
                     f"file does not exist, but one with the other NIfTI extension does:\n"
                     f"    {sibling}\n  Please check: {s}")
-            # The probes above append to the name as given, so they are only worth
-            # reporting when it carried no NIfTI extension of its own -- otherwise
-            # they looked for 'data.nii.nii.gz' and claiming they tried '.nii.gz'
-            # would be untrue.
+            # The probes are only reported for a name without a NIfTI extension;
+            # otherwise they looked for e.g. 'data.nii.nii.gz'.
             if s.endswith(NIFTI_EXTENSIONS):
                 raise argparse.ArgumentTypeError(f"file does not exist. Please check: {s}")
             raise argparse.ArgumentTypeError(
@@ -104,9 +100,7 @@ def candidate_paths(fn, dwi, anyExtension):
     This mirrors the resolution for the sake of the error message only. What is
     accepted stays entirely with isNIfTI()/exists(), so this cannot widen it."""
     p = per_timepoint_path(fn, dwi)
-    # isNIfTI() completes a path that carries no NIfTI extension of its own.
-    # It does probe 'p' itself either way, but a name already ending in one
-    # can only ever match as itself, so listing the completions would be noise.
+    # isNIfTI() only completes a name without a NIfTI extension of its own.
     if anyExtension and not p.endswith(NIFTI_EXTENSIONS):
         return [p + e for e in NIFTI_EXTENSIONS]
     return [p]
@@ -225,10 +219,8 @@ class CustomArgumentParser(argparse.ArgumentParser):
         for arg_string in args:
             if arg_string.startswith('-') and not arg_string.startswith('--'):
                 if len(arg_string) > 2 and not arg_string[2].isspace():
-                    # The likeliest cause: a long option typed with one dash
-                    # instead of two, e.g. '-shells' for '--shells'. Only worth
-                    # naming when it really is one of ours; self.error() exits,
-                    # so this is built once and never on the success path.
+                    # Likeliest cause: a long option typed with one dash, e.g.
+                    # '-shells'. Suggested only when it is one of ours.
                     known = {opt for a in self._actions for opt in a.option_strings}
                     long_form = '--' + arg_string[1:].split('=', 1)[0]
                     hint = f' Did you mean "{long_form}"?' if long_form in known else ''
@@ -269,7 +261,7 @@ def iniParser():
     group2.add_argument("--qc", type=int, choices=[0,1,2], default=1, help="create (with argument 1; the default) a HTML file (delta-svd_qc.html) for quality checking and create (with argument 2) additionally a subfolder 'delta-svd_qc' with a series of NIfTI images showing skeleton and masks in native space, or (with argument 0) skip creation of both.")
     group2.add_argument("--debug", action='store_true', help="don't delete temporary folder 'delta-svd_temp', containing intermediate files created during processing.")
     group2.add_argument("--steps", choices = stepsImplemented, nargs="+", action='extend', help=argparse.SUPPRESS) #--- "choose step(s) to be conducted. By default all steps will be conducted. If the output for preceding steps is missing, an error will be raised. If different masks are provided, step 'tbss_non_fa' and following have to be repeated."
-    group2.add_argument("--reprocess", metavar='csv-file',  type=isCSV, nargs="?", const='overwrite', help='allow reprocessing and overwriting of previously created output. You can, however, keep a previously created results file (default name: delta-svd_results.csv) by specifying here an alternative name for the new one (provide only the base name; the output folder cannot be changed here).')
+    group2.add_argument("--reprocess", metavar='csv-file',  type=isCSV, nargs="?", const='overwrite', help='allow reprocessing and overwriting of previously created output. You can, however, keep a previously created results file (default name: delta-svd_results.csv) by specifying here an alternative name for the new one (provide only the base name; the output folder cannot be changed here).') #--- "allow reprocessing of previously conducted steps. Warning: this will delete the previous results for all processing steps or, if '--steps' is used, for the selected (and all following/depending) steps. Deleting the final output table 'delta-svd_results.csv' can however be avoided, by providing here an alternative CSV filename (provide basename only; will be saved into the output folder, see '--dirOutput')"
     return parser
 
 
@@ -330,9 +322,8 @@ def check_dwi_grid(fname, label, attr, dwi):
 def resolve_inputs(args):
     """Resolve and validate the inputs on 'args', in place. Returns the steps
     available to this run, in order."""
-    # Check bval, bvec and bmask files. The brain mask may be '.nii.gz' or '.nii',
-    # so it is resolved through isNIfTI(), which probes both (gzip first) and also
-    # completes a path with no extension; bval/bvec are matched verbatim.
+    # Check bval, bvec and bmask files. The brain mask goes through isNIfTI()
+    # ('.nii.gz' before '.nii'); bval/bvec are matched verbatim.
     for attr, ext in zip(['bval','bvec','bmask'], ['.bval','.bvec','_brainmask']):
         anyExtension = (attr == 'bmask')
         resolve = (lambda fn: isNIfTI(fn, abort=False)) if anyExtension else (lambda fn: fn if exists(fn) else None)

@@ -32,24 +32,19 @@ OVERSUBSCRIBE_NUM, OVERSUBSCRIBE_DEN = 3, 2
 
 BLAS_THREADS = 1
 
-# Pin the BLAS/OpenMP thread pools *before* importing numpy/dipy: OpenBLAS reads
-# these when first loaded, and setting them later is ignored. Fixed at 1 rather
-# than at the core budget, so no thread count anywhere in the numerics can vary
-# with the machine: the per-voxel fits are parallelised by process instead (see
-# fit_voxelwise) and their matrices are far too small to thread anyway, so
-# nothing is given up. Assigned rather than setdefault(), for the reason given
-# for the ITK count below.
+# Pin the BLAS/OpenMP thread pools before importing numpy/dipy, which read them
+# only when first loaded. Fixed at 1 so no thread count in the numerics depends on
+# the machine; the per-voxel fits are parallelised by process instead (see
+# fit_voxelwise). Assigned rather than setdefault(), as for the ITK count below.
 CORE_BUDGET = resolve_thread_budget(sys.argv[1:])
 for _var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
              'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
     os.environ[_var] = str(BLAS_THREADS)
 
-# Every ANTs call inherits this, not only the template step: antsApplyTransforms
-# would otherwise fall back to the hardware concurrency -- or, on a Grid Engine
-# cluster, to NSLOTS, which ITK also consults -- putting a metric-affecting
-# thread count outside this pipeline's control. Assigned rather than
-# setdefault(): a value forwarded in from the host (Apptainer passes the whole
-# environment through by default) must not be able to change the results.
+# Every ANTs call inherits this; otherwise ITK falls back to the hardware
+# concurrency (or Grid Engine's NSLOTS), a metric-affecting thread count outside
+# the pipeline's control. Assigned rather than setdefault(), so that a host value
+# (Apptainer passes the environment through) cannot change the results.
 ITK_THREADS = resolve_itk_threads(sys.argv[1:])
 os.environ['ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS'] = str(ITK_THREADS)
 
@@ -89,21 +84,14 @@ from delta_svd_qc import prepare_qc
 
 
 ###########################################################################
-# Functions for major processing steps
-
-
-###########################################################################
 # Parallel driver for the vendored per-voxel fits
 
-# markvcid_fw_mrn.py is vendored verbatim and stays that way. Both fits there
-# loop over independent voxels, so fitting slabs of the volume in worker
-# processes leaves every voxel's arithmetic untouched and the result is
-# bit-identical to the serial loop - required, because a 1-ULP difference in the
-# fitted FA can move delta-PSMD by percent (see conda-explicit-linux-64.txt).
+# markvcid_fw_mrn.py stays vendored verbatim. Both fits loop over independent
+# voxels, so fitting slabs in worker processes is bit-identical to the serial
+# loop -- required, because a 1-ULP change in FA can move delta-PSMD by percent.
 
-# Capped independently of the core budget: 16 workers already take the fit from
-# ~2 min per timepoint to ~10-15 s, and slabbing along axis 0 cannot beat the
-# single most expensive slice anyway (~52x).
+# Capped independently of the core budget: 16 workers already cut the fit from
+# ~2 min to ~10-15 s per timepoint, and the costliest slice limits the speed-up.
 FW_MAX_WORKERS = 16
 
 _FW_SHARED = {}
@@ -249,9 +237,7 @@ def plan_ants_parallelism(nTP, coreBudget, paraOverride=None, itkThreads=ITK_THR
         cap = (OVERSUBSCRIBE_NUM * coreBudget) // (OVERSUBSCRIBE_DEN * itkThreads)
         para = max(1, min(fill, cap))
     else:
-        # An explicit override is a deliberate choice and is not clamped to the
-        # budget -- only to the timepoint count, beyond which there is no work
-        # left to run in parallel.
+        # An explicit override is clamped to the timepoint count, not the budget.
         para = max(1, int(paraOverride))
     para = min(para, nTP)
 
@@ -297,7 +283,7 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1
                    f"-r {shlex.quote(ref)} -t {shlex.quote(warp)} -t {shlex.quote(affine)}")
             run_subprocess(cmd, True, 'antsApplyTransforms')
 
-            if iFn==0: # iFn==0 corresponds to the FA (by default the fwc-FA), which shall be averaged across timepoints right after this loop
+            if iFn==0: # the FA (fwc-FA by default), averaged below
                 fnAverage.append(fnOut)
     
     # average the co-registered fwc-FA, because intensity histogram in template drifts
@@ -461,12 +447,13 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
     if exists(fnEmask):
         niiEmask = nib.load(fnEmask)
         imgEmask = niiEmask.get_fdata()
-        imgEmask = (imgEmask>0.05) *2 #--- be conservative, excluding also (most) interpolated voxels; only needed for QC: set voxels of exclusion mask equal 2, for later combination with intersection mask
-        imgEmask[maskIntersection==0] = 0 #--- only needed for QC: remove voxels from exclusion mask, which are anyways outside the intersection mask
+        # A low threshold also excludes most interpolated voxels. imgEmask is
+        # for QC only: intersection mask as label 1, exclusion mask as label 2.
+        imgEmask = (imgEmask>0.05) *2
+        imgEmask[maskIntersection==0] = 0
         maskIntersection[imgEmask>0] = 0
-        imgEmask[maskIntersection>0] = 1 #--- only needed for QC: combine intersection mask (label=1) and exclusion mask (label=2)
+        imgEmask[maskIntersection>0] = 1
 
-        # label-2 version is only used for the QC image
         skelSuffixL2 = skelSuffix + '_Emask-as-label2'
         pnameSkelIntersExcLabelled = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixL2+'.nii.gz')
         save_nifti(pnameSkelIntersExcLabelled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8')
@@ -563,9 +550,8 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         
 
     skeleton = [basename(skelMask)] * len(voxels)
-    # 'NA'/'NaN' are load-bearing sentinels, not placeholders: delta-svd_aggregate_results.py
-    # relies on them (via pandas' read_csv coercing 'NA' to NaN) to split these bookkeeping
-    # rows from real metric rows. Keep them literal strings; do not switch to np.nan.
+    # 'NA'/'NaN' are sentinels: delta-svd_aggregate_results.py relies on pandas
+    # reading 'NA' as NaN to tell these rows from metric rows. Keep them strings.
     df = pd.DataFrame(
         {'timepoint': timept,
          'skeleton': skeleton,
@@ -1119,12 +1105,9 @@ def pipeline_delta_svd():
 
 
 if __name__ == "__main__":
-    # Only DeltaSvdError is caught, and only here rather than inside
-    # pipeline_delta_svd(): a problem with the input is reported as one message,
-    # the way argparse reports its own, while anything else keeps its traceback
-    # -- an unexpected exception is a fault in the pipeline, and the traceback is
-    # what makes it reportable. Catching it here also leaves the pipeline
-    # importable and testable as a plain function.
+    # Only DeltaSvdError is caught, and only here: an input problem is reported as
+    # one message like argparse's, while a pipeline fault keeps its traceback.
+    # pipeline_delta_svd() stays testable as a plain function.
     try:
         pipeline_delta_svd()
     except DeltaSvdError as err:

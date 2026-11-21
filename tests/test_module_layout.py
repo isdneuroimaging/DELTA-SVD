@@ -42,8 +42,5 @@ def test_nothing_third_party_is_imported_before_the_pinning():
 
 @pytest.mark.parametrize('fname', ['delta_svd_constants.py', 'delta_svd_runtime.py'])
 def test_pre_pinning_modules_import_the_standard_library_only(fname):
-    path = CONTAINER_FILES / fname
-    if not path.exists():
-        pytest.skip(f'{fname} does not exist yet')
-    imported = imported_modules(ast.parse(path.read_text()))
+    imported = imported_modules(ast.parse((CONTAINER_FILES / fname).read_text()))
     assert imported - set(sys.stdlib_module_names) - {'delta_svd_constants'} == set()

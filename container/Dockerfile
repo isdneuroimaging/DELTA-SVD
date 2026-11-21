@@ -48,13 +48,11 @@ LABEL org.opencontainers.image.title="DELTA-SVD" \
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-## OPENBLAS_CORETYPE pins the BLAS kernel. The bundled libopenblas is a
-## DYNAMIC_ARCH build, so it otherwise picks kernels from the CPU's feature set
-## at load time, and that reaches the metrics: np.linalg.pinv in the free-water
-## fit differs between kernel families, which moved delta-PSMD by ~9% between
-## Nehalem and Haswell on the reference subject. Haswell is the family the
-## method was validated on. It needs AVX2/FMA (x86-64-v3); delta-svd.py checks
-## for those and reports it, because OpenBLAS itself would die with SIGILL.
+## OPENBLAS_CORETYPE pins the BLAS kernel. The bundled DYNAMIC_ARCH libopenblas
+## otherwise picks kernels by CPU, and np.linalg.pinv in the free-water fit differs
+## between them (Nehalem vs Haswell moved delta-PSMD by ~9%). Haswell is the
+## validated family; it needs AVX2/FMA, which delta-svd.py checks because
+## OpenBLAS itself would die with SIGILL.
 ENV OPENBLAS_CORETYPE="Haswell" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONUNBUFFERED=1 \
@@ -145,7 +143,7 @@ COPY --from=ants /opt/ants-2.4.3/bin/antsMultivariateTemplateConstruction2.sh \
 COPY LICENSE NOTICE /opt/
 COPY container/third-party-licenses/ /opt/third-party-licenses/
 
-## Pipeline scripts, plus the two FSL-derived reference images they need at runtime,see NOTICE.
+## Pipeline scripts, plus the two FSL-derived reference images they need at runtime; see NOTICE.
 WORKDIR /opt/scripts
 COPY container/scripts/ .
 

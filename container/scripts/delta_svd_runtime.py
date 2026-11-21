@@ -164,7 +164,7 @@ def cgroup_cpu_limit(procCgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
 
 def resolve_thread_budget(argv):
     """Core budget from --threads, auto-detected when absent or 'auto'.
-    Resolved at import, ahead of the full parser, alongside the ITK count below."""
+    Resolved by delta-svd.py at import, ahead of the full parser, alongside the ITK count."""
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--threads', default=None)
     ns, _ = pre.parse_known_args(argv)
@@ -179,7 +179,7 @@ def resolve_thread_budget(argv):
 
 def resolve_itk_threads(argv):
     """ITK threads per registration job from --itkThreads. Resolved alongside the
-    core budget because it is exported into the environment below."""
+    core budget because delta-svd.py exports it into the environment at import."""
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument('--itkThreads', default=None)
     ns, _ = pre.parse_known_args(argv)

@@ -106,12 +106,8 @@ def test_detect_physical_cores_is_capped_by_the_quota(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# resolve_thread_budget() / detect_physical_cores()
-#
-# These run at import time, *before* the real parser and before numpy is
-# imported, to size the BLAS/OpenMP pools. So they must never raise on input the
-# real parser is supposed to reject, and never choke on the rest of the command
-# line - a traceback here kills the run before argparse can print a usage error.
+# resolve_thread_budget() / detect_physical_cores() run at import, before the
+# real parser, so they must never raise on bad input: argparse reports it later.
 
 def test_resolve_thread_budget_autodetects_when_threads_absent(monkeypatch):
     monkeypatch.setattr(delta_svd_runtime, "detect_physical_cores", lambda: 99)

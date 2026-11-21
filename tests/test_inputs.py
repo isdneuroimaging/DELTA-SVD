@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 
 import delta_svd_common
+import delta_svd_constants
 import delta_svd_inputs
+from conftest import MNI_AFFINE, MNI_SHAPE, DWI_AFFINE, save_grid, save_dwi
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +172,8 @@ def test_iniparser_defaults():
     assert parser.get_default("para") is None
     assert parser.get_default("threads") == "auto"
     assert parser.get_default("itkThreads") == delta_svd_inputs.ITK_THREADS_DEFAULT
+    assert parser.get_default("iterations") == delta_svd_constants.ITERATIONS_DEFAULT
+    assert parser.get_default("numRegistrations") == delta_svd_constants.NUM_REGISTRATIONS_DEFAULT
     assert parser.get_default("bRange") == [800, 1200]
     assert parser.get_default("shells") is None
     assert parser.get_default("skeletonMask") == "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
@@ -178,11 +182,8 @@ def test_iniparser_defaults():
     assert parser.get_default("hemispheres") is False
 
 
-# Anything that actually parses arguments has to pass an explicit
-# '--skeletonMask': argparse runs string defaults through their 'type=', and the
-# default here is the in-container path '/opt/scripts/delta-svd_skeletonmask_v1.nii.gz',
-# which isNIfTI() rejects outside the image. Defaults are asserted via
-# parser.get_default() instead (see test_iniparser_defaults above).
+# Parsing tests pass an explicit '--skeletonMask': argparse runs the default
+# through isNIfTI(), which rejects the in-image path outside the image.
 def _touch_dwi_and_skeleton(tmp_path):
     dwi = tmp_path / "sub01.nii.gz"
     skel = tmp_path / "skel.nii.gz"
@@ -210,10 +211,6 @@ def test_iniparser_para_zero_is_rejected_by_cli(tmp_path, capsys):
 
 # ---------------------------------------------------------------------------
 # assertBValue(): the window the diffusion tensor model is valid in
-#
-# Outside it the tensor is not interpretable - below the floor the signal is
-# contaminated by perfusion, above the ceiling by non-Gaussian diffusion - so
-# such a request is refused before anything runs rather than fitted.
 
 @pytest.mark.parametrize("value", ["250", "1000", "1800"])
 def test_assertBValue_accepts_the_valid_window(value):
@@ -371,36 +368,19 @@ def test_nifti_sibling_returns_none_without_a_counterpart(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# check_mni_grid(). The reference is a stand-in with the shipped mask's header,
-# since '/opt/scripts' only exists in the image.
-
-_MNI_AFFINE = np.array([[-1., 0, 0, 90], [0, 1, 0, -126], [0, 0, 1, -72], [0, 0, 0, 1]])
-_MNI_SHAPE = (182, 218, 182)
-
-
-def _save_grid(path, shape=_MNI_SHAPE, affine=_MNI_AFFINE):
-    nib.save(nib.Nifti1Image(np.zeros(shape, dtype="uint8"), affine), str(path))
-    return str(path)
-
-
-@pytest.fixture
-def _mni_reference(tmp_path, monkeypatch):
-    ref = _save_grid(tmp_path / "reference.nii.gz")
-    monkeypatch.setattr(delta_svd_inputs, "SKELETON_MASK_DEFAULT", ref)
-    return ref
-
+# check_mni_grid(). The reference is the MNI-grid stand-in from conftest.py.
 
 def test_mni_reference_matches_the_shipped_skeleton_mask():
     from conftest import CONTAINER_FILES
     img = nib.load(str(CONTAINER_FILES / "delta-svd_skeletonmask_v1.nii.gz"))
-    assert img.shape == _MNI_SHAPE
-    assert np.allclose(img.affine, _MNI_AFFINE)
+    assert img.shape == MNI_SHAPE
+    assert np.allclose(img.affine, MNI_AFFINE)
 
 
-def test_check_mni_grid_accepts_a_matching_grid(tmp_path, _mni_reference):
-    affine = _MNI_AFFINE.copy()
+def test_check_mni_grid_accepts_a_matching_grid(tmp_path, mni_reference):
+    affine = MNI_AFFINE.copy()
     affine[0, 3] += 1e-6                          # float32 header round-off
-    delta_svd_inputs.check_mni_grid(_save_grid(tmp_path / "mask.nii.gz", affine=affine), "skeleton mask")
+    delta_svd_inputs.check_mni_grid(save_grid(tmp_path / "mask.nii.gz", affine=affine), "skeleton mask")
 
 
 def test_check_mni_grid_is_a_no_op_for_the_default_mask(tmp_path, monkeypatch):
@@ -410,17 +390,17 @@ def test_check_mni_grid_is_a_no_op_for_the_default_mask(tmp_path, monkeypatch):
     delta_svd_inputs.check_mni_grid(missing, "skeleton mask")
 
 
-def test_check_mni_grid_rejects_a_flipped_x_axis(tmp_path, _mni_reference):
-    affine = _MNI_AFFINE.copy()
+def test_check_mni_grid_rejects_a_flipped_x_axis(tmp_path, mni_reference):
+    affine = MNI_AFFINE.copy()
     affine[0, 0], affine[0, 3] = 1, -91           # RAS storage of the same space
-    fn = _save_grid(tmp_path / "mask.nii.gz", affine=affine)
+    fn = save_grid(tmp_path / "mask.nii.gz", affine=affine)
     with pytest.raises(delta_svd_common.DeltaSvdError, match="affine") as excinfo:
         delta_svd_inputs.check_mni_grid(fn, "skeleton mask")
     assert fn in str(excinfo.value)
 
 
-def test_check_mni_grid_rejects_a_wrong_shape(tmp_path, _mni_reference):
-    fn = _save_grid(tmp_path / "mask.nii.gz", shape=(91, 109, 91))
+def test_check_mni_grid_rejects_a_wrong_shape(tmp_path, mni_reference):
+    fn = save_grid(tmp_path / "mask.nii.gz", shape=(91, 109, 91))
     with pytest.raises(delta_svd_common.DeltaSvdError, match="image dimensions") as excinfo:
         delta_svd_inputs.check_mni_grid(fn, "ROI mask in MNI space")
     assert "ROI mask in MNI space" in str(excinfo.value)
@@ -430,26 +410,17 @@ def test_check_mni_grid_rejects_a_wrong_shape(tmp_path, _mni_reference):
 # ---------------------------------------------------------------------------
 # check_dwi_grid(): masks given in DWI space have to be on their DWI's grid.
 
-_DWI_AFFINE = np.diag([2.0, 2.0, 2.5, 1.0])
-_DWI_AFFINE[:3, 3] = [-100.0, -120.0, -60.0]
-
-
-def _save_dwi(path, shape=(8, 9, 7, 3), affine=_DWI_AFFINE):
-    nib.save(nib.Nifti1Image(np.zeros(shape, dtype="float32"), affine), str(path))
-    return str(path)
-
-
 def test_check_dwi_grid_accepts_a_matching_grid(tmp_path):
-    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
-    affine = _DWI_AFFINE.copy()
+    dwi = save_dwi(tmp_path / "dwi.nii.gz")
+    affine = DWI_AFFINE.copy()
     affine[0, 3] += 1e-6                          # float32 header round-off
-    delta_svd_inputs.check_dwi_grid(_save_grid(tmp_path / "mask.nii.gz", (8, 9, 7), affine),
+    delta_svd_inputs.check_dwi_grid(save_grid(tmp_path / "mask.nii.gz", (8, 9, 7), affine),
                              "brain mask", "bmask", dwi)
 
 
 def test_check_dwi_grid_rejects_a_wrong_shape(tmp_path):
-    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
-    fn = _save_grid(tmp_path / "lesion.nii.gz", (16, 18, 14), _DWI_AFFINE)
+    dwi = save_dwi(tmp_path / "dwi.nii.gz")
+    fn = save_grid(tmp_path / "lesion.nii.gz", (16, 18, 14), DWI_AFFINE)
     with pytest.raises(delta_svd_common.DeltaSvdError, match="image dimensions") as excinfo:
         delta_svd_inputs.check_dwi_grid(fn, "exclusion mask", "Emask", dwi)
     msg = str(excinfo.value)
@@ -457,9 +428,9 @@ def test_check_dwi_grid_rejects_a_wrong_shape(tmp_path):
 
 
 def test_check_dwi_grid_rejects_a_shifted_affine(tmp_path):
-    dwi = _save_dwi(tmp_path / "dwi.nii.gz")
-    affine = _DWI_AFFINE.copy()
+    dwi = save_dwi(tmp_path / "dwi.nii.gz")
+    affine = DWI_AFFINE.copy()
     affine[2, 3] += 2.5                           # one slice off
-    fn = _save_grid(tmp_path / "roi.nii.gz", (8, 9, 7), affine)
+    fn = save_grid(tmp_path / "roi.nii.gz", (8, 9, 7), affine)
     with pytest.raises(delta_svd_common.DeltaSvdError, match="affine"):
         delta_svd_inputs.check_dwi_grid(fn, "ROI mask in DWI space", "Rmask", dwi)

@@ -61,11 +61,8 @@ def test_run_manifest_records_run_details_and_outputs(delta_svd, tmp_path, monke
 # ANTs parallelism planner
 
 def test_plan_ants_parallelism_itk_threads_never_vary(delta_svd):
-    # The regression guard for the whole planner: the ITK thread count is the one
-    # quantity here that moves the metric values, so it must depend on nothing but
-    # --itkThreads. Deriving it from the core budget is what previously made
-    # results differ between machines and between subjects with different numbers
-    # of timepoints.
+    # The ITK thread count is the one planner output that moves the metrics, so it
+    # must depend on --itkThreads alone, not on the cores or timepoints.
     varied = [
         (nTP, budget, para, delta_svd.plan_ants_parallelism(nTP, budget, para)[1])
         for nTP in (1, 2, 3, 4, 6, 12)
@@ -134,13 +131,8 @@ def test_itk_thread_count_is_exported_to_every_ants_call(delta_svd):
 
 
 # ---------------------------------------------------------------------------
-# integrate_masks()
-#
-# Produces every voxel count that reaches the results CSV, and every skeleton
-# mask extract_stats() later globs for. The counts are what a reader uses to
-# judge whether a timepoint is usable, so a silent off-by-one here is invisible
-# downstream but changes the reported numbers. Each test below pins one of the
-# structurally distinct branches.
+# integrate_masks(): every voxel count in the results CSV and every skeleton mask
+# extract_stats() globs for. Each test pins one distinct branch.
 
 def _vol(values):
     """A (n, 1, 1) volume - a one-dimensional 'brain' is enough for every branch
@@ -231,11 +223,9 @@ def test_integrate_masks_multi_timepoint_intersects_and_reports_set_difference(d
 
 
 def test_integrate_masks_excludes_emask_and_labels_it_for_qc(delta_svd, tmp_path):
-    # The exclusion mask (e.g. an infarct) is cut out of the analysed skeleton.
-    # Two things are easy to get wrong and both are checked here: the 0.05
-    # threshold is deliberately conservative, so interpolated fringe voxels are
-    # excluded too; and the QC image must label 2 only where exclusion actually
-    # removed something, i.e. inside the intersection.
+    # The exclusion mask (e.g. an infarct) is cut out of the skeleton. The 0.05
+    # threshold also excludes interpolated fringe voxels, and the QC image labels 2
+    # only where exclusion removed something, i.e. inside the intersection.
     kwargs, stats = _tbss_tree(
         tmp_path,
         skeleton=[1, 1, 1, 1, 1, 0],
@@ -258,11 +248,8 @@ def test_integrate_masks_excludes_emask_and_labels_it_for_qc(delta_svd, tmp_path
 
 
 def test_integrate_masks_inserts_the_background_roi_before_the_named_rois(delta_svd, tmp_path):
-    # Subject ROIs partition the skeleton, and Rmask-00 is the complement that
-    # makes the partition complete. It is *inserted* ahead of the named ROI rows
-    # rather than appended - the insert offset is index arithmetic over a list
-    # that has already grown, which is exactly the kind of thing that silently
-    # slips a row into the wrong place in the CSV.
+    # Rmask-00 is the complement of the subject ROIs. It is inserted ahead of the
+    # named ROI rows by index arithmetic, which can easily slip a row out of place.
     kwargs, stats = _tbss_tree(
         tmp_path,
         skeleton=[1, 1, 1, 1, 1, 0],
@@ -374,10 +361,8 @@ def test_prepare_qc_deprojects_the_roi_maps_integrate_masks_writes(delta_svd, tm
 
 
 def test_integrate_masks_relabels_mni_rois_including_the_background(delta_svd, tmp_path):
-    # An atlas file carries several labels in one volume; each becomes its own
-    # region. Label 0 is deliberately kept as a region ('the rest of the
-    # skeleton'), so a future 'uROI = uROI[uROI>0]' tidy-up would silently drop a
-    # column from the results CSV.
+    # Each label of an atlas file becomes its own region, label 0 ('the rest of
+    # the skeleton') included.
     kwargs, stats = _tbss_tree(
         tmp_path,
         skeleton=[1, 1, 1, 1, 1, 0],
@@ -444,10 +429,8 @@ def test_integrate_and_extract_preserve_wide_dwi_labels(delta_svd, tmp_path):
 
 
 def test_integrate_masks_splits_hemispheres_along_the_first_axis(delta_svd, tmp_path):
-    # Optional per-hemisphere analysis. The split is a plain index cut at
-    # shape[0] // 2 with no image-orientation check, and 'LH' is the half that
-    # survives after the *low* indices are zeroed - pinned here because nothing
-    # else in the pipeline would notice the two labels swapping.
+    # The hemisphere split is an index cut at shape[0] // 2; 'LH' is the half left
+    # after the low indices are zeroed. Nothing else would notice a swap.
     kwargs, stats = _tbss_tree(
         tmp_path,
         skeleton=[1, 1, 1, 1, 1, 0],
@@ -614,11 +597,10 @@ def test_wls_fit_dti_recovers_known_tensor(delta_svd):
 # ---------------------------------------------------------------------------
 # Free-water two-tensor fitting (wls_fit_tensor_fw / wls_iter_fw)
 #
-# The output row is [Dxx, Dxy, Dyy, Dxz, Dyz, Dzz, log(S0), f, dF2] - index 7 is
-# the free-water fraction written out as wls_dti_FW.nii.gz, index 8 the residual
-# difference. These tests fix the *structure* and the qualitative behaviour of
-# the fit, not an accuracy claim: the estimator is deliberately regularised
-# towards MDm and is biased, so asserting f == f_true would be wrong.
+# The output row is [Dxx, Dxy, Dyy, Dxz, Dyz, Dzz, log(S0), f, dF2]: f is written
+# as wls_dti_FW.nii.gz, dF2 is the residual difference. The estimator is
+# regularised towards MDm and biased, so these tests pin structure and
+# qualitative behaviour, not f == f_true.
 
 @pytest.fixture(scope="module")
 def _fw_gtab():
@@ -699,10 +681,8 @@ def test_wls_fit_tensor_fw_follows_the_mdm_target(delta_svd, _fw_gtab):
 
 
 def test_wls_fit_tensor_fw_declares_csf_voxels_fully_free_water(delta_svd, _fw_gtab):
-    # A voxel whose single-tensor MD is at or above mdreg is CSF; it short-cuts
-    # the fit and is written out as f = 1. Everything else stays zero, so the
-    # tensor is null and FA comes out 0 - which is what the '--- FA==0 inside the
-    # brain mask -> 0.05' fixup downstream keys off.
+    # A voxel with single-tensor MD >= mdreg is CSF: f = 1 and a null tensor, so
+    # FA is 0, which the downstream 'FA==0 -> 0.05' fixup keys off.
     gtab, bvals, bvecs = _fw_gtab
     W = design_matrix(gtab)
     data = np.ones((2, 1, 1, len(bvals))) * 500.0
@@ -718,11 +698,8 @@ def test_wls_fit_tensor_fw_declares_csf_voxels_fully_free_water(delta_svd, _fw_g
 
 
 def test_wls_fit_tensor_fw_leaves_signalless_voxels_at_zero(delta_svd, _fw_gtab):
-    # Below min_signal the fit is skipped entirely. It has to be: handed noise,
-    # the WLS solve takes log() of a clipped floor and the fitted log(S0) runs
-    # away (~20 for a 1e-9 signal), so a mask that leaks background would seed
-    # nonsense into the FA and FW maps. The contrast with the CSF branch above
-    # also matters - background must not come out as 100 % free water.
+    # Below min_signal the fit is skipped: on noise the fitted log(S0) runs away
+    # (~20 for a 1e-9 signal). Unlike CSF, background must not come out as f = 1.
     gtab, bvals, bvecs = _fw_gtab
     W = design_matrix(gtab)
     # voxel 0 is exactly zero, voxel 1 sits just under min_signal; both have an
@@ -1098,11 +1075,8 @@ def test_scaled_compressed_and_uncompressed_inputs_remain_equivalent(delta_svd, 
 
 
 # ---------------------------------------------------------------------------
-# binarise_mask()
-#
-# The threshold at 1 and the uint8 writes only behave on a strictly {0,1} mask.
-# Binarising on the way in makes that true, and must stay a no-op for a mask
-# that already is - the case every validated run was made with.
+# binarise_mask(): the threshold at 1 and the uint8 writes need a {0,1} mask, and
+# binarising must be a no-op for one (every validated run).
 
 @pytest.mark.parametrize("values", [
     [0.0, 1.0, 1.0, 0.0],                                   # float 0/1
@@ -1149,8 +1123,7 @@ def test_binarise_mask_write_path_is_byte_identical_for_a_binary_mask(delta_svd,
 
 
 # ---------------------------------------------------------------------------
-# --numRegistrations reaches an ANTs shell command, so it is validated like the
-# other numeric options rather than accepting any int.
+# create_template(): the ANTs command line
 
 class _StopAfterCommand(Exception):
     """Abort create_template once the ANTs command has been captured."""
@@ -1301,9 +1274,9 @@ def test_mixed_voxel_order_warning(delta_svd):
 
 
 def test_reorient_round_trip_restores_the_header_bytes(delta_svd, tmp_path):
-    # oblique, 2.1 mm slices: pixdim recomputed from the affine moved by a float32
-    # ULP, which FSL and ANTs amplify into the metrics; it has to be copied exactly
-    # as a scanner writes it: a qform (rotation + qfac) and an sform derived from it
+    # Oblique, 2.1 mm slices, with a qform (rotation + qfac) and a derived sform as
+    # a scanner writes them. Pixdim recomputed from the affine would move by a
+    # float32 ULP, which FSL and ANTs amplify, so it has to be copied exactly.
     hdr = nib.Nifti1Header()
     hdr.set_data_shape((4, 5, 6))
     hdr.set_data_dtype("float32")

@@ -44,10 +44,8 @@ def test_read_bval_or_bvec_rejects_malformed_shape(tmp_path):
         delta_svd_gradients.read_bval_or_bvec(str(fn))
 
 
-# A ragged or non-numeric file used to escape as numpy's own ValueError, whose
-# message ("inhomogeneous shape", "could not convert string to float") names
-# neither the file nor the line. Both are the user's to fix, so both are ours
-# to report.
+# A ragged or non-numeric file is reported with its name and line, not as numpy's
+# own ValueError.
 
 def test_read_bval_or_bvec_rejects_lines_of_unequal_length(tmp_path):
     fn = tmp_path / "bad.bvec"
@@ -149,12 +147,8 @@ def test_resolve_b_intervals_prefers_shells_over_the_range_default():
 
 
 # ---------------------------------------------------------------------------
-# describe_directions(): angular sampling, and whether the tensor is estimable
-#
-# The count drives the hard floor in filter_b_values(), and it counts *unique*
-# directions: the free-water fraction is grid-searched against the residual, so
-# a repeated direction adds no constraint on it, however many times it was
-# acquired.
+# describe_directions(): angular sampling, and whether the tensor is estimable.
+# The count drives the floor in filter_b_values() and counts unique directions.
 
 def _directions(n):
     """n distinct unit vectors, spread over a hemisphere by the golden-section
@@ -245,13 +239,8 @@ def test_format_b_values_groups_within_shell_deviation():
 
 
 # ---------------------------------------------------------------------------
-# filter_b_values(): shell selection of the b-value range
-#
-# This is the gate every later step depends on - the DWI volumes, the bvals and
-# the bvecs have to stay index-aligned after filtering, or the tensor fit is
-# silently fitted against the wrong gradient directions. It is also where data
-# the fits cannot be trusted on is refused: the bi-tensor fit solves with a
-# pseudo-inverse, so nothing downstream raises on a degenerate gradient table.
+# filter_b_values(): shell selection of the b-value range. Volumes, bvals and
+# bvecs must stay index-aligned, or the fit silently uses the wrong directions.
 
 DEFAULT_INTERVALS = [(795.0, 1205.0)]
 
@@ -505,11 +494,8 @@ def test_filter_b_values_excludes_shells_between_requested_ones(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# filter_b_values(): the guards
-#
-# Each of these would otherwise reach the fits, which solve with a pseudo-inverse
-# and so return a minimum-norm solution instead of raising - the run would finish
-# and report plausible-looking numbers.
+# filter_b_values(): the guards. Unchecked, each case would reach the fits, which
+# return plausible-looking numbers instead of raising.
 
 def test_filter_b_values_rejects_a_shell_that_matches_nothing(tmp_path):
     # the user named the shell explicitly, so its absence is a misconfiguration,

@@ -106,25 +106,17 @@ def write_bval_or_bvec(arrStr, fname):
 BVAL_MIN = 250
 BVAL_MAX = 1800
 
-#--- Identifiability of the fits.
+#--- Identifiability of the fits. The design matrix has seven columns (six tensor
+#    components plus the log-S0 intercept, see markvcid_fw_mrn.wls_iter_fw), so
+#    the tensor needs rank 7, i.e. six non-collinear directions. The free-water
+#    fraction is grid-searched on the residual and constrained only by distinct
+#    design rows, so the floors count unique directions, not volumes.
 #
-#    The design matrix both fits solve has seven columns -- the six tensor
-#    components plus the log-S0 intercept (see markvcid_fw_mrn.wls_iter_fw) --
-#    so rank 7 is what "the tensor is estimable at all" means, and six
-#    non-collinear directions reach it. The free-water fraction is not part of
-#    that linear solve: it is grid-searched and scored by the residual, so it is
-#    constrained only by *distinct* design rows. Repeated acquisitions of one
-#    direction average noise but add no constraint on it -- hence the floor
-#    counts unique directions, not volumes.
-#
-#    Twelve is the lowest direction count of a real clinical DTI protocol: below
-#    it a dataset is far more likely truncated, corrupted, or over-filtered than
-#    deliberately acquired, so it is refused. Between twelve and the twenty
-#    directions docs/requirements.md recommends the fit works but the free-water
-#    fraction is noisy, which is a warning rather than an error. None of this
-#    fails on its own: the bi-tensor fit solves with a pseudo-inverse, which
-#    returns a minimum-norm solution for a degenerate gradient table instead of
-#    raising, so an unchecked run produces plausible-looking numbers.
+#    Below twelve directions (the fewest of a real clinical protocol) a dataset is
+#    likelier truncated or corrupted than intended, so it is refused; below the
+#    twenty docs/requirements.md recommends, the free-water fraction is noisy, so
+#    it is warned about. The fit never fails by itself: its pseudo-inverse returns
+#    plausible-looking numbers for a degenerate gradient table.
 DESIGN_MATRIX_RANK = 7
 
 #--- Two gradient directions count as one below an angle of ~2.6 degrees. Even a
@@ -246,10 +238,8 @@ def filter_b_values(fn_data = 'data.nii.gz',
     print(f' images with b-value in range  : n={sum(selBRange==True)}')
     print(f' images with excluded b-values : n={sum(sel==False)}')
 
-    #--- Everything below refuses data the fits cannot be trusted on, before any
-    #    image is loaded: a too-narrow selection then costs seconds rather than a
-    #    tensor fit. The checks run on the unfiltered path too, so they are
-    #    placed ahead of the 'applyFilter' branch.
+    #--- Refuse data the fits cannot be trusted on before any image is loaded, on
+    #    the unfiltered path too, hence ahead of the 'applyFilter' branch.
     for (lo, hi), selInterval in zip(bIntervals, perInterval):
         if not np.any(selInterval):
             raise DeltaSvdError(f"No volume has a b-value in [{lo:g}, {hi:g}]. Check the requested "
@@ -324,10 +314,8 @@ def filter_b_values(fn_data = 'data.nii.gz',
         fn_data = join(out_dir, basename(fn_data))
         write_bval_or_bvec(bvals, fn_bval)
         write_bval_or_bvec(bvecs, fn_bvec)
-        # dtype='float32' explicit: a lossless round-trip for the float32 input the
-        # pipeline expects (do not change -- float64 would alter results for
-        # int16-with-scaling input). 'img' is float32 already, see
-        # selected_volumes_float32().
+        # float32 explicitly (do not change): lossless for the expected float32
+        # input, while float64 would alter results for int16-with-scaling input.
         save_nifti(fn_data, img, nii.affine, nii.header, dtype='float32')
 
         print('New data saved to:')

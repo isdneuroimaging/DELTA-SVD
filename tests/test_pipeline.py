@@ -7,8 +7,7 @@ import numpy as np
 import pytest
 
 import delta_svd_inputs
-# grid helpers shared with the input tests; _mni_reference is a fixture
-from test_inputs import _DWI_AFFINE, _mni_reference, _save_dwi, _save_grid
+from conftest import DWI_AFFINE, save_dwi, save_grid
 
 
 # ---------------------------------------------------------------------------
@@ -154,10 +153,8 @@ def test_pipeline_accepts_distinct_timepoint_labels(delta_svd, tmp_path, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# '--qc 0' used to do `stepsImplemented.remove('qc')` on the module-level list
-# that also backs the '--steps' argparse choices, so a second run in the same
-# process died on "list.remove(x): x not in list" and lost 'qc' as a valid
-# choice. The step list is now copied per run.
+# '--qc 0' must not remove 'qc' from the module-level step list that backs the
+# '--steps' choices, or a second run in the same process fails.
 
 def test_qc_zero_does_not_erode_the_module_level_step_list(delta_svd, tmp_path, monkeypatch):
     dwi, skel = _minimal_pipeline_inputs(tmp_path)
@@ -178,10 +175,7 @@ def test_qc_zero_does_not_erode_the_module_level_step_list(delta_svd, tmp_path, 
 
 
 # ---------------------------------------------------------------------------
-# "Hemispheric skeleton analysis" message should only print when --hemispheres
-# was actually passed (regression test: previously guarded by
-# `if args.hemispheres is not None`, which is always true since the default
-# is False, not None).
+# The "Hemispheric skeleton analysis" message prints only with --hemispheres.
 
 def test_hemispheres_message_not_printed_by_default(delta_svd, tmp_path, monkeypatch, capsys):
     dwi, skel = _minimal_pipeline_inputs(tmp_path)
@@ -206,10 +200,8 @@ def test_hemispheres_message_printed_when_flag_set(delta_svd, tmp_path, monkeypa
 
 
 # ---------------------------------------------------------------------------
-# Resolution of the bval/bvec/bmask paths. Both NIfTI extensions are supported
-# for the brain mask, whether it is inferred from the DWI path or passed
-# explicitly. The runs below are aborted (deliberately contradictory
-# '--steps qc --qc 0') right after the resolved inputs have been echoed.
+# Resolution of the bval/bvec/bmask paths, both NIfTI extensions for the brain
+# mask. The runs abort ('--steps qc --qc 0' contradict) after the inputs are echoed.
 
 def _resolved_inputs(delta_svd, monkeypatch, capsys, argv):
     monkeypatch.setattr(sys, "argv", ["delta-svd.py"] + argv)
@@ -286,10 +278,8 @@ def test_missing_bmask_raises_naming_the_option(delta_svd, tmp_path, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# An inferred path already carries the DWI folder, so re-anchoring it to that
-# folder would only probe '<dwiDir>/<dwiDir>/<name>'. Absolute paths hide this,
-# because os.path.join() discards its first argument for them -- these tests use
-# relative ones on purpose.
+# An inferred path already carries the DWI folder and must not be re-anchored to
+# it. Relative paths on purpose: os.path.join() would hide this for absolute ones.
 
 def test_inferred_path_is_not_re_anchored_to_the_dwi_folder(delta_svd, tmp_path, monkeypatch):
     sub = tmp_path / "Notch004" / "BL" / "diffusion"
@@ -331,9 +321,8 @@ def test_explicit_basename_still_resolves_against_the_dwi_folder(delta_svd, tmp_
 
 
 # ---------------------------------------------------------------------------
-# A bare name means the file next to each timepoint's DWI image. It used to be
-# looked for in the working directory first, so running from inside one
-# session's folder silently gave every session that session's files.
+# A bare name means the file next to each timepoint's DWI image, never one in the
+# working directory.
 
 def _two_sessions(tmp_path):
     skel = tmp_path / "skel.nii.gz"
@@ -523,10 +512,10 @@ def test_wrong_number_of_bvec_files_names_that_option(delta_svd, tmp_path, monke
 
 @pytest.mark.parametrize("option", ["--skeletonMask", "--RmaskMNI"])
 def test_pipeline_rejects_an_off_grid_mask_before_processing(
-        delta_svd, tmp_path, monkeypatch, _mni_reference, option):
+        delta_svd, tmp_path, monkeypatch, mni_reference, option):
     dwi, skel = _minimal_pipeline_inputs(tmp_path)
-    skel = _save_grid(skel)
-    offGrid = _save_grid(tmp_path / "off.nii.gz", shape=(91, 109, 91))
+    skel = save_grid(skel)
+    offGrid = save_grid(tmp_path / "off.nii.gz", shape=(91, 109, 91))
     argv = ["delta-svd.py", "--dwi", str(dwi), "--skeletonMask", skel]
     if option == "--skeletonMask":
         argv[-1] = offGrid
@@ -542,11 +531,11 @@ def test_pipeline_rejects_an_off_grid_mask_before_processing(
 @pytest.mark.parametrize("option", ["--bmask", "--Emask", "--Rmask"])
 def test_pipeline_rejects_an_off_grid_dwi_mask_before_processing(
         delta_svd, tmp_path, monkeypatch, option):
-    dwi = _save_dwi(tmp_path / "sub01.nii.gz")
+    dwi = save_dwi(tmp_path / "sub01.nii.gz")
     for fn in ["sub01.bval", "sub01.bvec"]:
         (tmp_path / fn).touch()
-    _save_grid(tmp_path / "sub01_brainmask.nii.gz", (8, 9, 7), _DWI_AFFINE)
-    offGrid = _save_grid(tmp_path / "off.nii.gz", (16, 18, 14), _DWI_AFFINE)
+    save_grid(tmp_path / "sub01_brainmask.nii.gz", (8, 9, 7), DWI_AFFINE)
+    offGrid = save_grid(tmp_path / "off.nii.gz", (16, 18, 14), DWI_AFFINE)
     skel = tmp_path / "skel.nii.gz"
     skel.touch()
     monkeypatch.setattr(sys, "argv", ["delta-svd.py", "--dwi", dwi, option, offGrid,

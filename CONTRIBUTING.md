@@ -67,7 +67,7 @@ Rules for the runs being compared:
   - `delta_svd_common.py` — helpers that two or more of the above need.
   - `delta_svd_constants.py`, `delta_svd_version.py` — shared defaults and the version.
 
-  Two rules keep this split safe. Code that can move the numbers lives in `delta-svd.py`, `delta_svd_runtime.py`, `delta_svd_gradients.py` and `delta_svd_common.py`; a change to `delta_svd_inputs.py` or `delta_svd_qc.py` must not be able to. `delta_svd_runtime.py` (like `delta_svd_constants.py`) imports the standard library and `delta_svd_constants` only, because `delta-svd.py` imports it before pinning the threads and the BLAS kernel, which must precede the first numpy import; `tests/test_module_layout.py` enforces this.
+  Two rules keep this split safe. Code that can move the numbers lives in `delta-svd.py`, `delta_svd_runtime.py`, `delta_svd_gradients.py` and `delta_svd_common.py`; a change to `delta_svd_inputs.py` or `delta_svd_qc.py` must not be able to. The metric-affecting parser defaults that `delta_svd_inputs.py` sets therefore take their values from `delta_svd_constants.py`. `delta_svd_runtime.py` (like `delta_svd_constants.py`) imports the standard library and `delta_svd_constants` only, because `delta-svd.py` imports it before pinning the threads and the BLAS kernel, which must precede the first numpy import; `tests/test_module_layout.py` enforces this.
 - [`tests/`](tests/) — pytest unit tests for those scripts.
 - [`tools/`](tools/) — maintainer utilities that are not part of the image, such as `compare_results.py` above.
 - [`docs/`](docs/) — documentation sources (see below).

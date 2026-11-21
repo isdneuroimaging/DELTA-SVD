@@ -1,4 +1,3 @@
-import pandas as pd
 import pytest
 
 # tools/compare_results.py diffs two results tables so that a metric that moved
@@ -10,10 +9,8 @@ HEADER = "ID,timepoint,skeleton,region,voxels,metric,value\n"
 
 def _rows(msmd="0.00073214", psmd="0.00042100", voxels="118432",
           skel="skel.nii.gz", psmd_name="PSMD"):
-    # an endpoint-metrics row pair plus the kind of QC-bookkeeping row
-    # integrate_masks emits
-    # (metric 'NA' / value 'NaN', which pandas reads back as missing values).
-    # 'skel' and 'psmd_name' model a label rename between two runs.
+    # endpoint-metric rows plus an integrate_masks() bookkeeping row ('NA'/'NaN',
+    # read back as missing); 'skel' and 'psmd_name' model a label rename.
     return (
         HEADER
         + f"P01,ses-1,{skel},intersection,{voxels},MSMD,{msmd}\n"

@@ -68,12 +68,8 @@ def _run(*args):
 
 
 # ---------------------------------------------------------------------------
-# Argparse validators
-#
-# The aggregation logic itself lives in the `if __name__ == "__main__":`
-# block rather than in a function, so it is exercised end-to-end via
-# subprocess below. Only the argparse type validators and parser
-# construction (iniParser) are plain module-level functions.
+# Argparse validators. The aggregation itself runs in the __main__ block, so it
+# is tested end-to-end via subprocess below.
 
 def test_isDir_accepts_existing_directory(aggregate_results, tmp_path):
     assert aggregate_results.isDir(str(tmp_path)) == str(tmp_path)
@@ -200,10 +196,9 @@ def test_aggregate_insert_path_column(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# The 'path' column has to identify the file a row actually came from. '-p' is
-# the documented remedy for tables carrying no 'ID' column, so it must work on
-# exactly those (it used to raise "ValueError: 'ID' is not in list"), and a file
-# contributing no rows must not shift the path assignment of the files after it.
+# The 'path' column has to identify the file a row came from. '-p' is the remedy
+# for tables without an 'ID' column, so it must work on those, and a file with no
+# rows must not shift the paths of the files after it.
 
 def test_aggregate_insert_path_column_without_id_column(tmp_path):
     _write_fixture_csv_without_id(tmp_path / "subject1", "0.0004", "0.0007")
@@ -316,9 +311,8 @@ def test_aggregate_appends_date_suffix_to_output_filename(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Errors go to stderr with an 'ERROR:' prefix and no traceback, matching
-# delta-svd.py. Every check here sits in one linear script-level flow, so this
-# uses sys.exit() directly rather than the pipeline's DeltaSvdError (delta_svd_common.py).
+# Errors go to stderr with an 'ERROR:' prefix and no traceback, like delta-svd.py
+# (via sys.exit() here, not DeltaSvdError).
 
 def test_aggregate_errors_go_to_stderr_without_a_traceback(tmp_path):
     _write_fixture_csv(tmp_path / "subject1", "P01", "0.0004", "0.0007")
