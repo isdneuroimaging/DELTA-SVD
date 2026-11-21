@@ -1,5 +1,5 @@
 # Stage 1: ANTs install
-FROM ubuntu:noble-20260509.1@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS ants
+FROM ubuntu:noble-20261110.1@sha256:882e1e56091c9ffbc70c026ff5935fe85d3c91ad155917865ba2ffa23ede1560 AS ants
 
 # DL4006: fail pipelines on the first failing command
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -33,7 +33,7 @@ RUN [ "$(sed -n '169p;170p;186p;213p' /opt/ants-2.4.3/bin/ANTSpexec.sh | grep -c
  && sed -i '1a# Modified from upstream ANTs by the DELTA-SVD project; see NOTICE.' /opt/ants-2.4.3/bin/antsMultivariateTemplateConstruction2.sh
 
 # Stage 2
-FROM ubuntu:noble-20260509.1@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS final
+FROM ubuntu:noble-20261110.1@sha256:882e1e56091c9ffbc70c026ff5935fe85d3c91ad155917865ba2ffa23ede1560 AS final
 
 # DL4006: fail pipelines on the first failing command
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]

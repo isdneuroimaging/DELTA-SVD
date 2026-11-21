@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-TEST_IMAGE="${DELTA_SVD_TEST_IMAGE:-ubuntu:noble-20260509.1@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54}"
+TEST_IMAGE="${DELTA_SVD_TEST_IMAGE:-ubuntu:noble-20261110.1@sha256:882e1e56091c9ffbc70c026ff5935fe85d3c91ad155917865ba2ffa23ede1560}"
 echo "Testing the working tree at ${REPO_ROOT} using ${TEST_IMAGE}"
 
 # Keep the base image, glibc, Miniconda and Pillow pins in step with Dockerfile.
