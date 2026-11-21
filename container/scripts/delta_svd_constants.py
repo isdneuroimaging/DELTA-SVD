@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Defaults shared by delta-svd.py and the QC report (create_html_with_png.py).
+"""Defaults shared by delta-svd.py, its delta_svd_*.py modules and the QC report
+(create_html_with_png.py).
 
 No third-party imports: delta-svd.py imports this before pinning the BLAS
 kernel, which must precede the first numpy import.
@@ -15,12 +16,23 @@ SKELETON_MASK_DEFAULT = "/opt/scripts/delta-svd_skeletonmask_v1.nii.gz"
 #    moves delta-PSMD by ~23%). 12 is the validated value; see CONTRIBUTING.md.
 ITK_THREADS_DEFAULT = 12
 
+#--- Template construction (ANTs): iterations per resolution level of each
+#    pairwise registration ('-q') and number of template iterations ('-i').
+#    Both are validated values; see CONTRIBUTING.md.
+ITERATIONS_DEFAULT = "30x30x8"
+NUM_REGISTRATIONS_DEFAULT = 3
+
+#--- b-values at or below this count as b = 0: they carry no usable diffusion
+#    weighting, and are what S0 is averaged from. Always kept, whatever b-value
+#    selection the user asks for.
+B0_MAX = 5
+
 #--- The default '--bRange'.
 BRANGE_DEFAULT = (800, 1200)
 
-#--- Tolerances for scanner b-values off the nominal shell. A range only needs
-#    to absorb rounding; for a shell the tolerance is the whole acceptance
-#    window, so it is wider. Neither merges adjacent shells (>= 100 s/mm2 apart).
+#--- Tolerances for scanner b-values off the nominal value: a range only absorbs
+#    rounding, while a shell's tolerance is its whole acceptance window. Neither
+#    merges adjacent shells (>= 100 s/mm2 apart) or applies to b = 0 (B0_MAX).
 BRANGE_TOL = 5
 SHELL_TOL = 25
 
@@ -31,16 +43,12 @@ IMAGE_SCRIPT_DIR = "/opt/scripts"
 #--- Initial target of the longitudinal template construction (ANTs '-z').
 ANTS_TEMPLATE_INIT = IMAGE_SCRIPT_DIR + "/FMRIB58_FA_2mm_crop.nii.gz"
 
-#--- Environment the image's FSL, ANTs and BLAS are selected by. The Dockerfile
-#    sets the same values as ENV (a test keeps the two in step). Apptainer keeps
-#    those over host variables of the same name, but they can still be replaced
-#    on purpose ('docker run -e', Apptainer's '--env' or APPTAINERENV_*), so
-#    delta-svd.py assigns them outright when it runs in the image: another
-#    FSLDIR or ANTSPATH would run another FSL or ANTs, and another
-#    OPENBLAS_CORETYPE another BLAS kernel, all of which change the metrics.
-#    PYTHONNOUSERSITE keeps the Python subprocesses (e.g. fsl_sub) off
-#    ~/.local in a home that Apptainer mounts. PATH selects the FSL and ANTs
-#    entry commands, which are called by name; its tail is the base image's.
+#--- Environment that selects the image's FSL, ANTs and BLAS, mirrored by the
+#    Dockerfile's ENV (a test keeps them in step). A user can still override ENV
+#    ('docker run -e', APPTAINERENV_*), and another FSLDIR, ANTSPATH or
+#    OPENBLAS_CORETYPE changes the metrics, so delta-svd.py assigns these outright
+#    in the image. PYTHONNOUSERSITE keeps Python subprocesses (e.g. fsl_sub) off a
+#    mounted ~/.local; PATH selects the FSL and ANTs commands called by name.
 IMAGE_ENVIRONMENT = {
     "PATH": "/opt/scripts:/opt/conda/bin:/opt/ants-2.4.3/bin:"
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -53,6 +61,6 @@ IMAGE_ENVIRONMENT = {
 }
 
 #--- Fewer unique directions than the minimum are refused, fewer than the
-#    recommended count warned about; see DESIGN_MATRIX_RANK in delta-svd.py.
+#    recommended count warned about; see DESIGN_MATRIX_RANK in delta_svd_gradients.py.
 MIN_DIRECTIONS = 12
 RECOMMENDED_DIRECTIONS = 20

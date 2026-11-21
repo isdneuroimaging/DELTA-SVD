@@ -24,7 +24,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
-TEST_IMAGE="${DELTA_SVD_TEST_IMAGE:-ubuntu:noble-20260509.1@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54}"
+TEST_IMAGE="${DELTA_SVD_TEST_IMAGE:-ubuntu:noble-20261110.1@sha256:882e1e56091c9ffbc70c026ff5935fe85d3c91ad155917865ba2ffa23ede1560}"
 echo "Testing the working tree at ${REPO_ROOT} using ${TEST_IMAGE}"
 
 # Keep the base image, glibc, Miniconda and Pillow pins in step with Dockerfile.
@@ -42,8 +42,8 @@ if [ -z "$DELTA_SVD_TEST_IMAGE" ]; then
     apt-get update -qq -o APT::Update::Error-Mode=any
     apt-get install -y -q --no-install-recommends \
         ca-certificates=20260816* \
-        libc6=2.39-0ubuntu8.9 \
-        libc-bin=2.39-0ubuntu8.9 \
+        libc6=2.39-0ubuntu8.12 \
+        libc-bin=2.39-0ubuntu8.12 \
         wget=1.21.4*
     wget -q https://repo.anaconda.com/miniconda/Miniconda3-py311_25.5.1-0-Linux-x86_64.sh -O /tmp/mc.sh
     echo "a921abd74e16f5dee8a4d79b124635fac9b939c465ba2e942ea61b3fcd1451d8  /tmp/mc.sh" | sha256sum -c -

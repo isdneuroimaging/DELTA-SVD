@@ -1,78 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, sys, argparse, re, subprocess, time, glob, shlex, multiprocessing, json, datetime, contextlib
-import importlib.util
-from os.path import join, exists, dirname, basename
-from shutil import copy2, rmtree
+import os, sys, re, time, glob, shlex, multiprocessing, json, datetime, contextlib
+from os.path import join, exists, basename
+from shutil import copy2
 from pathlib import Path
 
-from delta_svd_constants import (SKELETON_MASK_DEFAULT, ITK_THREADS_DEFAULT, BRANGE_DEFAULT,
-                                 BRANGE_TOL, SHELL_TOL, MIN_DIRECTIONS, RECOMMENDED_DIRECTIONS,
-                                 IMAGE_SCRIPT_DIR, IMAGE_ENVIRONMENT, ANTS_TEMPLATE_INIT)
+from delta_svd_constants import (ITK_THREADS_DEFAULT, ANTS_TEMPLATE_INIT,
+                                 ITERATIONS_DEFAULT, NUM_REGISTRATIONS_DEFAULT)
 
-
-def running_in_image(scriptPath=None):
-    """True when this is the copy of the script installed in the image."""
-    if scriptPath is None:
-        scriptPath = __file__
-    return dirname(os.path.realpath(scriptPath)) == IMAGE_SCRIPT_DIR
-
-
-def fsl_sub_config(fsldir):
-    """The fsl_sub configuration the image resolves to by itself, i.e. with no
-    FSLSUB_CONF and no ~/.fsl_sub.yml (as under Docker, where the image user has
-    no home): the first non-empty file of fsl_sub's own search path after those
-    two. Located without importing fsl_sub. None if neither exists."""
-    candidates = [join(fsldir, 'etc', 'fslconf', 'fsl_sub.yml')]
-    spec = importlib.util.find_spec('fsl_sub')
-    if spec is not None and spec.submodule_search_locations:
-        candidates.append(join(list(spec.submodule_search_locations)[0],
-                               'plugins', 'fsl_sub_shell.yml'))
-    for p in candidates:
-        if os.path.isfile(p) and os.path.getsize(p) > 0:
-            return p
-    return None
-
-
-def pin_image_environment(environ, fslSubConfig=fsl_sub_config):
-    """Give 'environ' the image's own settings, whatever came in from the host.
-
-    Apptainer passes in host variables the image does not set (PYTHONPATH,
-    FSLSUB_*) and mounts the host's home, and the image's ENV values can still
-    be replaced on purpose (see IMAGE_ENVIRONMENT). Left alone, that can run
-    the host's FSL (FSLDIR: the TBSS scripts call
-    $FSLDIR/bin/...) or ANTs (ANTSPATH: the template script calls
-    ${ANTSPATH}/antsRegistration), another BLAS kernel (OPENBLAS_CORETYPE), the
-    host's Python packages (PYTHONPATH, ~/.local), or the host's fsl_sub
-    settings (FSLSUB_*). Every one of these changes the metrics or breaks the
-    run, so they are assigned or removed here rather than defaulted. Also
-    inherited by every FSL and ANTs subprocess.
-
-    Not covered: a ~/.fsl_sub.yml in the mounted home. fsl_sub merges it over
-    whatever configuration it loads, FSLSUB_CONF included. It can only change
-    how jobs are launched, not what they compute; asking for a cluster
-    scheduler, for which the image has no plugin, makes fsl_sub fail."""
-    for name in [n for n in environ if n.startswith(('PYTHON', 'FSLSUB_'))]:
-        del environ[name]
-    environ.update(IMAGE_ENVIRONMENT)
-    # the file fsl_sub would find by itself, named explicitly so a host value
-    # cannot select another one
-    conf = fslSubConfig(environ['FSLDIR'])
-    if conf is not None:
-        environ['FSLSUB_CONF'] = conf
-
-
-def isolated_interpreter_argv(flags, argv, script):
-    """The command re-running 'script' as 'python -E -s -u', or None when the
-    interpreter already ignores PYTHON* variables and the user site-packages.
-    Otherwise numpy and the rest could be imported from the host's PYTHONPATH or
-    ~/.local instead of the image. -u stands in for PYTHONUNBUFFERED, which -E
-    ignores."""
-    if flags.ignore_environment and flags.no_user_site:
-        return None
-    return [sys.executable, '-E', '-s', '-u', script] + list(argv)
-
+from delta_svd_runtime import (running_in_image, pin_image_environment,
+                               isolated_interpreter_argv, resolve_thread_budget,
+                               resolve_itk_threads, check_cpu_supports_coretype)
 
 # Before anything else reads the environment or imports a third-party package.
 # The Dockerfile ENTRYPOINT already starts Python with -E -s -u; the re-exec
@@ -85,172 +24,29 @@ if running_in_image():
             os.execv(sys.executable, _argv)
 
 
-def detect_physical_cores():
-    """Number of *physical* CPU cores this process may use, honouring CPU affinity
-    (an HPC scheduler's cpuset). Hyperthreads are deliberately not counted: ANTs
-    registration gains little from SMT. Falls back to the affinity size. Capped
-    by a cgroup CPU quota, if the process runs under one."""
-    try:
-        allowed = os.sched_getaffinity(0)          # logical CPUs this process may use
-    except AttributeError:                         # non-Linux platforms
-        allowed = set(range(os.cpu_count() or 1))
-    try:
-        cores = set()
-        cur = {}
-        with open('/proc/cpuinfo') as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:                       # blank line ends one processor block
-                    if cur.get('processor') in allowed and 'physical id' in cur and 'core id' in cur:
-                        cores.add((cur['physical id'], cur['core id']))
-                    cur = {}
-                    continue
-                key, _, val = line.partition(':')
-                key, val = key.strip(), val.strip()
-                if key == 'processor':
-                    cur['processor'] = int(val)
-                elif key in ('physical id', 'core id'):
-                    cur[key] = int(val)
-        if not cores:
-            raise ValueError('no core topology in /proc/cpuinfo')
-        count = len(cores)
-    except (OSError, ValueError):
-        count = max(1, len(allowed))                # fallback: assume no SMT
-    # A CPU quota (Docker '--cpus', a Kubernetes CPU limit) leaves the affinity
-    # untouched, so it has to be read separately; without it the budget would
-    # be every core of the host.
-    quota = cgroup_cpu_limit()
-    if quota is not None:
-        count = min(count, max(1, int(-(-quota // 1))))      # rounded up
-    return count
-
-
-def cgroup_cpu_limit(procCgroup='/proc/self/cgroup', root='/sys/fs/cgroup'):
-    """CPUs' worth of time the cgroup CPU quota allows this process, or None
-    without a quota. The tightest of its own cgroup and every ancestor counts.
-    Covers cgroup v2 ('cpu.max') and v1 ('cpu.cfs_quota_us')."""
-    try:
-        with open(procCgroup) as fh:
-            entries = [line.rstrip('\n').split(':', 2) for line in fh if line.count(':') >= 2]
-    except OSError:
-        return None
-
-    def read(path):
-        try:
-            with open(path) as fh:
-                return fh.read().split()
-        except OSError:
-            return None
-
-    def ratio(quota, period):
-        try:
-            return int(quota) / int(period)
-        except (ValueError, ZeroDivisionError):
-            return -1
-
-    def ancestors(base, rel):
-        parts = [p for p in rel.split('/') if p]
-        return [os.path.join(base, *parts[:n]) for n in range(len(parts), -1, -1)]
-
-    limits = []
-    for _, controllers, rel in entries:
-        if controllers == '':                                    # cgroup v2
-            for d in ancestors(root, rel):
-                val = read(os.path.join(d, 'cpu.max'))
-                if val and len(val) == 2 and val[0] != 'max':
-                    limits.append(ratio(val[0], val[1]))
-        elif 'cpu' in controllers.split(','):                   # cgroup v1
-            for mount in ('cpu', 'cpu,cpuacct', 'cpuacct,cpu'):
-                for d in ancestors(os.path.join(root, mount), rel):
-                    quota = read(os.path.join(d, 'cpu.cfs_quota_us'))
-                    period = read(os.path.join(d, 'cpu.cfs_period_us'))
-                    if quota and period:
-                        limits.append(ratio(quota[0], period[0]))    # -1: no quota
-    positive = [x for x in limits if x > 0]
-    return min(positive) if positive else None
-
-
-def resolve_thread_budget(argv):
-    """Core budget from --threads, auto-detected when absent or 'auto'.
-    Resolved at import, ahead of the full parser, alongside the ITK count below."""
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('--threads', default=None)
-    ns, _ = pre.parse_known_args(argv)
-    val = ns.threads
-    if val is None or str(val).strip().lower() == 'auto':
-        return detect_physical_cores()
-    try:
-        return max(1, int(val))
-    except ValueError:
-        return detect_physical_cores()              # the full parser reports the error later
-
-
 # How far the template step may oversubscribe the core budget, as a fraction:
 # 3/2 = 1.5 threads per core. Measured faster than an exactly-fitting plan, and
 # without numerical consequence, so this is purely a throughput choice.
 OVERSUBSCRIBE_NUM, OVERSUBSCRIBE_DEN = 3, 2
 
 
-def resolve_itk_threads(argv):
-    """ITK threads per registration job from --itkThreads. Resolved alongside the
-    core budget because it is exported into the environment below."""
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('--itkThreads', default=None)
-    ns, _ = pre.parse_known_args(argv)
-    if ns.itkThreads is None:
-        return ITK_THREADS_DEFAULT
-    try:
-        return max(1, int(ns.itkThreads))
-    except ValueError:
-        return ITK_THREADS_DEFAULT                  # the full parser reports the error later
-
-
 BLAS_THREADS = 1
 
-# Pin the BLAS/OpenMP thread pools *before* importing numpy/dipy: OpenBLAS reads
-# these when first loaded, and setting them later is ignored. Fixed at 1 rather
-# than at the core budget, so no thread count anywhere in the numerics can vary
-# with the machine: the per-voxel fits are parallelised by process instead (see
-# fit_voxelwise) and their matrices are far too small to thread anyway, so
-# nothing is given up. Assigned rather than setdefault(), for the reason given
-# for the ITK count below.
+# Pin the BLAS/OpenMP thread pools before importing numpy/dipy, which read them
+# only when first loaded. Fixed at 1 so no thread count in the numerics depends on
+# the machine; the per-voxel fits are parallelised by process instead (see
+# fit_voxelwise). Assigned rather than setdefault(), as for the ITK count below.
 CORE_BUDGET = resolve_thread_budget(sys.argv[1:])
 for _var in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS',
              'NUMEXPR_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS'):
     os.environ[_var] = str(BLAS_THREADS)
 
-# Every ANTs call inherits this, not only the template step: antsApplyTransforms
-# would otherwise fall back to the hardware concurrency -- or, on a Grid Engine
-# cluster, to NSLOTS, which ITK also consults -- putting a metric-affecting
-# thread count outside this pipeline's control. Assigned rather than
-# setdefault(): a value forwarded in from the host (Apptainer passes the whole
-# environment through by default) must not be able to change the results.
+# Every ANTs call inherits this; otherwise ITK falls back to the hardware
+# concurrency (or Grid Engine's NSLOTS), a metric-affecting thread count outside
+# the pipeline's control. Assigned rather than setdefault(), so that a host value
+# (Apptainer passes the environment through) cannot change the results.
 ITK_THREADS = resolve_itk_threads(sys.argv[1:])
 os.environ['ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS'] = str(ITK_THREADS)
-
-
-#--- CPU features each pinned OpenBLAS kernel family needs to execute at all
-CORETYPE_REQUIRED_FLAGS = {'haswell': ('avx2', 'fma'), 'zen': ('avx2', 'fma'),
-                           'skylakex': ('avx512f',), 'sandybridge': ('avx',)}
-
-
-def check_cpu_supports_coretype(coretype=None, cpuinfo='/proc/cpuinfo'):
-    """Fail early, and legibly, if the CPU cannot run the pinned BLAS kernel.
-
-    The image pins OPENBLAS_CORETYPE so the numerics cannot vary with the CPU
-    (see the Dockerfile). Asking OpenBLAS for a kernel the hardware lacks does
-    not fall back -- it dies with SIGILL and no message -- so the requirement is
-    checked here instead. Returns the missing flags, empty when all is well."""
-    coretype = os.environ.get('OPENBLAS_CORETYPE') if coretype is None else coretype
-    required = CORETYPE_REQUIRED_FLAGS.get(str(coretype).strip().lower(), ())
-    if not required:
-        return ()                                  # unpinned, or a family we make no claim about
-    try:
-        with open(cpuinfo) as fh:
-            flags = set(fh.read().split())
-    except OSError:
-        return ()                                  # not Linux: leave it to OpenBLAS
-    return tuple(f for f in required if f not in flags)
 
 
 _missing = check_cpu_supports_coretype()
@@ -264,16 +60,10 @@ if _missing:
              f"  without it would silently produce different metrics.")
 
 import nibabel as nib
-from nibabel.volumeutils import apply_read_scaling
 from nibabel.orientations import (io_orientation, axcodes2ornt, ornt_transform,
                                   apply_orientation, inv_ornt_aff)
 import numpy as np
 import pandas as pd
-
-ROI_LABEL_DTYPE = 'uint16'
-ROI_LABEL_MAX = np.iinfo(ROI_LABEL_DTYPE).max
-# absorbs float32 header round-off in check_mni_grid()
-GRID_AFFINE_ATOL = 1e-4
 
 from dipy.io import read_bvals_bvecs
 from dipy.core.gradients import gradient_table
@@ -285,371 +75,23 @@ from scipy.ndimage import gaussian_filter
 
 from markvcid_fw_mrn import wls_fit_tensor_fw, wls_fit_dti
 from delta_svd_version import __version__, __source_revision__
-
-
-class DeltaSvdError(ValueError):
-    """A problem with the input or with what was asked for -- not a bug.
-
-    Raised for everything a user can fix by changing the command line or the
-    data, and caught in the __main__ guard at the bottom of this file, which
-    reports it the way argparse reports its own errors: one message on stderr,
-    no traceback. Anything else that escapes is a fault in the pipeline and
-    keeps its traceback, which is what makes it debuggable.
-
-    An exception rather than a direct sys.exit() because these checks live in
-    functions that are unit-tested directly and called as a library; exiting
-    from inside them would make that impossible. It derives from ValueError
-    because that is what they raised before, and callers may still catch it
-    as one.
-
-    delta-svd_aggregate_results.py has no such structure -- every check there
-    sits in one linear script-level flow -- so it calls sys.exit() directly
-    instead of importing this. Both produce the same 'ERROR: ...' on stderr.
-    """
-
-###########################################################################
-# Functions for reading/writing bval/bvec files
-
-#--- How many lines of a malformed file to list before summarising the rest.
-MAX_LINES_REPORTED = 10
-
-
-def first_non_numeric(rows):
-    """Where the first entry that is not a number sits, as (line, position,
-    value) with both indices 1-based. None when every entry is a number.
-
-    For error messages only: numpy names the offending value but not where in
-    the file it is, which is the part needed to go and fix it."""
-    for iRow, row in enumerate(rows):
-        for iVal, val in enumerate(row):
-            try:
-                float(val)
-            except ValueError:
-                return iRow + 1, iVal + 1, val
-    return None
-
-
-def read_bval_or_bvec(fname):
-
-    with open(fname, "r") as file:
-        ll = file.readlines()
-
-    for i,l in enumerate(ll):
-        ll[i] = l.split()
-
-    #--- Lines of unequal length make np.array() raise on its own, with a message
-    #    about inhomogeneous shapes that names neither the file nor the line.
-    lengths = {len(row) for row in ll}
-    if len(lengths) > 1:
-        shown = '\n'.join(f'   line {i+1}: {len(row)} value(s)'
-                          for i, row in enumerate(ll[:MAX_LINES_REPORTED]))
-        more = (f'\n   ... and {len(ll)-MAX_LINES_REPORTED} more line(s)'
-                if len(ll) > MAX_LINES_REPORTED else '')
-        blanks = ('\n A blank line holds no values and counts here, so remove any.'
-                  if 0 in lengths else '')
-        raise DeltaSvdError(f"Every line of a bval/bvec file has to hold the same number of values "
-                            f"-- one per volume -- but these do not:\n{shown}{more}{blanks}\n"
-                            f" {fname}")
-
-    rows = ll                      # kept for reporting: 'll' is reshaped below
-    ll = np.array(ll)
-
-    if ll.shape[0]==1:
-        ll = ll[0]
-    elif ll.shape[0]==3:
-        ll = ll.T
-    else:
-        raise DeltaSvdError(f"Input file has to contain either one row (for bval files) or three "
-                            f"rows (for bvec files), but this one has {ll.shape[0]}:\n {fname}")
-
-    arrStr   = ll
-    #--- Attempted rather than pre-checked, so that what counts as a number stays
-    #    exactly what numpy accepts; the scan below runs only once it has failed.
-    try:
-        arrFloat = ll.astype('float')
-    except ValueError:
-        found = first_non_numeric(rows)
-        where = (f" The first is '{found[2]}', on line {found[0]} at position {found[1]}."
-                 if found else '')
-        raise DeltaSvdError(f"A bval/bvec file may only hold numbers, but this one holds a value "
-                            f"that is not a number.{where}\n {fname}") from None
-
-    return arrFloat, arrStr
-
-
-def write_bval_or_bvec(arrStr, fname):
-    with open(fname, "w") as file:
-        if arrStr.ndim==2:
-            for i in range(arrStr.shape[1]):
-                line = " ".join([x for x in arrStr[:,i]])+'\n'
-                file.write(line)
-        elif arrStr.ndim==1:
-            line = " ".join([x for x in arrStr])+'\n'
-            file.write(line)
-
-
-
-###########################################################################
-# Functions for major processing steps
-
-
-#--- b-values at or below this count as b = 0: they carry no usable diffusion
-#    weighting, and are what S0 is averaged from. Always kept, whatever b-value
-#    selection the user asks for.
-B0_MAX = 5
-
-#--- The window the diffusion-tensor model is valid in. Below the floor the
-#    signal is contaminated by perfusion (IVIM), above the ceiling by
-#    non-Gaussian diffusion; a tensor fitted outside it is not interpretable, so
-#    b-value selections beyond these are refused rather than fitted.
-BVAL_MIN = 250
-BVAL_MAX = 1800
-
-#--- Identifiability of the fits.
-#
-#    The design matrix both fits solve has seven columns -- the six tensor
-#    components plus the log-S0 intercept (see markvcid_fw_mrn.wls_iter_fw) --
-#    so rank 7 is what "the tensor is estimable at all" means, and six
-#    non-collinear directions reach it. The free-water fraction is not part of
-#    that linear solve: it is grid-searched and scored by the residual, so it is
-#    constrained only by *distinct* design rows. Repeated acquisitions of one
-#    direction average noise but add no constraint on it -- hence the floor
-#    counts unique directions, not volumes.
-#
-#    Twelve is the lowest direction count of a real clinical DTI protocol: below
-#    it a dataset is far more likely truncated, corrupted, or over-filtered than
-#    deliberately acquired, so it is refused. Between twelve and the twenty
-#    directions docs/requirements.md recommends the fit works but the free-water
-#    fraction is noisy, which is a warning rather than an error. None of this
-#    fails on its own: the bi-tensor fit solves with a pseudo-inverse, which
-#    returns a minimum-norm solution for a degenerate gradient table instead of
-#    raising, so an unchecked run produces plausible-looking numbers.
-DESIGN_MATRIX_RANK = 7
-
-#--- Two gradient directions count as one below an angle of ~2.6 degrees. Even a
-#    128-direction scheme separates its directions by more than 10 degrees, so
-#    this can only ever merge genuine repeats.
-DIRECTION_COS_TOL = 0.999
-
-#--- How far a b-vector's length may deviate from 1; dipy's gradient_table() default.
-BVEC_UNIT_TOL = 1e-2
-
-
-def resolve_b_intervals(bRange=None, shells=None):
-    """The accepted non-zero b-value windows, tolerance included.
-
-    One window for '--bRange', one per shell for '--shells'; the two options are
-    mutually exclusive on the command line."""
-    if shells:
-        return [(float(s) - SHELL_TOL, float(s) + SHELL_TOL) for s in sorted(set(shells))]
-    return [(float(min(bRange)) - BRANGE_TOL, float(max(bRange)) + BRANGE_TOL)]
-
-
-def describe_directions(bvals, bvecs):
-    """Unique diffusion directions, and design-matrix rank, of a gradient table.
-
-    Directions are identified antipodally -- g and -g probe the same tensor
-    element -- and up to DIRECTION_COS_TOL, so repeats of a direction count once.
-    The rank returned is that of the seven-column design matrix the fits solve:
-    scaling a row by its b-value and repeating rows change neither, so it is
-    computed from the unique unit directions plus a single b = 0 row."""
-    bvals = np.asarray(bvals, dtype=float)
-    dwi = bvals > B0_MAX
-    g = np.asarray(bvecs, dtype=float).reshape(len(bvals), 3)[dwi]
-    norms = np.linalg.norm(g, axis=1)
-    g = g[norms > 0] / norms[norms > 0, None]        # a zero bvec probes no direction
-
-    unique = []
-    for v in g:
-        if not any(abs(float(np.dot(v, u))) >= DIRECTION_COS_TOL for u in unique):
-            unique.append(v)
-
-    #--- lower-triangular ordering, matching dipy's design_matrix()
-    rows = [[v[0]**2, 2*v[0]*v[1], v[1]**2, 2*v[0]*v[2], 2*v[1]*v[2], v[2]**2]
-            for v in unique]
-    if np.any(~dwi):
-        rows.append([0.0]*6)                         # every b = 0 volume gives this row
-    W = np.column_stack([np.array(rows).reshape(len(rows), 6), np.ones(len(rows))])
-
-    return len(unique), int(np.linalg.matrix_rank(W))
-
-
-def format_b_values(bvals):
-    """The b-values present with their counts, rounded to 10 s/mm2 so that
-    per-direction deviation within a shell reads as one shell. For messages."""
-    shells = np.round(np.asarray(bvals, dtype=float) / 10.0) * 10.0
-    values, counts = np.unique(shells, return_counts=True)
-    return ', '.join(f'{int(v)} (n={n})' for v, n in zip(values, counts))
-
-
-def selected_volumes_float32(nii, idx):
-    """nii.get_fdata()[..., idx] cast to float32, bit for bit, without holding
-    every volume of the image in float64 at once.
-
-    Only the stored (unscaled) data of the whole file is read, in its own type;
-    each selected volume is then scaled exactly as get_fdata() scales it and cast
-    to float32 on its own. The scaling below mirrors nibabel's
-    ArrayProxy._get_scaled() for dtype float64 (unchanged from nibabel 5.3.3,
-    the version the image pins, to 5.4); apply_read_scaling() works element by
-    element with a precision chosen from the stored type only, so scaling one
-    volume at a time gives the same values as scaling all of them. A test
-    compares the result with get_fdata() for scaled and unscaled input.
-
-    On multi-shell data this was the peak memory of the whole fit step: a
-    288-volume HCP-sized image is ~8.4 GB in float64, before the selection
-    copied part of it again."""
-    proxy = nii.dataobj
-    if not nib.is_proxy(proxy):                       # in-memory image
-        return np.asarray(nii.get_fdata()[..., idx], dtype=np.float32)
-    raw = np.asanyarray(proxy.get_unscaled())
-    slope, inter = np.asanyarray(proxy.slope), np.asanyarray(proxy.inter)
-    if np.can_cast(slope, np.float64):
-        slope = slope.astype(np.float64)
-    if np.can_cast(inter, np.float64):
-        inter = inter.astype(np.float64)
-    out = np.empty(raw.shape[:-1] + (len(idx),), dtype=np.float32)
-    for k, i in enumerate(idx):
-        vol = apply_read_scaling(raw[..., i], slope, inter)
-        out[..., k] = vol.astype(np.promote_types(vol.dtype, np.float64), copy=False)
-    return out
-
-
-def filter_b_values(fn_data = 'data.nii.gz',
-                fn_bval = 'file.bval',
-                fn_bvec = 'file.bvec',
-                out_dir = None,
-                bIntervals = ((BRANGE_DEFAULT[0]-BRANGE_TOL, BRANGE_DEFAULT[1]+BRANGE_TOL),)):
-
-    accepted = ', '.join(f'[{lo:g}, {hi:g}]' for lo, hi in bIntervals)
-    print("Filtering DWI data according to b-values:")
-    print(f"Accepted are b-values close to Zero (b-value <= {B0_MAX}) and in: {accepted}")
-
-    bvals, bvalsStr = read_bval_or_bvec(fn_bval)
-    bvecs, bvecsStr = read_bval_or_bvec(fn_bvec)
-    if len(bvecs) != len(bvals):
-        raise DeltaSvdError(f"The bvec file holds {len(bvecs)} directions but the bval file holds "
-                            f"{len(bvals)} b-values. They have to describe the same volumes.\n"
-                            f" bval: {fn_bval}\n bvec: {fn_bvec}")
-    #--- volumes are selected by position below, so a mismatch would go unnoticed
-    shape = nib.load(fn_data).shape
-    if len(shape) != 4 or shape[3] != len(bvals):
-        raise DeltaSvdError(f"The DWI image (dimensions {shape}) does not hold one volume per "
-                            f"b-value ({len(bvals)}).\n DWI : {fn_data}\n bval: {fn_bval}")
-
-    selB0 =  (bvals <= B0_MAX)
-    perInterval = [((bvals >= lo) & (bvals <= hi) & ~selB0) for lo, hi in bIntervals]
-    selBRange = np.logical_or.reduce(perInterval)
-    sel = selB0 | selBRange
-    print(f' total number of images        : n={len(bvals)}')
-    print(f' images with b-value <= {B0_MAX}      : n={sum(selB0==True)}')
-    print(f' images with b-value in range  : n={sum(selBRange==True)}')
-    print(f' images with excluded b-values : n={sum(sel==False)}')
-
-    #--- Everything below refuses data the fits cannot be trusted on, before any
-    #    image is loaded: a too-narrow selection then costs seconds rather than a
-    #    tensor fit. The checks run on the unfiltered path too, so they are
-    #    placed ahead of the 'applyFilter' branch.
-    for (lo, hi), selInterval in zip(bIntervals, perInterval):
-        if not np.any(selInterval):
-            raise DeltaSvdError(f"No volume has a b-value in [{lo:g}, {hi:g}]. Check the requested "
-                                f"b-values ('--bRange' / '--shells', tolerance included above) "
-                                f"against the b-values in the data: {format_b_values(bvals)}.\n"
-                                f" bval: {fn_bval}")
-    if not np.any(selB0):
-        raise DeltaSvdError(f"No volume with a b-value close to zero (b <= {B0_MAX}) was found. The "
-                            f"fits need at least one to estimate S0. b-values in the data: "
-                            f"{format_b_values(bvals)}.\n bval: {fn_bval}")
-
-    #--- dipy's own rule (gradient_table, atol 1e-2), checked here to fail legibly
-    norms = np.linalg.norm(bvecs, axis=1)
-    notUnit = np.flatnonzero(selBRange & ~(np.abs(norms - 1) <= BVEC_UNIT_TOL))   # NaN fails too
-    if notUnit.size:
-        shown = ', '.join(f'{i+1} (length {norms[i]:.3g})' for i in notUnit[:MAX_LINES_REPORTED])
-        raise DeltaSvdError(f"Every b-vector of a diffusion-weighted volume has to be a unit vector, "
-                            f"but {notUnit.size} are not. Volume(s): {shown}"
-                            f"{', ...' if notUnit.size > MAX_LINES_REPORTED else ''}\n"
-                            f" bvec: {fn_bvec}")
-
-    nDirections, rank = describe_directions(bvals[sel], bvecs[sel])
-    print(f' unique diffusion directions   : n={nDirections}')
-    if nDirections < MIN_DIRECTIONS:
-        raise DeltaSvdError(f"Only {nDirections} unique diffusion direction(s) remain after the "
-                            f"b-value selection, but the free-water bi-tensor fit needs at least "
-                            f"{MIN_DIRECTIONS} (repeated directions constrain the free-water "
-                            f"fraction no further than a single one does, so they are counted "
-                            f"once). Check the requested b-values ('--bRange' / '--shells') "
-                            f"against the b-values in the data: {format_b_values(bvals)}.\n"
-                            f" bval: {fn_bval}\n bvec: {fn_bvec}")
-    if rank < DESIGN_MATRIX_RANK:
-        raise DeltaSvdError(f"The {nDirections} diffusion directions do not span the diffusion "
-                            f"tensor: the design matrix has rank {rank} instead of "
-                            f"{DESIGN_MATRIX_RANK}, so the tensor cannot be estimated from them. "
-                            f"They are collinear or lie in a single plane, which usually means a "
-                            f"damaged gradient table.\n bvec: {fn_bvec}")
-    if nDirections < RECOMMENDED_DIRECTIONS:
-        print(f'WARNING: {nDirections} unique diffusion directions is below the recommended '
-              f'minimum of {RECOMMENDED_DIRECTIONS}.\n The fit runs, but the free-water fraction '
-              f'and hence the reported metrics are noisy.\n Please interpret the results with '
-              f'care, and do not pool them with results from data with more directions.')
-
-    applyFilter = False
-
-    if sum(sel==False)>0:
-        applyFilter = True
-        print('Removing excluded b-values!')
-
-    b5 = (bvals>0) & (bvals<=B0_MAX)
-    if sum(b5==True) > 0:
-        print(f'Some b-values (n={sum(b5)}) are close but not exactly Zero:\n {bvals[b5]}')
-        print('These values are set to Zero!')
-        bvalsStr[b5] = '0'
-        applyFilter = True
-
-    if not applyFilter:
-        print('Nothing to do.')
-    else:
-
-        bvals = bvalsStr[sel]
-        print('New set of b-values:')
-        print(bvals)
-
-        bvecs = bvecsStr[sel]
-
-        nii = nib.load(fn_data)
-        img = selected_volumes_float32(nii, np.flatnonzero(sel))
-
-        fn_bval = join(out_dir, basename(fn_bval))
-        fn_bvec = join(out_dir, basename(fn_bvec))
-        fn_data = join(out_dir, basename(fn_data))
-        write_bval_or_bvec(bvals, fn_bval)
-        write_bval_or_bvec(bvecs, fn_bvec)
-        # dtype='float32' explicit: a lossless round-trip for the float32 input the
-        # pipeline expects (do not change -- float64 would alter results for
-        # int16-with-scaling input). 'img' is float32 already, see
-        # selected_volumes_float32().
-        save_nifti(fn_data, img, nii.affine, nii.header, dtype='float32')
-
-        print('New data saved to:')
-        print(fn_bval)
-        print(fn_bvec)
-        print(fn_data)
-
-
-    return fn_data, fn_bval, fn_bvec, nDirections
+from delta_svd_common import (DeltaSvdError, ROI_LABEL_DTYPE, save_nifti,
+                              strip_nifti_ext, tbss_fa_name, validate_roi_labels,
+                              run_subprocess, safe_rmtree)
+from delta_svd_gradients import resolve_b_intervals, filter_b_values
+from delta_svd_inputs import iniParser, resolve_inputs
+from delta_svd_qc import prepare_qc
 
 
 ###########################################################################
 # Parallel driver for the vendored per-voxel fits
 
-# markvcid_fw_mrn.py is vendored verbatim and stays that way. Both fits there
-# loop over independent voxels, so fitting slabs of the volume in worker
-# processes leaves every voxel's arithmetic untouched and the result is
-# bit-identical to the serial loop - required, because a 1-ULP difference in the
-# fitted FA can move delta-PSMD by percent (see conda-explicit-linux-64.txt).
+# markvcid_fw_mrn.py stays vendored verbatim. Both fits loop over independent
+# voxels, so fitting slabs in worker processes is bit-identical to the serial
+# loop -- required, because a 1-ULP change in FA can move delta-PSMD by percent.
 
-# Capped independently of the core budget: 16 workers already take the fit from
-# ~2 min per timepoint to ~10-15 s, and slabbing along axis 0 cannot beat the
-# single most expensive slice anyway (~52x).
+# Capped independently of the core budget: 16 workers already cut the fit from
+# ~2 min to ~10-15 s per timepoint, and the costliest slice limits the speed-up.
 FW_MAX_WORKERS = 16
 
 _FW_SHARED = {}
@@ -795,16 +237,14 @@ def plan_ants_parallelism(nTP, coreBudget, paraOverride=None, itkThreads=ITK_THR
         cap = (OVERSUBSCRIBE_NUM * coreBudget) // (OVERSUBSCRIBE_DEN * itkThreads)
         para = max(1, min(fill, cap))
     else:
-        # An explicit override is a deliberate choice and is not clamped to the
-        # budget -- only to the timepoint count, beyond which there is no work
-        # left to run in parallel.
+        # An explicit override is clamped to the timepoint count, not the budget.
         para = max(1, int(paraOverride))
     para = min(para, nTP)
 
     return para, itkThreads, ("-c 0" if para == 1 else f"-c 2 -j {para}")
 
 
-def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1, paraOverride = None, iterations="30x30x8", numRegistrations=3, itkThreads=ITK_THREADS_DEFAULT):
+def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1, paraOverride = None, iterations=ITERATIONS_DEFAULT, numRegistrations=NUM_REGISTRATIONS_DEFAULT, itkThreads=ITK_THREADS_DEFAULT):
 
     fnFA = []
     for i,tp in enumerate(timepoints):
@@ -843,7 +283,7 @@ def create_template(timepoints = [], fnCoreg = [], dirOut = None, coreBudget = 1
                    f"-r {shlex.quote(ref)} -t {shlex.quote(warp)} -t {shlex.quote(affine)}")
             run_subprocess(cmd, True, 'antsApplyTransforms')
 
-            if iFn==0: # iFn==0 corresponds to the FA (by default the fwc-FA), which shall be averaged across timepoints right after this loop
+            if iFn==0: # the FA (fwc-FA by default), averaged below
                 fnAverage.append(fnOut)
     
     # average the co-registered fwc-FA, because intensity histogram in template drifts
@@ -1007,12 +447,13 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
     if exists(fnEmask):
         niiEmask = nib.load(fnEmask)
         imgEmask = niiEmask.get_fdata()
-        imgEmask = (imgEmask>0.05) *2 #--- be conservative, excluding also (most) interpolated voxels; only needed for QC: set voxels of exclusion mask equal 2, for later combination with intersection mask
-        imgEmask[maskIntersection==0] = 0 #--- only needed for QC: remove voxels from exclusion mask, which are anyways outside the intersection mask
+        # A low threshold also excludes most interpolated voxels. imgEmask is
+        # for QC only: intersection mask as label 1, exclusion mask as label 2.
+        imgEmask = (imgEmask>0.05) *2
+        imgEmask[maskIntersection==0] = 0
         maskIntersection[imgEmask>0] = 0
-        imgEmask[maskIntersection>0] = 1 #--- only needed for QC: combine intersection mask (label=1) and exclusion mask (label=2)
+        imgEmask[maskIntersection>0] = 1
 
-        # label-2 version is only used for the QC image
         skelSuffixL2 = skelSuffix + '_Emask-as-label2'
         pnameSkelIntersExcLabelled = join(dirTBSS, 'stats', skelBase+'_'+skelSuffixL2+'.nii.gz')
         save_nifti(pnameSkelIntersExcLabelled, imgEmask, niiMask.affine, niiMask.header, dtype='uint8')
@@ -1109,9 +550,8 @@ def integrate_masks(dirTP = [], dirTBSS = None, skelMask = None, fnROI_MNI = Non
         
 
     skeleton = [basename(skelMask)] * len(voxels)
-    # 'NA'/'NaN' are load-bearing sentinels, not placeholders: delta-svd_aggregate_results.py
-    # relies on them (via pandas' read_csv coercing 'NA' to NaN) to split these bookkeeping
-    # rows from real metric rows. Keep them literal strings; do not switch to np.nan.
+    # 'NA'/'NaN' are sentinels: delta-svd_aggregate_results.py relies on pandas
+    # reading 'NA' as NaN to tell these rows from metric rows. Keep them strings.
     df = pd.DataFrame(
         {'timepoint': timept,
          'skeleton': skeleton,
@@ -1182,185 +622,9 @@ def extract_stats(dirTP = None, dirTBSS = None, fnNonFA = None, skelMask = None)
 
     return df
 
-def qc_label_maps(dirTBSS):
-    """The ROI maps in skeleton space: one binary map per DWI-space ROI label,
-    kept separate so overlapping labels remain visible, and the merged
-    MNI-space label map."""
-    # Match only numeric label suffixes, excluding prior QC deprojection outputs.
-    return (sorted(fn for fn in glob.glob(join(glob.escape(dirTBSS), 'stats', '*_Rmask-*.nii.gz'))
-                   if re.search(r'_Rmask-[0-9]+\.nii\.gz$', basename(fn)))
-            + sorted(glob.glob(join(glob.escape(dirTBSS), 'stats', '*_RmaskMNI.nii.gz'))))
-
-
-def consecutive_labels(img):
-    """'img' with its non-zero labels renumbered 1..K in ascending order, and
-    the original label of each: (renumbered, labels), labels[k-1] for k."""
-    labels = np.unique(img[img > 0])
-    out = np.zeros(img.shape, ROI_LABEL_DTYPE)
-    out[img > 0] = np.searchsorted(labels, img[img > 0]) + 1
-    return out, labels
-
-
-def restore_labels(img, labels):
-    """Undo consecutive_labels() on an image carrying its numbering."""
-    idx = np.rint(img).astype(np.int64)
-    out = np.zeros(img.shape, ROI_LABEL_DTYPE)
-    out[idx > 0] = labels[idx[idx > 0] - 1]
-    return out
-
-
-def deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP, relabel=False):
-    """Deproject the skeleton-space image 'fn' (in TBSS/stats) into the native
-    space of every timepoint, as '<dirQC>/<timepoint>_<name of fn>'.
-
-    'relabel' is for ROI label maps. With '-n', tbss_deproject runs one
-    applywarp for every integer from 1 up to the largest label, present or
-    not, so a label such as 1000 costs a thousand warps. The labels are
-    renumbered 1..K for the deprojection and restored afterwards. The
-    renumbering keeps their order, so where labels meet, the one that wins is
-    the same as without it."""
-    fnameFAt = tbss_fa_name(len(dirTP))
-    fnBase = basename(fn)
-    labels = None
-    src = fn
-    if relabel:
-        nii = nib.load(fn)
-        consecutive, labels = consecutive_labels(nii.get_fdata())
-        src = strip_nifti_ext(fn) + '_consecutive.nii.gz'
-        save_nifti(src, consecutive, nii.affine, nii.header, ROI_LABEL_DTYPE)
-
-    with contextlib.chdir(join(dirTBSS,'stats')):
-        cmd = f'tbss_deproject {shlex.quote(basename(src))} 2 -n'
-        run_subprocess(cmd, True, 'tbss_deproject')
-    fnDeprojectedTemplateSpace = join(dirTBSS, 'FA', fnameFAt+'_FA_'+basename(src))
-
-    for iTP in range(len(dirTP)):
-        tpB = basename(dirTP[iTP])
-        fnOut = join(dirQC, tpB+'_'+fnBase)
-        if len(dirTP)>1:
-            ref = join(dirTP[iTP], 'fwc_wls_dti_FA.nii.gz')
-            affine = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}0GenericAffine.mat')
-            invwarp = join(dirTemplate, f'{tpB}_fwc_wls_dti_FA_05{iTP}1InverseWarp.nii.gz')
-            cmd = (f"antsApplyTransforms -d 3 --float 1 -i {shlex.quote(fnDeprojectedTemplateSpace)}  -o {shlex.quote(fnOut)} "
-                   f"-r {shlex.quote(ref)} -t [{shlex.quote(affine)},1] -t {shlex.quote(invwarp)} -n NearestNeighbor")
-            run_subprocess(cmd, True, 'antsApplyTransforms')
-        else:
-            copy2(fnDeprojectedTemplateSpace, fnOut)
-        if labels is not None:
-            nii = nib.load(fnOut)
-            save_nifti(fnOut, restore_labels(nii.get_fdata(), labels), nii.affine, nii.header,
-                       ROI_LABEL_DTYPE)
-
-
-def prepare_qc(dirQC, fnHTML, skelMask, dirTBSS, dirTemplate, dirTP, fnCSV, args):
-        
-    from create_qc_image import create_qc_image
-    from create_html_with_png import create_html_with_png
-    
-    skelBase = strip_nifti_ext(basename(skelMask))
-    skelMask = join(dirTBSS, 'stats', skelBase+'_intersection_Emask-as-label2.nii.gz')
-    emaskExists = 1
-    if not exists(skelMask):
-        skelMask = join(dirTBSS, 'stats', skelBase+'_intersection.nii.gz')
-        emaskExists = 0
-    
-    # ROI maps are kept for inspection with '--qc 2', not shown in the report.
-    fnROI = [skelMask] + (qc_label_maps(dirTBSS) if args.qc >= 2 else [])
-
-    fnameFAt = tbss_fa_name(len(dirTP))
-
-    for fn in fnROI:
-        deproject_to_native(fn, dirQC, dirTBSS, dirTemplate, dirTP,
-                            relabel=fn.endswith('_RmaskMNI.nii.gz'))
-    
-    #--- in space of the input, per timepoint
-    vlim = [
-        [0.05, 0.7],
-        [0.00035, 0.0026]
-    ]
-    labels = [
-        'free water-corrected FA',
-        'MD'
-    ]
-
-    fnPNG = []
-    captions = []
-    for iTP in range(len(dirTP)):
-        tpB = basename(dirTP[iTP])
-        fnFA = join(dirTP[iTP], 'fwc_wls_dti_FA_05.nii.gz')
-        copy2(fnFA, join(dirQC, tpB+'_fwcFA.nii.gz'))
-        copy2(join(dirTP[iTP], "wls_dti_FA.nii.gz"), join(dirQC, tpB+'_FA.nii.gz'))
-        fnMD = join(dirTP[iTP], 'wls_dti_MD.nii.gz')
-        copy2(fnMD, join(dirQC, tpB+'_MD.nii.gz'))
-        fnSkeleton = join(dirQC, tpB+'_'+basename(fnROI[0]))
-        fnBmask = join(dirTP[iTP], 'brain_mask.nii.gz')
-        addLegends=(1,emaskExists) if iTP==0 else (0,0)
-
-        fnPNG = fnPNG + create_qc_image([fnFA, fnMD], vlim, labels, fnSkeleton, fnBmask, animate = False, addLegends=addLegends)
-        captions = captions + [f'Timepoint "{tpB}"','']
-
-    #--- in space of within-subject template
-    vlim = []
-    labels = []
-    fnames = []
-    fnBmask = []
-    if len(dirTP)>1:
-        for iTP in range(len(dirTP)):
-            tpB = basename(dirTP[iTP])
-            vlim.append([0.00035, 0.0026])
-            labels.append(f'MD at timepoint "{tpB}"')
-            fnames.append(join(dirTP[iTP], 'wls_dti_MD_to_template.nii.gz'))
-            fnBmask.append(join(dirTP[iTP], 'brain_mask_to_template.nii.gz'))
-
-        fnSkeleton = join(dirTBSS, 'FA', fnameFAt+'_FA_'+basename(fnROI[0])) 
-        fnPNG = fnPNG + [create_qc_image(fnames, vlim, labels, fnSkeleton, fnBmask)]
-        captions = captions + ['Within-subject template space']
-
-    #--- in space of MNI template
-    vlim = []
-    labels = []
-    fnames = []
-    fnamesBmask = []
-    for iTP in range(len(dirTP)):
-        tpB = basename(dirTP[iTP])
-        vlim.append([0.00035, 0.0026])
-        labels.append(f'MD at timepoint "{tpB}"')
-        fnames.append(join(dirTBSS, 'stats', f'all_{tpB}_MD.nii.gz'))
-        fnamesBmask.append(join(dirTBSS, 'stats', f'all_{tpB}_bmask.nii.gz'))
-
-    fnROI_base = strip_nifti_ext(basename(fnROI[0]))
-    fnSkeleton = join(dirTBSS, 'stats', fnROI_base+'_to_all_FA.nii.gz')
-    fnameCmask = join(dirTBSS, 'stats', 'mean_FA_mask.nii.gz')
-    fnPNG = fnPNG + [create_qc_image(fnames, vlim, labels, fnSkeleton, fnamesBmask, fnameCmask)]
-    captions = captions + ['MNI space']
-
-    print('\nSaving QC to:\n ', fnHTML)
-
-    create_html_with_png(fnHTML, fnPNG, captions, fnCSV, args)
-
-    if args.qc < 2:
-        safe_rmtree(dirQC, args.dirOutput)
-
 
 ###########################################################################
-# Helper functions
-
-def save_nifti(fname, arr, affine, header, dtype='float32'):
-    niiNew = nib.Nifti1Image(arr, affine, header)
-    niiNew.set_data_dtype(dtype)
-    niiNew.header.set_slope_inter(1, 0)
-    nib.save(niiNew, fname)
-
-
-def strip_nifti_ext(fn):
-    """'fn' without a trailing '.nii' or '.nii.gz'."""
-    return re.sub(r'\.nii(\.gz)?$', '', fn)
-
-
-def tbss_fa_name(nTP):
-    """Base name of the FA image TBSS is run on."""
-    return "FA-for-tbss-long" if nTP > 1 else "fwc_wls_dti_FA_05"
-
+# Helper functions used by this script only (shared ones: delta_svd_common.py)
 
 def binarise_mask(img, label, fname):
     """Return 'img' as a strict {0,1} mask, reporting anything it had to change.
@@ -1372,70 +636,6 @@ def binarise_mask(img, label, fname):
               f"  {fname}\n"
               f"  Binarising it (values greater than zero become 1; zero and negative values become 0) for processing.")
     return binary
-
-
-def check_mni_grid(fname, label, reference=None):
-    """Raise unless 'fname' has the shape and affine of 'reference' (default: the
-    default skeleton mask, i.e. the FMRIB58 1 mm grid). Reads headers only."""
-    if reference is None:
-        reference = SKELETON_MASK_DEFAULT
-    if fname == reference:
-        return
-    img, ref = nib.load(fname), nib.load(reference)
-    if img.shape != ref.shape:
-        raise DeltaSvdError(f"The provided {label} does not have the image dimensions of the FMRIB58 "
-                            f"1 mm MNI grid the analysis is done on:\n  {fname}\n"
-                            f"  Dimensions: {img.shape}, expected: {ref.shape}\n"
-                            f" Please resample it to this grid, e.g. using '{reference}' "
-                            f"or FSL's FMRIB58_FA_1mm as the reference image.")
-    if not np.allclose(img.affine, ref.affine, atol=GRID_AFFINE_ATOL):
-        raise DeltaSvdError(f"The provided {label} has the image dimensions of the FMRIB58 1 mm MNI "
-                            f"grid the analysis is done on, but not its voxel-to-world mapping "
-                            f"(affine), so its voxels would not line up with the skeleton:\n"
-                            f"  {fname}\n  Affine:\n{np.array2string(img.affine, precision=4)}\n"
-                            f"  Expected:\n{np.array2string(ref.affine, precision=4)}\n"
-                            f" Please resample it to this grid, e.g. using '{reference}' "
-                            f"or FSL's FMRIB58_FA_1mm as the reference image.")
-
-
-def check_dwi_grid(fname, label, attr, dwi):
-    """Raise unless 'fname' has the spatial dimensions and affine of the DWI
-    image 'dwi'. Reads headers only.
-
-    Nothing else would notice: the brain mask only fails later, with a
-    traceback from the fit, and an exclusion or ROI mask on another grid (a
-    lesion mask left in FLAIR space, say) is carried through TBSS and applied
-    misaligned without any error."""
-    img, ref = nib.load(fname), nib.load(dwi)
-    fix = (f" Masks given with '--{attr}' have to be in the space of their DWI image, i.e. "
-           f"resampled to its grid (same dimensions and voxel-to-world mapping).")
-    if img.shape[:3] != ref.shape[:3]:
-        raise DeltaSvdError(f"The provided {label} does not have the image dimensions of its DWI "
-                            f"image:\n  {fname}\n  Dimensions: {img.shape[:3]}, DWI: "
-                            f"{ref.shape[:3]}\n  DWI: {dwi}\n{fix}")
-    if not np.allclose(img.affine, ref.affine, atol=GRID_AFFINE_ATOL):
-        raise DeltaSvdError(f"The provided {label} has the image dimensions of its DWI image, but "
-                            f"not its voxel-to-world mapping (affine), so its voxels would not "
-                            f"line up with the DWI data:\n  {fname}\n  Affine:\n"
-                            f"{np.array2string(img.affine, precision=4)}\n  DWI affine:\n"
-                            f"{np.array2string(ref.affine, precision=4)}\n  DWI: {dwi}\n{fix}")
-
-
-def validate_roi_labels(img, label, fname):
-    """Return sorted ROI labels after enforcing the public label contract."""
-    labels = np.unique(np.asarray(img))
-    invalid = labels[(~np.isfinite(labels)) |
-                     (labels < 0) |
-                     (labels > ROI_LABEL_MAX) |
-                     (labels != np.floor(labels))]
-    if invalid.size:
-        shown = ', '.join(str(value) for value in invalid[:5])
-        if invalid.size > 5:
-            shown += ', ...'
-        raise DeltaSvdError(
-            f"The provided {label} must contain only finite integer labels from 0 through "
-            f"{ROI_LABEL_MAX}:\n  {fname}\n  Unsupported value(s): {shown}")
-    return labels.astype(ROI_LABEL_DTYPE)
 
 
 def copy_as_nii_gz(fnIn, fnOut):
@@ -1515,27 +715,6 @@ def reorient_to_fsl_standard(fn):
     return True
 
 
-def run_subprocess(cmd, displayStdout, label):
-    print(f"Calling {label} command with:")
-    print(cmd, '\n')
-    # streamed when displayed; otherwise kept for the failure report only
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=True,
-                            text=True, encoding='utf-8', errors='replace')
-    held = []
-    for line in proc.stdout:
-        if displayStdout:
-            print(line, end='')
-        else:
-            held.append(line)
-    proc.wait()
-    if proc.returncode != 0:
-        if held:
-            print("STDOUT/STDERR:")
-            print(''.join(held))
-        raise DeltaSvdError(f"The '{label}' command failed with exit code {proc.returncode}. "
-                            f"Its stdout/stderr is printed above.")
-
-
 def section_header(text, startPrevious = None):
     lengthFrame = len(text) if len(text)>60 else 60
     print('\n\n'+'#'*lengthFrame)
@@ -1590,268 +769,8 @@ def write_run_manifest(fname, args, startedAt, outputs, completedAt=None):
         raise
 
 
-NIFTI_EXTENSIONS = ('.nii.gz', '.nii')
-
-
-def nifti_sibling(s):
-    """The same path carrying the other NIfTI extension, when that file exists.
-
-    Asking for 'data.nii' where only 'data.nii.gz' is present is an easy mistake,
-    and the extension probing in isNIfTI() cannot catch it: that appends to the
-    name as given, so it looks for 'data.nii.nii.gz'. Reported rather than
-    accepted -- the file asked for is not the file found, and substituting it
-    silently would be the wrong kind of helpful."""
-    if s.endswith('.nii.gz'):
-        alt = s[:-len('.gz')]
-    elif s.endswith('.nii'):
-        alt = s + '.gz'
-    else:
-        return None
-    return alt if os.path.isfile(alt) else None
-
-
-def isNIfTI(s, abort=True):
-    if os.path.isfile(s) and s.endswith(NIFTI_EXTENSIONS):
-        return s
-    elif os.path.isfile(s+'.nii.gz'):
-        return s+'.nii.gz'
-    elif os.path.isfile(s+'.nii'):
-        return s+'.nii'
-    else:
-        if abort:
-            # An existing file that is merely named wrong needs a different fix
-            # from one that is not there at all, so the two are told apart. This
-            # stays an ArgumentTypeError: argparse calls it as a 'type' and turns
-            # that into its own clean 'error:' line.
-            if os.path.isfile(s):
-                raise argparse.ArgumentTypeError(
-                    f"file is not a NIfTI image -- its name ends in neither '.nii' nor "
-                    f"'.nii.gz'. Please check: {s}")
-            sibling = nifti_sibling(s)
-            if sibling is not None:
-                raise argparse.ArgumentTypeError(
-                    f"file does not exist, but one with the other NIfTI extension does:\n"
-                    f"    {sibling}\n  Please check: {s}")
-            # The probes above append to the name as given, so they are only worth
-            # reporting when it carried no NIfTI extension of its own -- otherwise
-            # they looked for 'data.nii.nii.gz' and claiming they tried '.nii.gz'
-            # would be untrue.
-            if s.endswith(NIFTI_EXTENSIONS):
-                raise argparse.ArgumentTypeError(f"file does not exist. Please check: {s}")
-            raise argparse.ArgumentTypeError(
-                f"file does not exist (also tried '{s}.nii.gz' and '{s}.nii'). "
-                f"Please check: {s}")
-        else:
-            return None
-
-
-def per_timepoint_path(fn, dwi):
-    """Where an input given per timepoint is looked for: a bare file name next
-    to that timepoint's DWI image, anything carrying a folder exactly as given.
-
-    A bare name is never looked for in the working directory. It used to be,
-    first, so a file of that name there was silently taken for every timepoint
-    -- e.g. 'bvals' run from inside one session's folder gave the other
-    sessions that session's b-values. A name carrying a folder ('./bvals',
-    'ses-1/bvals', an absolute path) is taken literally and never re-anchored.
-
-    Inferred names need no special case: they are built from the DWI path, so
-    they carry its folder already, or none when the DWI has none either."""
-    if dirname(fn):
-        return fn
-    return join(dirname(dwi), fn)
-
-
-def candidate_paths(fn, dwi, anyExtension):
-    """The paths an input given per timepoint is looked for at, in order: the
-    one per_timepoint_path() names, optionally completed with a NIfTI extension.
-
-    This mirrors the resolution for the sake of the error message only. What is
-    accepted stays entirely with isNIfTI()/exists(), so this cannot widen it."""
-    p = per_timepoint_path(fn, dwi)
-    # isNIfTI() completes a path that carries no NIfTI extension of its own.
-    # It does probe 'p' itself either way, but a name already ending in one
-    # can only ever match as itself, so listing the completions would be noise.
-    if anyExtension and not p.endswith(NIFTI_EXTENSIONS):
-        return [p + e for e in NIFTI_EXTENSIONS]
-    return [p]
-
-
-def missing_input_message(attr, fn, dwi, anyExtension, inferred, note=''):
-    """Why a per-timepoint input could not be found, and what to do about it.
-
-    Names the timepoint by its DWI image rather than by an index: the '--tp'
-    labels are not resolved yet at this point, and the path is what the user has
-    to go and look at anyway."""
-    paths = candidate_paths(fn, dwi, anyExtension)
-    tried = '\n'.join(f'   {p}' for p in paths)
-    if inferred:
-        origin = f" No '--{attr}' was given, so it was inferred from the DWI path."
-        fix = f" Provide the correct path with '--{attr}'."
-    else:
-        origin = f" It was given as '{fn}'."
-        fix = f" Please check the path given with '--{attr}'."
-    #--- the likeliest near-miss: the file is there under the other extension
-    siblings = []
-    for p in paths:
-        alt = nifti_sibling(p)
-        if alt is not None and alt not in siblings:
-            siblings.append(alt)
-    hint = ''
-    if siblings:
-        hint = (' A file with the other NIfTI extension is there:\n'
-                + '\n'.join(f'   {a}' for a in siblings) + '\n')
-    return (f"No '--{attr}' file was found for the DWI image:\n   {dwi}\n"
-            f"{origin}\n Looked for:\n{tried}\n{hint}{fix}{note}")
-
-def isCSV(s):
-    if '/' in s or '\\' in s:
-        raise argparse.ArgumentTypeError(f"--reprocess requires a CSV base name in the output folder; you provided '{s}'")
-    if s == 'overwrite' or s.endswith('.csv') or s.endswith('.CSV'):
-        return s
-    else:
-        raise argparse.ArgumentTypeError(f"--reprocess filename must end in '.csv'; you provided '{s}'")
-
-def validate_timepoint_labels(labels):
-    reserved = {'template', 'intermediateTemplates', 'TBSS'}
-    for label in labels:
-        if os.path.isabs(label):
-            reason = 'is an absolute path'
-        elif '..' in re.split(r'[\\/]', label):
-            reason = 'contains path traversal'
-        elif '/' in label or '\\' in label:
-            reason = 'contains a path separator'
-        elif label in reserved:
-            reason = 'collides with an internal working directory'
-        elif label in ('', '.'):
-            reason = 'is not a usable directory name'
-        elif any(ch.isspace() for ch in label):
-            # the label becomes part of file names that the FSL and ANTs
-            # scripts pass around unquoted, which splits them at whitespace
-            reason = 'contains whitespace'
-        else:
-            continue
-        raise DeltaSvdError(f"Invalid timepoint label given with '--tp': '{label}' {reason}. "
-                            "Use a plain label such as 'TP01' or 'ses-1', not a path, an "
-                            "internal directory name or a name containing spaces.")
-
-def safe_rmtree(path, parent):
-    pathReal = os.path.realpath(os.path.abspath(path))
-    parentReal = os.path.realpath(os.path.abspath(parent))
-    try:
-        contained = os.path.commonpath([pathReal, parentReal]) == parentReal
-    except ValueError:
-        contained = False
-    if not contained or pathReal == parentReal:
-        raise DeltaSvdError(f"Refusing to recursively delete path outside its intended output "
-                            f"directory: {path}")
-    rmtree(path)
-    
-def positive_int(option):
-    """An argparse 'type' accepting integers >= 1, naming 'option' in its errors."""
-    def check(s):
-        try:
-            v = int(s)
-        except ValueError:
-            raise argparse.ArgumentTypeError(f"{option} must be a positive integer; you provided '{s}'")
-        if v < 1:
-            raise argparse.ArgumentTypeError(f'{option} must be at least 1; you provided {s}')
-        return v
-    return check
-
-
-assertPositiveJobs = positive_int('--para (number of parallel ANTs registration jobs)')
-assertPositiveRegistrations = positive_int('--numRegistrations (iterations of the template construction)')
-assertPositiveItkThreads = positive_int('--itkThreads (ITK threads per ANTs registration job)')
-
-
-def assertBValue(s):
-    """A b-value for '--bRange' / '--shells', inside the window the tensor fit
-    is valid in."""
-    try:
-        v = int(s)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"b-values given with --bRange / --shells must be whole numbers; you provided '{s}'")
-    if not BVAL_MIN <= v <= BVAL_MAX:
-        raise argparse.ArgumentTypeError(
-            f"b-values given with --bRange / --shells have to lie between {BVAL_MIN} and "
-            f"{BVAL_MAX} s/mm2; you provided {v}. Below {BVAL_MIN} the diffusion signal is "
-            f"contaminated by perfusion and above {BVAL_MAX} by non-Gaussian diffusion, so a "
-            f"diffusion tensor fitted there is not interpretable. Note that b-values close to "
-            f"zero (b <= {B0_MAX}) are always included and must not be given here.")
-    return v
-
-
-def threadBudget(s):
-    """A positive integer, or 'auto' to auto-detect the physical cores."""
-    if str(s).strip().lower() == 'auto':
-        return 'auto'
-    try:
-        v = int(s)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"--threads must be a positive integer or 'auto'; you provided '{s}'")
-    if v < 1:
-        raise argparse.ArgumentTypeError(f"--threads must be at least 1 (or 'auto'); you provided {s}")
-    return v
-
-class CustomArgumentParser(argparse.ArgumentParser):
-    # Single-dash options must be one character and separated from their argument
-    def parse_known_args(self, args=None, namespace=None):
-        if args is None:                       # the argparse default: read the command line
-            args = sys.argv[1:]
-        for arg_string in args:
-            if arg_string.startswith('-') and not arg_string.startswith('--'):
-                if len(arg_string) > 2 and not arg_string[2].isspace():
-                    # The likeliest cause: a long option typed with one dash
-                    # instead of two, e.g. '-shells' for '--shells'. Only worth
-                    # naming when it really is one of ours; self.error() exits,
-                    # so this is built once and never on the success path.
-                    known = {opt for a in self._actions for opt in a.option_strings}
-                    long_form = '--' + arg_string[1:].split('=', 1)[0]
-                    hint = f' Did you mean "{long_form}"?' if long_form in known else ''
-                    self.error(f'single-dash options must be one character and separated from their argument by a space: "{arg_string}".{hint}')
-        return super().parse_known_args(args, namespace)
-    
-stepsImplemented = ['fwc','template','tbss','tbss_non_fa','extract','qc']
-argparseDescription = f"DELTA-SVD {__version__} ('Diffusion Endpoints for Longitudinal Tracking of white matter Alterations in cerebral Small Vessel Disease') processes multi-directional diffusion MRI data to fully automatically extract clinically and technically validated white matter diffusion metrics. Key steps include diffusion tensor fitting (with and without free water imaging), skeletonisation based on the free water-corrected FA (fwc-FA) via FSL's TBSS, and enhanced CSF partial volume masking. The final metrics MSMD, PSMD, and MSFW are computed over the skeleton. For longitudinal data, a within-subject template is created using ANTs."
-
-def iniParser():
-    parser = CustomArgumentParser(description=argparseDescription, epilog='Notice: By using DELTA-SVD, you agree to the licence terms (CC BY-NC-ND 4.0) described in the LICENSE file at "https://github.com/isdneuroimaging/DELTA-SVD"')
-    parser.add_argument("--version", action='version', version=f'DELTA-SVD {__version__}', help="show the DELTA-SVD version and exit")
-    group0 = parser.add_argument_group('input/output data specification')
-    group0.add_argument("--dwi", required=True, metavar='NIfTI', type=isNIfTI, nargs="+", action='extend', help="input path(s) to 4D DWI image(s) in NIfTI format. Number of arguments should correspond to number of timepoints.")
-    group0.add_argument("--bval", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-values in FSL format, corresponding to DWI image(s). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bval'")
-    group0.add_argument("--bvec", metavar='text-file', type=str, nargs="+", action='extend', help="input path(s) to text file(s) with b-vectors in FSL format, corresponding to DWI image(s). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting extension with '.bvec'")
-    group0.add_argument("--bmask", metavar='NIfTI', type=str, nargs="+", action='extend', help="input path(s) to DWI brain mask(s) in NIfTI format, corresponding to DWI image(s) and on their grid (same dimensions and affine). A bare file name (without a folder) is looked for next to the corresponding DWI image, never in the working directory; a path containing a folder (e.g. './file' or an absolute path) is used as given. A single value is used for all timepoints, so a single bare file name is looked for next to each DWI image. If argument not provided, path(s) will be constructed from DWI image path(s), substituting the extension with '_brainmask.nii.gz' or, if that file does not exist, with '_brainmask.nii'. Masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
-    group0.add_argument("--tp", metavar='label', type=str, nargs="+", action='extend', help="label(s) for all timepoints. Number of arguments should correspond to number of DWI image(s). Labels must be plain names without path separators, traversal or whitespace and must not collide with internal working directories. Labels have to be unique, and 'all' is reserved for the rows summarising all timepoints. If argument not provided, timepoints are labelled consecutively as TP01, TP02, and so on.")
-    group0.add_argument("--id", metavar='label', type=str, help="optional subject ID. If provided, an additional column with this identifier will be added to the results table 'delta-svd_results.csv', meant to facilitate aggregation of results tables for multiple subjects.")
-    group0.add_argument("-o", "--dirOutput", type=str, help="path to output folder. If not provided, the parent folder of the first DWI image will be used. The results table ('delta-svd_results.csv') and a subfolder and HTML for quality checking ('delta-svd_qc' and 'delta-svd_qc.html') will be saved here. Furthermore, intermediate/temporary files will be created here inside a subfolder called 'delta-svd_temp'.")
-    group1 = parser.add_argument_group('additional masking')
-    group1.add_argument("--Emask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom exclusion mask(s) in DWI image space, i.e. on the grid of the DWI image (same dimensions and affine), used to exclude the masked region from analysis. One per timepoint can be provided, which will be merged in template space. Timepoints will be matched by position of provided paths. A bare file name (without a folder) is looked for next to the DWI image of that timepoint; a path containing a folder is used as given. Skip timepoints by entering NA instead of a path. The masked area (e.g. lesion) will be excluded from analysis. Provided masks are binarised: values greater than zero are set to 1; zero and negative values are set to 0.")
-    group1.add_argument("--Rmask", metavar='NIfTI', type=str, default = [], nargs="+", action='extend', help="input path(s) to custom ROI mask(s) in DWI image space, i.e. on the grid of the DWI image (same dimensions and affine). One per timepoint can be provided, which will be merged in template space. Timepoint matching and/or skipping works as explained for option 'Emask'. Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0. However, masks will be merged in template space and if labels in masks from different timepoints disagree, the respectively highest integer label will overwrite the other labels.")
-    group1.add_argument("--RmaskMNI", metavar='NIfTI', type=isNIfTI, help="input path to a single custom ROI mask in MNI space. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default skeleton mask). Labels must be finite integers from 0 through 65535. Every label defines a separate ROI, including background label 0.")
-    group1.add_argument("--hemispheres", action='store_true', help="calculate skeleton metrics also separately for left and right hemispheres. Please note, however, that this does not affect ROI masks, which will not be split between hemispheres.")
-    group2 = parser.add_argument_group('advanced options')
-    group2.add_argument("--skeletonMask", metavar='NIfTI', type=isNIfTI, default=SKELETON_MASK_DEFAULT, help="input path to an alternative skeleton mask. It must be on the FMRIB58 1 mm MNI grid (same image dimensions and affine as the default mask). It will be binarised: values greater than zero are set to 1; zero and negative values are set to 0. Defaults to the mask validated with DELTA-SVD ('delta-svd_skeletonmask_v1') and designed to exclude regions with frequent CSF partial volume effects.")
-    group2b = group2.add_mutually_exclusive_group()
-    group2b.add_argument("--bRange", metavar='Integer', type=assertBValue, default = list(BRANGE_DEFAULT), nargs=2, help=f"range of b-values to consider for diffusion tensor fitting, given as the lower and upper limit of the non-zero shell(s) to include. Defaults to range [{BRANGE_DEFAULT[0]},{BRANGE_DEFAULT[1]}]. The limits are met with a tolerance of {BRANGE_TOL} s/mm2, so that shells the scanner reports slightly off their nominal value are not discarded. Volumes with a b-value close to zero (b <= {B0_MAX}) are always included and are not affected by this option. Both limits have to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2, outside of which the diffusion tensor model is not valid. Mutually exclusive with '--shells'.")
-    group2b.add_argument("--shells", metavar='Integer', type=assertBValue, nargs="+", action='extend', help=f"b-value shell(s) to consider for diffusion tensor fitting, e.g. '--shells 700 1000'. An alternative to '--bRange' for selecting shells individually rather than as one range, which avoids pulling in the shells in between. Each shell is matched with a tolerance of {SHELL_TOL} s/mm2, and a shell that matches no volume in the data is an error. As for '--bRange', volumes with a b-value close to zero (b <= {B0_MAX}) are always included, and each shell has to lie between {BVAL_MIN} and {BVAL_MAX} s/mm2. Mutually exclusive with '--bRange'.")
-    group2.add_argument("--smooth", action='store_true', help=argparse.SUPPRESS) #--- "apply Gaussian filter (fwhm = 1.25) to DWI data"
-    group2.add_argument("--dontAdjustBmaskForFW", dest='adjustBmaskForFW', action='store_false', help=argparse.SUPPRESS) #--- "don't correct the brain mask for free-water. By default, the brain mask is set to zero, where free water equals 1 (and hence fwc-FA equals 0)."
-    group2.add_argument("--para", metavar='ANTs-jobs', type=assertPositiveJobs, default=None, help="number of ANTs registration jobs run at once during longitudinal template construction. Derived from the '--threads' budget by default, and capped at the number of timepoints either way. Peak memory scales with it, so '--para 1' is the lowest-memory setting. It has no effect on the results, only on runtime and memory.")
-    group2.add_argument("--threads", metavar='cores', type=threadBudget, default='auto', help="number of physical CPU cores DELTA-SVD may use. Two steps are multi-core: the diffusion tensor / free-water fit, and (for longitudinal input only) the within-subject template construction; TBSS and the remaining steps are single-threaded. Defaults to 'auto', which detects the cores available to the process, honouring an HPC scheduler's allocation and a container CPU limit (e.g. Docker's '--cpus'). It has no effect on the results, only on runtime, so it can be tuned freely.")
-    group2.add_argument("--itkThreads", metavar='threads', type=assertPositiveItkThreads, default=ITK_THREADS_DEFAULT, help=argparse.SUPPRESS) #--- "Expert override for the ITK threads used per ANTs registration job. WARNING: this changes the computed metrics -- ITK sums the registration metric per thread, so a different count sums in a different order. Defaults to 12, the value DELTA-SVD was validated at. Results produced with different values must not be compared or pooled."
-    group2.add_argument("--iterations", type=str, default='30x30x8', help=argparse.SUPPRESS) #--- "Iterations at each resolution level of the pairwise ANTs registrations during template creation. Must be three levels and specified in the format: 'L1xL2xL3'. Defaults to '30x30x8'."
-    group2.add_argument("--numRegistrations", type=assertPositiveRegistrations, default=3, help=argparse.SUPPRESS) #--- "Iterations of the template construction. Each iteration comprises averaging of images and pairwise registrations of each timepoint to the template. Defaults to 3 iterations."
-    group2.add_argument("--qc", type=int, choices=[0,1,2], default=1, help="create (with argument 1; the default) a HTML file (delta-svd_qc.html) for quality checking and create (with argument 2) additionally a subfolder 'delta-svd_qc' with a series of NIfTI images showing skeleton and masks in native space, or (with argument 0) skip creation of both.")
-    group2.add_argument("--debug", action='store_true', help="don't delete temporary folder 'delta-svd_temp', containing intermediate files created during processing.")
-    group2.add_argument("--steps", choices = stepsImplemented, nargs="+", action='extend', help=argparse.SUPPRESS) #--- "choose step(s) to be conducted. By default all steps will be conducted. If the output for preceding steps is missing, an error will be raised. If different masks are provided, step 'tbss_non_fa' and following have to be repeated."
-    group2.add_argument("--reprocess", metavar='csv-file',  type=isCSV, nargs="?", const='overwrite', help='allow reprocessing and overwriting of previously created output. You can, however, keep a previously created results file (default name: delta-svd_results.csv) by specifying here an alternative name for the new one (provide only the base name; the output folder cannot be changed here).') #--- "allow reprocessing of previously conducted steps. Warning: this will delete the previous results for all processing steps or, if '--steps' is used, for the selected (and all following/depending) steps. Deleting the final output table 'delta-svd_results.csv' can however be avoided, by providing here an alternative CSV filename (provide basename only; will be saved into the output folder, see '--dirOutput')"
-    return parser
-
-
 ###########################################################################
-# Pipeline
+# Pipeline (parser and input checks: delta_svd_inputs.py, QC: delta_svd_qc.py)
 
 def pipeline_delta_svd():
 
@@ -1874,148 +793,7 @@ def pipeline_delta_svd():
     args.function_call = shlex.join([basename(sys.argv[0])]+sys.argv[1::])
     print("Running: " + args.function_call,'\n')
 
-    # Check bval, bvec and bmask files. The brain mask may be '.nii.gz' or '.nii',
-    # so it is resolved through isNIfTI(), which probes both (gzip first) and also
-    # completes a path with no extension; bval/bvec are matched verbatim.
-    for attr, ext in zip(['bval','bvec','bmask'], ['.bval','.bvec','_brainmask']):
-        anyExtension = (attr == 'bmask')
-        resolve = (lambda fn: isNIfTI(fn, abort=False)) if anyExtension else (lambda fn: fn if exists(fn) else None)
-        flist = getattr(args,attr)
-        inferred = flist is None
-        if inferred:
-            flist = [strip_nifti_ext(fn) + ext for fn in args.dwi]
-        elif len(flist) != len(args.dwi):
-            if len(flist) == 1:
-                flist = flist * len(args.dwi)
-            else:
-                raise DeltaSvdError(f"The number of files given with option '--{attr}' (n={len(flist)}) "
-                                    f"has to be either one or match the number of DWI images "
-                                    f"(n={len(args.dwi)}). Please refer to '--help'.")
-        for i, fn in enumerate(flist):
-            fnResolved = resolve(per_timepoint_path(fn, args.dwi[i]))
-            if fnResolved is None:
-                raise DeltaSvdError(missing_input_message(attr, fn, args.dwi[i], anyExtension, inferred))
-            flist[i] = fnResolved
-        setattr(args,attr,flist)
-    
-    # Check timepoint labels
-    if args.tp is None:
-        args.tp = ['TP{:02d}'.format(i+1) for i in range(len(args.dwi))] #-- folders for all timepoints
-    if len(args.tp) != len(args.dwi):
-        raise DeltaSvdError(f"The number of timepoint labels given with '--tp' (n={len(args.tp)}) has "
-                            f"to match the number of DWI images (n={len(args.dwi)}).")
-    validate_timepoint_labels(args.tp)
-    duplicates = sorted({tp for tp in args.tp if args.tp.count(tp) > 1})
-    if duplicates:
-        raise DeltaSvdError(f"Timepoint labels given with '--tp' have to be unique. You passed "
-                            f"{', '.join(duplicates)} more than once.")
-    if len(args.dwi) > 1 and 'all' in args.tp:
-        raise DeltaSvdError("'all' is reserved as the label for the rows summarising all timepoints, "
-                            "so it cannot be used as a '--tp' label.")
-
-    # Check exclusion and ROI masks. Both are optional and per timepoint, with
-    # 'NA' skipping one, so a short list is padded rather than rejected.
-    maskLabels = {'Emask': 'exclusion mask', 'Rmask': 'ROI mask in DWI space'}
-    for attr, label in maskLabels.items():
-        masks = getattr(args, attr)
-        if len(masks) > len(args.dwi):
-            raise DeltaSvdError(f"More {label}s were given with '--{attr}' (n={len(masks)}) than there "
-                                f"are timepoints (n={len(args.dwi)}). At most one per timepoint is "
-                                f"allowed; enter 'NA' to skip a timepoint.")
-    for i,_ in enumerate(args.dwi):
-        for attr in maskLabels:
-            masks = getattr(args, attr)
-            if len(masks) <= i:
-                masks.append(None)
-                continue
-            if masks[i] == 'NA':
-                masks[i] = None
-                continue
-            fnResolved = isNIfTI(per_timepoint_path(masks[i], args.dwi[i]), abort=False)
-            if fnResolved is None:
-                raise DeltaSvdError(missing_input_message(
-                    attr, masks[i], args.dwi[i], True, False,
-                    note=" Enter 'NA' instead of a path to skip this timepoint."))
-            # assigned back, so that a name resolved by extension or against the
-            # DWI folder is the one every later step loads
-            masks[i] = fnResolved
-
-    for fn in args.Rmask:
-        if fn is not None:
-            validate_roi_labels(nib.load(fn).get_fdata(), 'ROI mask in DWI space', fn)
-    if args.RmaskMNI is not None:
-        validate_roi_labels(nib.load(args.RmaskMNI).get_fdata(),
-                            'ROI mask in MNI space', args.RmaskMNI)
-
-    # Absolute, so the log shows which file each timepoint really uses: the
-    # same relative name can stand for a different file per timepoint.
-    print(f"\nInput contains N={len(args.dwi)} timepoints")
-    for i in range(len(args.dwi)):
-        print(f'Timepoint {args.tp[i]}:')
-        print(f' DWI   :{os.path.abspath(args.dwi[i])}')
-        print(f' bval  :{os.path.abspath(args.bval[i])}')
-        print(f' bvec  :{os.path.abspath(args.bvec[i])}')
-        print(f' Bmask :{os.path.abspath(args.bmask[i])}')
-        if args.Emask[i]:
-            print(f' Emask :{os.path.abspath(args.Emask[i])}')
-        if args.Rmask[i]:
-            print(f' Rmask :{os.path.abspath(args.Rmask[i])}')
-
-    if args.RmaskMNI is not None:
-        print(f'\nAn additional ROI mask in MNI space (RmaskMNI) was provided:\n {args.RmaskMNI}')
-
-    if args.hemispheres:
-        print('\nHemispheric skeleton analysis will be done as well')
-
-    if args.skeletonMask == SKELETON_MASK_DEFAULT:
-        print(f'\nUsing the default skeleton mask:\n {args.skeletonMask}')
-    else:
-        print(f'\nUsing a non-default skeleton mask provided as input:\n {args.skeletonMask}')
-
-    if args.itkThreads != ITK_THREADS_DEFAULT and len(args.dwi) > 1:
-        print(f'\nWARNING: --itkThreads is set to {args.itkThreads} instead of the validated '
-              f'{ITK_THREADS_DEFAULT}.\n This changes the computed metrics. The results of this run '
-              f'must not be compared\n or pooled with results produced at the default.')
-
-    if args.dirOutput is None:
-        args.dirOutput = os.path.dirname(args.dwi[0])
-    
-    # Copy: 'stepsImplemented' is module-level and backs the '--steps' choices, so
-    # dropping 'qc' from it would erode that list for a later run in the process.
-    stepsAvailable = list(stepsImplemented)
-    if args.qc==0:
-        if args.steps is not None and 'qc' in args.steps:
-            raise DeltaSvdError("You asked for the 'qc' step with '--steps qc' and to skip it with "
-                                "'--qc 0' at the same time. That is contradictory; please drop one "
-                                "of the two.")
-        stepsAvailable.remove('qc')
-    if args.steps is None:
-        args.steps = stepsAvailable
-    else:
-        stepsIdx = [i for i,x in enumerate(stepsAvailable) if x in args.steps]
-        args.steps = [stepsAvailable[i] for i in stepsIdx]
-        print('\nOn request, only the following processing steps will be conducted:')
-        for i,step in enumerate(args.steps): print(f' {i+1}. {step}')
-        if len(stepsIdx)>1 and any(np.diff(stepsIdx)>1):
-            print(' ')
-            raise DeltaSvdError(f"The requested processing steps have to be contiguous, and these "
-                                f"are not. Each step consumes the output of the one before it.\n "
-                                f"The available steps, in order, are: {', '.join(stepsAvailable)}")
-        if 'extract' not in args.steps and not args.debug:
-            print("NOTE: Given that the final 'extract' step is not selected, we assume that you want to keep intermediate/temporary output and switch on the option '--debug' for you!")
-            args.debug = True
-
-    # After the cheaper checks, before any output is touched: a wrong shape would
-    # crash hours in, a wrong affine silently misalign the skeleton.
-    for i, dwi in enumerate(args.dwi):
-        check_dwi_grid(args.bmask[i], 'brain mask', 'bmask', dwi)
-        for attr, label in maskLabels.items():
-            fn = getattr(args, attr)[i]
-            if fn is not None:
-                check_dwi_grid(fn, label, attr, dwi)
-    check_mni_grid(args.skeletonMask, 'skeleton mask')
-    if args.RmaskMNI is not None:
-        check_mni_grid(args.RmaskMNI, 'ROI mask in MNI space')
+    stepsAvailable = resolve_inputs(args)
 
     # Carried on 'args' for the QC report and manifest: storage order affects
     # the results. The masks share the DWI grid.
@@ -2327,12 +1105,9 @@ def pipeline_delta_svd():
 
 
 if __name__ == "__main__":
-    # Only DeltaSvdError is caught, and only here rather than inside
-    # pipeline_delta_svd(): a problem with the input is reported as one message,
-    # the way argparse reports its own, while anything else keeps its traceback
-    # -- an unexpected exception is a fault in the pipeline, and the traceback is
-    # what makes it reportable. Catching it here also leaves the pipeline
-    # importable and testable as a plain function.
+    # Only DeltaSvdError is caught, and only here: an input problem is reported as
+    # one message like argparse's, while a pipeline fault keeps its traceback.
+    # pipeline_delta_svd() stays testable as a plain function.
     try:
         pipeline_delta_svd()
     except DeltaSvdError as err:

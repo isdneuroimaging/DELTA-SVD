@@ -59,6 +59,15 @@ Rules for the runs being compared:
 ### Repository layout
 
 - [`container/`](container/) — the container image: `Dockerfile`, `build.sh`, the pinned conda environment, and the pipeline scripts under `container/scripts/`.
+  - `delta-svd.py` — the start-up sequence (environment and thread pinning, CPU check), the method (tensor and free-water fit, template, TBSS, mask integration, statistics) and the step orchestration.
+  - `delta_svd_runtime.py` — image environment, core detection and the CPU check that the start-up sequence calls.
+  - `delta_svd_inputs.py` — command-line parser, path resolution and input validation.
+  - `delta_svd_gradients.py` — bval/bvec reading, direction checks and b-value selection.
+  - `delta_svd_qc.py` — deprojection to native space and preparation of the QC report, next to `create_qc_image.py` and `create_html_with_png.py`.
+  - `delta_svd_common.py` — helpers that two or more of the above need.
+  - `delta_svd_constants.py`, `delta_svd_version.py` — shared defaults and the version.
+
+  Two rules keep this split safe. Code that can move the numbers lives in `delta-svd.py`, `delta_svd_runtime.py`, `delta_svd_gradients.py` and `delta_svd_common.py`; a change to `delta_svd_inputs.py` or `delta_svd_qc.py` must not be able to. The metric-affecting parser defaults that `delta_svd_inputs.py` sets therefore take their values from `delta_svd_constants.py`. `delta_svd_runtime.py` (like `delta_svd_constants.py`) imports the standard library and `delta_svd_constants` only, because `delta-svd.py` imports it before pinning the threads and the BLAS kernel, which must precede the first numpy import; `tests/test_module_layout.py` enforces this.
 - [`tests/`](tests/) — pytest unit tests for those scripts.
 - [`tools/`](tools/) — maintainer utilities that are not part of the image, such as `compare_results.py` above.
 - [`docs/`](docs/) — documentation sources (see below).
@@ -191,7 +200,7 @@ You can also publish it from the Releases page on GitHub.
 
 ### Tests
 
-The unit tests exercise the Python scripts in `container/scripts/` with pytest. They cover script logic (argument handling and validation, input path resolution, mask merging, metric naming, results-table assembly, and the QC report). PR and `main` CI test the container's pinned Python stack (Python 3.11, numpy 1.24, dipy 1.5) using `tests/run-in-locked-env.sh`. Release CI runs the same suite inside the actual staged image digest. Unpinned PyPI dependencies are only a convenience for local development, not a PR or release acceptance check.
+The unit tests exercise the Python scripts in `container/scripts/` with pytest. The test files follow the modules: `test_runtime.py`, `test_inputs.py`, `test_gradients.py`, `test_qc_deprojection.py` and `test_common.py` each address one `delta_svd_*.py` module, `test_delta_svd.py` covers the method in `delta-svd.py`, and `test_pipeline.py` holds the tests that run `pipeline_delta_svd()` as a whole. A test that patches a name must target the module whose function reads it. They cover script logic (argument handling and validation, input path resolution, mask merging, metric naming, results-table assembly, and the QC report). PR and `main` CI test the container's pinned Python stack (Python 3.11, numpy 1.24, dipy 1.5) using `tests/run-in-locked-env.sh`. Release CI runs the same suite inside the actual staged image digest. Unpinned PyPI dependencies are only a convenience for local development, not a PR or release acceptance check.
 
 Two separate things need pinning, and they cover different risks:
 
